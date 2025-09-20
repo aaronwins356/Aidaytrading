@@ -48,12 +48,21 @@ from desk.config import DESK_ROOT
 class Learner:
     """Lightweight model registry + inference helper."""
 
-    def __init__(self, model_dir: str | Path | None = None):
+    def __init__(
+        self,
+        model_dir: str | Path | None = None,
+        *,
+        target_win_rate: float = 0.55,
+        min_samples: int = 50,
+    ) -> None:
         model_dir = Path(model_dir or DESK_ROOT / "models")
         model_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir = model_dir
         self._observations_path = self.model_dir / "observations.csv"
         self._history_cache: Dict[str, Path] = {}
+        self.target_win_rate = max(0.0, min(1.0, float(target_win_rate)))
+        self.min_samples = max(20, int(min_samples))
+        self._threshold_cache: Dict[str, float] = {}
 
     def retrain_worker(self, worker, trade_history: Optional[pd.DataFrame] = None) -> None:
         """
@@ -85,18 +94,41 @@ class Learner:
 
         labels = (history["pnl"] > 0).astype(int)
 
-        if len(features) < 20:
-            print(f"[LEARNER] Not enough data for {worker.name}, skipping retrain.")
+        if len(features) < self.min_samples:
+            print(
+                f"[LEARNER] Not enough data for {worker.name}, skipping retrain."
+            )
             return
 
+        if np is None:
+            print(
+                f"[LEARNER] numpy unavailable, cannot retrain {worker.name} right now."
+            )
+            return
+
+        feature_matrix = features.values
+        label_array = labels.values
+
         model = RandomForestClassifier(n_estimators=200, random_state=42)
-        model.fit(features.values, labels.values)
+        model.fit(feature_matrix, label_array)
 
         path = self.model_dir / f"{worker.name}.pkl"
         joblib.dump(model, path)
 
         feature_path = self.model_dir / f"{worker.name}_features.json"
         feature_path.write_text(json.dumps(list(features.columns)))
+
+        probabilities = model.predict_proba(feature_matrix)[:, 1]
+        threshold = self._calibrate_threshold(probabilities, label_array)
+        if threshold is not None:
+            self._threshold_cache[worker.name] = threshold
+            self._write_threshold(worker.name, threshold)
+            print(
+                f"[LEARNER] Calibrated {worker.name} threshold to {threshold:.4f}"
+            )
+        else:
+            self._threshold_cache.pop(worker.name, None)
+            self._write_threshold(worker.name, None)
 
         print(f"[LEARNER] Retrained model for {worker.name}, saved to {path}")
 
@@ -144,6 +176,66 @@ class Learner:
         except Exception as exc:  # pragma: no cover - best effort logging
             print(f"[LEARNER] Failed to persist observation: {exc}")
 
+
+    def _threshold_path(self, worker_name: str) -> Path:
+        return self.model_dir / f"{worker_name}_threshold.json"
+
+    def _write_threshold(self, worker_name: str, value: float | None) -> None:
+        path = self._threshold_path(worker_name)
+        if value is None:
+            if path.exists():
+                path.unlink()
+            return
+        payload = {
+            "threshold": float(value),
+            "target": self.target_win_rate,
+        }
+        path.write_text(json.dumps(payload))
+
+    def _load_threshold(self, worker_name: str) -> Optional[float]:
+        if worker_name in self._threshold_cache:
+            return self._threshold_cache[worker_name]
+        path = self._threshold_path(worker_name)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            return None
+        threshold = payload.get("threshold")
+        if threshold is None:
+            return None
+        try:
+            value = float(threshold)
+        except (TypeError, ValueError):
+            return None
+        self._threshold_cache[worker_name] = value
+        return value
+
+    def _calibrate_threshold(self, probabilities, labels) -> Optional[float]:
+        if np is None or probabilities is None:
+            return None
+        try:
+            probs = np.asarray(probabilities, dtype=float)
+            lbls = np.asarray(labels, dtype=float)
+        except Exception:
+            return None
+        if probs.size == 0:
+            return None
+        order = np.argsort(probs)[::-1]
+        sorted_probs = probs[order]
+        sorted_labels = lbls[order]
+        cumulative_wins = np.cumsum(sorted_labels)
+        counts = np.arange(1, len(sorted_probs) + 1)
+        win_rates = np.divide(
+            cumulative_wins, counts, out=np.zeros_like(cumulative_wins), where=counts != 0
+        )
+        mask = win_rates >= self.target_win_rate if self.target_win_rate > 0 else np.array([])
+        if mask.size and mask.any():
+            idx = int(np.argmax(mask))
+            return float(sorted_probs[idx])
+        return float(np.median(sorted_probs))
+
     def predict_edge(self, worker, features: Dict[str, float]) -> float:
         """
         Predict trade edge using worker's ML model.
@@ -173,9 +265,16 @@ class Learner:
         if not vector:
             return 0.5
 
+        if np is None:
+            return 0.5
+
         x = np.array([vector])
-        prob = model.predict_proba(x)[0, 1]  # probability of win
-        return prob
+        prob = float(model.predict_proba(x)[0, 1])  # probability of win
+        threshold = self._load_threshold(worker.name)
+        if threshold is None:
+            return prob
+        adjusted = 0.5 + (prob - threshold)
+        return float(max(0.0, min(1.0, adjusted)))
 
     # ------------------------------------------------------------------
     def load_trade_history(self, worker_name: str) -> pd.DataFrame:

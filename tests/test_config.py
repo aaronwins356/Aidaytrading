@@ -22,6 +22,7 @@ risk:
     assert loaded["portfolio"]["cooldown_minutes"] == config._DEFAULT_CONFIG["portfolio"][
         "cooldown_minutes"
     ]
+    assert loaded["ml"]["target_win_rate"] == config._DEFAULT_CONFIG["ml"]["target_win_rate"]
 
 
 def test_env_overrides_take_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

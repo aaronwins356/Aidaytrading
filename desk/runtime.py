@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 from desk.config import CONFIG_PATH, load_config
 from desk.services import (
-    BrokerCCXT,
+    KrakenBroker,
     EventLogger,
     ExecutionEngine,
     FeedHandler,
@@ -30,14 +30,18 @@ class RuntimeState:
 
 
 class TradingRuntime:
-    """Coordinates services to run the live/paper trading loop."""
+    """Coordinates services to run the live Kraken trading loop."""
 
     def __init__(self, config_path: Optional[str] = None) -> None:
         self.config_path = config_path or CONFIG_PATH
         self.config = load_config(self.config_path)
         self.state = RuntimeState()
         self.logger = EventLogger()
-        self.learner = Learner()
+        ml_cfg = self.config.get("ml", {})
+        self.learner = Learner(
+            target_win_rate=float(ml_cfg.get("target_win_rate", 0.58)),
+            min_samples=int(ml_cfg.get("min_samples", 120)),
+        )
         telemetry_cfg = self.config.get("telemetry", {})
         self.telemetry = TelemetryClient(
             telemetry_cfg.get("endpoint"),
@@ -49,89 +53,40 @@ class TradingRuntime:
         feed_cfg = self.config.get("feed", {})
         risk_cfg = self.config.get("risk", {})
         portfolio_cfg = self.config.get("portfolio", {})
-        paper_settings = settings.get("paper_params") or {}
-        paper_params = {
-            "fee_bps": float(
-                paper_settings.get("fee_bps", settings.get("paper_fee_bps", 10.0))
-            ),
-            "slippage_bps": float(
-                paper_settings.get(
-                    "slippage_bps", settings.get("paper_slippage_bps", 5.0)
-                )
-            ),
-            "partial_fill_probability": float(
-                paper_settings.get(
-                    "partial_fill_probability",
-                    settings.get("paper_partial_fill_probability", 0.1),
-                )
-            ),
-            "min_fill_ratio": float(
-                paper_settings.get(
-                    "min_fill_ratio", settings.get("paper_min_fill_ratio", 0.6)
-                )
-            ),
-            "funding_rate_hourly": float(
-                paper_settings.get(
-                    "funding_rate_hourly",
-                    settings.get("paper_funding_rate_hourly", 0.0),
-                )
-            ),
-        }
-        try:
-            starting_balance = float(
-                paper_settings.get("starting_balance", settings.get("balance", 1_000.0))
+
+        mode = str(settings.get("mode", "live")).strip().lower()
+        if mode != "live":
+            raise ValueError(
+                "TradingRuntime is configured for live Kraken trading only."
             )
-        except (TypeError, ValueError):
-            starting_balance = 1_000.0
+
         feed_workers = settings.get("feed_workers")
         try:
             feed_workers = int(feed_workers) if feed_workers else None
         except (TypeError, ValueError):
             feed_workers = None
 
-        default_exchange = str(settings.get("default_exchange", settings.get("exchange", "kraken")))
-        primary_exchange = str(settings.get("exchange", default_exchange))
-        fallback_exchanges = settings.get("fallback_exchanges") or []
-        fallback_exchanges = [
-            str(name)
-            for name in fallback_exchanges
-            if str(name or "").strip()
-        ]
-        if default_exchange and default_exchange not in fallback_exchanges and default_exchange != primary_exchange:
-            fallback_exchanges = list(fallback_exchanges) + [default_exchange]
+        api_key = str(settings.get("api_key", ""))
+        api_secret = str(settings.get("api_secret", ""))
 
-        self.broker = BrokerCCXT(
-            mode=settings.get("mode", "paper"),
-            exchange_name=primary_exchange,
-            api_key=settings.get("api_key", ""),
-            api_secret=settings.get("api_secret", ""),
-            starting_balance=starting_balance,
+        request_timeout = float(settings.get("request_timeout", 30.0))
+        session_config = settings.get("kraken_session") or {}
+        if not isinstance(session_config, dict):
+            session_config = {}
+
+        self.broker = KrakenBroker(
+            api_key=api_key,
+            api_secret=api_secret,
             telemetry=self.telemetry,
-            paper_params=paper_params,
             event_logger=self.logger,
-            fallback_exchanges=fallback_exchanges,
+            request_timeout=request_timeout,
+            session_config=session_config,
         )
-        feed_exchange = str(feed_cfg.get("exchange", primary_exchange))
-        feed_fallbacks = feed_cfg.get("fallback_exchanges")
-        if not feed_fallbacks:
-            feed_fallbacks = fallback_exchanges
-        else:
-            feed_fallbacks = [
-                str(name)
-                for name in feed_fallbacks
-                if str(name or "").strip()
-            ]
         data_seed_cfg = dict(feed_cfg.get("data_seeding") or {})
-        paper_seed_candles = paper_settings.get("seed_candles")
-        paper_seed_timeframe = paper_settings.get("timeframe")
-        if paper_seed_candles is not None and "seed_length" not in data_seed_cfg:
-            data_seed_cfg["seed_length"] = paper_seed_candles
-        if paper_seed_timeframe and "seed_timeframe" not in data_seed_cfg:
-            data_seed_cfg["seed_timeframe"] = paper_seed_timeframe
         feed_timeframe = str(
             feed_cfg.get(
                 "timeframe",
-                paper_seed_timeframe or settings.get("timeframe", "1m"),
+                settings.get("timeframe", "1m"),
             )
         )
         feed_symbols_cfg = feed_cfg.get("symbols")
@@ -147,15 +102,15 @@ class TradingRuntime:
             feed_symbols = ["BTC/USD"]
 
         self.feed_updater = FeedUpdater(
-            exchange=feed_exchange,
+            exchange="kraken",
             symbols=feed_symbols,
             timeframe=feed_timeframe,
-            mode=str(settings.get("mode", "paper")),
-            api_key=str(settings.get("api_key", "")),
-            api_secret=str(settings.get("api_secret", "")),
+            mode="live",
+            api_key=api_key,
+            api_secret=api_secret,
             interval_seconds=float(settings.get("loop_delay", 60)),
             logger=self.logger,
-            fallback_exchanges=feed_fallbacks,
+            fallback_exchanges=[],
             seed_config=data_seed_cfg,
         )
         self._services_started = False
@@ -399,10 +354,7 @@ class TradingRuntime:
                             history = self.learner.load_trade_history(worker.name)
                             self.learner.retrain_worker(worker, history)
 
-            balance = self.broker.balance()
-            equity = 0.0
-            if isinstance(balance, dict):
-                equity = float(balance.get("USD", balance.get("total", 0.0)) or 0.0)
+            equity = float(self.broker.account_equity())
             self.logger.write_equity(equity)
             self.telemetry.record_equity(equity)
             self.risk_engine.check_account(equity)

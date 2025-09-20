@@ -1,192 +1,129 @@
 settings:
-  mode: paper
+  mode: live
   exchange: kraken
-  default_exchange: kraken
-  fallback_exchanges:
-    - binance
-    - coinbasepro
   api_key: ""
   api_secret: ""
-  balance: 10000
-  loop_delay: 60
-  warmup_candles: 10
+  balance: 500
+  loop_delay: 45
+  warmup_candles: 20
   timeframe: 1m
-  lookback: 250
-  feed_workers: 6
-  paper_params:
-    starting_balance: 10000
-    seed_candles: 1000
-    timeframe: 1m
-    fee_bps: 10
-    slippage_bps: 8
-    partial_fill_probability: 0.15
-    min_fill_ratio: 0.5
-    funding_rate_hourly: 0.0002
+  lookback: 300
+  feed_workers: 4
+  request_timeout: 30
+  kraken_session: {}
 
 feed:
   exchange: kraken
-  fallback_exchanges:
-    - binance
-    - kucoin
-  data_seeding:
-    warm_candles: 1000
-    seed_length: 1000
-    seed_timeframe: 1m
-    max_stale_seconds: 900
-    blocked_retry_seconds: 900
-    synthetic_volatility: 0.0125
-    synthetic_volume_mean: 25000
-    synthetic_volume_std: 5000
-
   symbols:
     - BTC/USD
     - ETH/USD
     - SOL/USD
-    - XRP/USD
   timeframe: 1m
+  data_seeding:
+    seed_length: 600
+    max_stale_seconds: 600
 
 risk:
-  fixed_risk_usd: 120
+  fixed_risk_usd: 40
   rr_ratio: 2.0
   stop_loss_pct: 0.02
-  max_hold_minutes: 15
+  max_hold_minutes: 20
   daily_dd: null
   weekly_dd: null
-  max_concurrent: 8
-  halt_on_dd: null
-  retrain_every: 10
-  ml_weight: 0.5
-  trapdoor_pct: 0.02
+  max_concurrent: 5
+  halt_on_dd: true
+  retrain_every: 15
+  ml_weight: 0.6
+  trapdoor_pct: 0.015
   learning_risk:
-    initial_multiplier: 1.8
-    floor_multiplier: 0.9
-    tighten_trades: 150
+    initial_multiplier: 1.5
+    floor_multiplier: 0.85
+    tighten_trades: 100
     target_win_rate: 0.6
+
+portfolio:
+  min_weight: 0.05
+  max_weight: 0.3
+  epsilon: 0.1
+  cooldown_minutes: 10
 
 telemetry:
   endpoint: ""
   flush_interval: 1.0
   max_backoff: 30.0
 
-portfolio:
-  min_weight: 0.05
-  max_weight: 0.25
-  epsilon: 0.1
-  cooldown_minutes: 15
+ml:
+  target_win_rate: 0.58
+  min_samples: 150
 
 workers:
-  - name: BTC SMA
+  - name: BTC Momentum
     symbol: BTC/USD
-    strategy: sma_crossover
-    allocation: 0.10
-    params:
-      fast_length: 20
-      slow_length: 50
-      risk_per_trade: 0.40
-    risk_profile:
-      initial_multiplier: 1.8
-      floor_multiplier: 0.9
-      tighten_trades: 150
-      target_win_rate: 0.6
-
-  - name: BTC RSI
-    symbol: BTC/USD
-    strategy: rsi_mean_reversion
-    allocation: 0.10
-    params:
-      length: 14         # was rsi_length
-      low: 30            # was oversold
-      high: 70           # was overbought
-      risk_per_trade: 0.40
-    risk_profile:
-      initial_multiplier: 1.8
-      floor_multiplier: 0.9
-      tighten_trades: 150
-      target_win_rate: 0.6
-
-  - name: ETH EMA
-    symbol: ETH/USD
-    strategy: ema_breakout
-    allocation: 0.10
-    params:
-      length: 50         # was ema_length
-      risk_per_trade: 0.40
-    risk_profile:
-      initial_multiplier: 1.8
-      floor_multiplier: 0.9
-      tighten_trades: 150
-      target_win_rate: 0.6
-
-  - name: ETH MACD
-    symbol: ETH/USD
-    strategy: macd_trend
-    allocation: 0.10
-    params:
-      fast: 12           # was fast_length
-      slow: 26           # was slow_length
-      signal: 9          # was signal_length
-      risk_per_trade: 0.40
-    risk_profile:
-      initial_multiplier: 1.8
-      floor_multiplier: 0.9
-      tighten_trades: 150
-      target_win_rate: 0.6
-
-  - name: SOL Momentum
-    symbol: SOL/USD
     strategy: momentum
-    allocation: 0.10
-    params:
-      length: 14         # was lookback
-      threshold: 0.7
-      risk_per_trade: 0.40
-    risk_profile:
-      initial_multiplier: 1.8
-      floor_multiplier: 0.9
-      tighten_trades: 150
-      target_win_rate: 0.6
-
-  - name: SOL ATR
-    symbol: SOL/USD
-    strategy: atr_trailing_stop
-    allocation: 0.10
-    params:
-      atr_length: 14
-      atr_mult: 3        # was multiplier
-      risk_per_trade: 0.40
-    risk_profile:
-      initial_multiplier: 1.8
-      floor_multiplier: 0.9
-      tighten_trades: 150
-      target_win_rate: 0.6
-
-  - name: XRP Bollinger
-    symbol: XRP/USD
-    strategy: bollinger_band
-    allocation: 0.10
+    allocation: 0.20
     params:
       length: 20
-      mult: 2            # was std_dev
-      risk_per_trade: 0.40
+      threshold: 0.65
+      risk_per_trade: 0.35
     risk_profile:
-      initial_multiplier: 1.8
-      floor_multiplier: 0.9
-      tighten_trades: 150
+      initial_multiplier: 1.5
+      floor_multiplier: 0.85
+      tighten_trades: 100
       target_win_rate: 0.6
 
-  - name: XRP Stochastic
-    symbol: XRP/USD
-    strategy: stochastic_oscillator
-    allocation: 0.10
+  - name: BTC Mean Reversion
+    symbol: BTC/USD
+    strategy: rsi_mean_reversion
+    allocation: 0.20
     params:
-      k: 14              # was k_length
-      d: 3               # was d_length
-      low: 20            # was oversold
-      high: 80           # was overbought
-      risk_per_trade: 0.40
+      length: 14
+      low: 30
+      high: 70
+      risk_per_trade: 0.35
     risk_profile:
-      initial_multiplier: 1.8
-      floor_multiplier: 0.9
-      tighten_trades: 150
+      initial_multiplier: 1.5
+      floor_multiplier: 0.85
+      tighten_trades: 100
       target_win_rate: 0.6
 
+  - name: ETH Breakout
+    symbol: ETH/USD
+    strategy: ema_breakout
+    allocation: 0.20
+    params:
+      length: 50
+      risk_per_trade: 0.35
+    risk_profile:
+      initial_multiplier: 1.5
+      floor_multiplier: 0.85
+      tighten_trades: 100
+      target_win_rate: 0.6
+
+  - name: SOL Trend
+    symbol: SOL/USD
+    strategy: macd_trend
+    allocation: 0.20
+    params:
+      fast: 12
+      slow: 26
+      signal: 9
+      risk_per_trade: 0.35
+    risk_profile:
+      initial_multiplier: 1.5
+      floor_multiplier: 0.85
+      tighten_trades: 100
+      target_win_rate: 0.6
+
+  - name: ETH Volatility Fade
+    symbol: ETH/USD
+    strategy: bollinger_band
+    allocation: 0.20
+    params:
+      length: 20
+      mult: 2.5
+      risk_per_trade: 0.35
+    risk_profile:
+      initial_multiplier: 1.5
+      floor_multiplier: 0.85
+      tighten_trades: 100
+      target_win_rate: 0.6
