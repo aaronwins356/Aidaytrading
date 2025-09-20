@@ -87,6 +87,88 @@ class Worker:
             "pnl": 0.0,
         }
         self.allocation = float(params.get("allocation", params.get("weight", 0.1)))
+        self.risk_profile: Dict[str, Any] = dict(params.get("risk_profile", {}))
+
+    # ------------------------------------------------------------------
+    def _learning_risk_multiplier(self) -> float:
+        profile = self.risk_profile or {}
+        initial = float(profile.get("initial_multiplier", 1.0) or 1.0)
+        floor = float(profile.get("floor_multiplier", initial) or initial)
+        tighten_trades = int(profile.get("tighten_trades", 0) or 0)
+        target_win_rate = float(profile.get("target_win_rate", 0.0) or 0.0)
+
+        # Ensure sane ordering between floor and ceiling multipliers.
+        if initial <= 0:
+            initial = 1.0
+        floor = max(0.0, min(floor, initial))
+
+        trades = max(int(self.state.get("trades", 0) or 0), 0)
+        progress = 0.0
+        if tighten_trades > 0:
+            progress = min(1.0, trades / float(tighten_trades))
+
+        wins = int(self.state.get("wins", 0) or 0)
+        losses = int(self.state.get("losses", 0) or 0)
+        total = wins + losses
+        if total > 0 and target_win_rate > 0:
+            win_rate = wins / float(total)
+            if win_rate >= target_win_rate:
+                bonus = (win_rate - target_win_rate) / max(1.0 - target_win_rate, 1e-6)
+                progress = min(1.0, progress + bonus)
+
+        multiplier = initial - (initial - floor) * progress
+        return max(floor, round(multiplier, 6))
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _apply_learning_risk(
+        side: str,
+        price: float,
+        plan: Dict[str, Any],
+        multiplier: float,
+    ) -> Dict[str, Any]:
+        if not plan:
+            return {}
+
+        scaled: Dict[str, Any] = dict(plan)
+        multiplier = max(multiplier, 0.1)
+
+        def _scale_level(level: Any, *, is_stop: bool) -> Optional[float]:
+            if not _is_number(level):
+                return None
+            value = float(level)
+            if is_stop:
+                if side == "BUY":
+                    distance = price - value
+                    if distance <= 0:
+                        return value
+                    return max(price - distance * multiplier, 0.0)
+                else:
+                    distance = value - price
+                    if distance <= 0:
+                        return value
+                    return price + distance * multiplier
+            else:
+                if side == "BUY":
+                    distance = value - price
+                    if distance <= 0:
+                        return value
+                    return price + distance * multiplier
+                else:
+                    distance = price - value
+                    if distance <= 0:
+                        return value
+                    return price - distance * multiplier
+
+        stop_loss = _scale_level(plan.get("stop_loss"), is_stop=True)
+        if stop_loss is not None:
+            scaled["stop_loss"] = stop_loss
+
+        take_profit = _scale_level(plan.get("take_profit"), is_stop=False)
+        if take_profit is not None:
+            scaled["take_profit"] = take_profit
+
+        return scaled
 
     # ------------------------------------------------------------------
     def _load_strategy(self):
@@ -197,14 +279,18 @@ class Worker:
         except Exception:
             trade_plan = {}
 
+        risk_multiplier = self._learning_risk_multiplier()
+        adaptive_risk_budget = risk_budget * risk_multiplier
+        scaled_plan = self._apply_learning_risk(side, price, trade_plan, risk_multiplier)
+
         qty = self.compute_quantity(
             price,
-            risk_budget,
-            stop_loss=trade_plan.get("stop_loss"),
+            adaptive_risk_budget,
+            stop_loss=scaled_plan.get("stop_loss"),
             side=side,
         )
 
-        plan_metadata = trade_plan.get("metadata")
+        plan_metadata = scaled_plan.get("metadata")
         if isinstance(plan_metadata, dict):
             metadata_dict = {str(k): float(v) for k, v in plan_metadata.items() if _is_number(v)}
         else:
@@ -214,14 +300,15 @@ class Worker:
         enriched_features["ml_edge"] = ml_score
         enriched_features["combined_score"] = score
         enriched_features["proposed_qty"] = qty
-        enriched_features["risk_budget"] = risk_budget
+        enriched_features["risk_budget"] = adaptive_risk_budget
+        enriched_features["learning_risk_multiplier"] = risk_multiplier
         enriched_features["side"] = 1.0 if side == "BUY" else -1.0
-        if "stop_loss" in trade_plan:
-            enriched_features["plan_stop_loss"] = float(trade_plan.get("stop_loss", 0.0) or 0.0)
-        if "take_profit" in trade_plan:
-            enriched_features["plan_take_profit"] = float(trade_plan.get("take_profit", 0.0) or 0.0)
-        if "max_hold_minutes" in trade_plan:
-            enriched_features["plan_max_hold_minutes"] = float(trade_plan.get("max_hold_minutes", 0.0) or 0.0)
+        if "stop_loss" in scaled_plan:
+            enriched_features["plan_stop_loss"] = float(scaled_plan.get("stop_loss", 0.0) or 0.0)
+        if "take_profit" in scaled_plan:
+            enriched_features["plan_take_profit"] = float(scaled_plan.get("take_profit", 0.0) or 0.0)
+        if "max_hold_minutes" in scaled_plan:
+            enriched_features["plan_max_hold_minutes"] = float(scaled_plan.get("max_hold_minutes", 0.0) or 0.0)
         for key, value in metadata_dict.items():
             enriched_features[f"plan_meta_{key}"] = value
 
@@ -235,9 +322,9 @@ class Worker:
             vetoes=vetoes,
             features=enriched_features,
             ml_score=ml_score,
-            stop_loss=trade_plan.get("stop_loss"),
-            take_profit=trade_plan.get("take_profit"),
-            max_hold_minutes=trade_plan.get("max_hold_minutes"),
+            stop_loss=scaled_plan.get("stop_loss"),
+            take_profit=scaled_plan.get("take_profit"),
+            max_hold_minutes=scaled_plan.get("max_hold_minutes"),
             plan_metadata=metadata_dict,
         )
 
