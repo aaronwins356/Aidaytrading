@@ -349,7 +349,7 @@ class ReportingConfig(BaseModel):
 
 
 class DeskConfig(BaseModel):
-    mode: str = Field("Paper", pattern=r"^(Paper|Live|Both)$")
+    mode: str = Field("Paper")
     base_currency: str = "USDT"
     symbols: List[str] = Field(default_factory=lambda: SYMBOLS)
     workers: Dict[str, WorkerConfig] = Field(default_factory=dict)
@@ -357,6 +357,29 @@ class DeskConfig(BaseModel):
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
     kraken_api_key: str = ""
     kraken_api_secret: str = ""
+
+    if field_validator:  # pragma: no branch - handled by import guard above
+
+        @field_validator("mode")
+        @classmethod
+        def _validate_mode(cls, value: str) -> str:
+            allowed = {"Paper", "Live", "Both"}
+            if value not in allowed:
+                raise ValueError(
+                    "mode must match pattern ^(Paper|Live|Both)$"
+                )
+            return value
+
+    else:  # pragma: no cover - exercised under pydantic v1
+
+        @validator("mode")
+        def _validate_mode(cls, value: str) -> str:
+            allowed = {"Paper", "Live", "Both"}
+            if value not in allowed:
+                raise ValueError(
+                    "mode must match pattern ^(Paper|Live|Both)$"
+                )
+            return value
 
 
 def _default_config() -> DeskConfig:
