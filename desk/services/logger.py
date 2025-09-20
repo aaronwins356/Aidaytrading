@@ -118,3 +118,12 @@ class EventLogger:
                 (float(time.time()), float(equity)),
             )
             self.conn.commit()
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+
+        with self.lock:
+            try:
+                self.conn.close()
+            except Exception:
+                pass

@@ -106,6 +106,26 @@ class TradingRuntime:
         self.loop_delay = float(settings.get("loop_delay", 60))
         self.warmup = int(settings.get("warmup_candles", 10))
 
+    def _shutdown(self) -> None:
+        """Flush and close long-lived resources."""
+
+        try:
+            self.executor.close()
+        except Exception:
+            pass
+        try:
+            self.logger.close()
+        except Exception:
+            pass
+        try:
+            self.telemetry.close()
+        except Exception:
+            pass
+        try:
+            self.broker.close()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     def _load_workers(self) -> List[Worker]:
         workers = []
@@ -147,6 +167,7 @@ class TradingRuntime:
     def run(self) -> None:
         if not self.workers:
             print("[RUNTIME] No workers configured. Exiting.")
+            self._shutdown()
             return
 
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -280,5 +301,5 @@ class TradingRuntime:
             time.sleep(self.loop_delay)
 
         print("[RUNTIME] Shutdown complete.")
-        self.telemetry.close()
+        self._shutdown()
 
