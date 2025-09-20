@@ -167,12 +167,16 @@ class Learner:
                 continue
 
         try:
-            if self._observations_path.exists():
-                existing = pd.read_csv(self._observations_path)
-                updated = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
-            else:
-                updated = pd.DataFrame([row])
-            updated.to_csv(self._observations_path, index=False)
+            if pd is None:
+                return
+            frame = pd.DataFrame([row])
+            path = self._observations_path
+            frame.to_csv(
+                path,
+                index=False,
+                mode="a",
+                header=not path.exists(),
+            )
         except Exception as exc:  # pragma: no cover - best effort logging
             print(f"[LEARNER] Failed to persist observation: {exc}")
 
