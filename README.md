@@ -56,10 +56,9 @@ requirements.txt         # Python dependencies
 1. **Clone & create a virtual environment**
 
    ```bash
-   git clone <your-repo-url>
-   cd Aidaytrading
-   python3.11 -m venv .venv
-   source .venv/bin/activate
+   cd AI Trader
+   python -m venv .venv
+   .\.venv\Scripts\Activate
    python -m pip install --upgrade pip
    pip install -r requirements.txt
    ```
