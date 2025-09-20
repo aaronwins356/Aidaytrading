@@ -3,12 +3,14 @@
 __all__ = [
     "BrokerCCXT",
     "ExecutionEngine",
+    "PositionStore",
     "OpenTrade",
     "FeedHandler",
     "Learner",
     "EventLogger",
     "PortfolioManager",
     "RiskEngine",
+    "TelemetryClient",
     "Intent",
     "VetoResult",
     "Worker",
@@ -24,6 +26,10 @@ def __getattr__(name: str):  # pragma: no cover - import hook
         from .execution import ExecutionEngine
 
         return ExecutionEngine
+    if name == "PositionStore":
+        from .execution import PositionStore
+
+        return PositionStore
     if name == "OpenTrade":
         from .execution import OpenTrade
 
@@ -48,6 +54,10 @@ def __getattr__(name: str):  # pragma: no cover - import hook
         from .risk import RiskEngine
 
         return RiskEngine
+    if name == "TelemetryClient":
+        from .telemetry import TelemetryClient
+
+        return TelemetryClient
     if name == "Intent":
         from .worker import Intent
 

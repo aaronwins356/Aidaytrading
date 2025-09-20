@@ -34,6 +34,8 @@ def test_paper_market_order_updates_balance(monkeypatch):
     broker = broker_module.BrokerCCXT(mode="paper", exchange_name="kraken", starting_balance=1000)
     trade = broker.market_order("BTC/USDT", "buy", 1)
     assert trade is not None
+    assert "fee" in trade
+    assert trade["qty"] <= 1
     assert broker.balance()["USD"] < 1000
     assert any(entry["operation"] == "market_order" for entry in broker.latency_log)
 

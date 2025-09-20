@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import random
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -23,6 +24,14 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in tests
 
 from desk.config import DESK_ROOT
 
+try:  # pragma: no cover - optional import guard
+    from typing import TYPE_CHECKING
+except ImportError:  # pragma: no cover
+    TYPE_CHECKING = False
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from desk.services.telemetry import TelemetryClient
+
 
 class BrokerCCXT:
     """Paper/live execution wrapper with simple balance persistence."""
@@ -35,6 +44,9 @@ class BrokerCCXT:
         api_secret: str = "",
         starting_balance: float = 1_000.0,
         db_path: str | Path | None = None,
+        *,
+        telemetry: Optional["TelemetryClient"] = None,
+        paper_params: Optional[Dict[str, float]] = None,
     ) -> None:
         self.mode = mode
         self.exchange_name = exchange_name
@@ -50,6 +62,17 @@ class BrokerCCXT:
         self.db_path = Path(db_path or DESK_ROOT / "logs" / "balances.db")
         self._init_db()
         self._latency_log: list[Dict[str, float]] = []
+        self.telemetry = telemetry
+        self._rng = random.Random()
+        self.paper_params = {
+            "fee_bps": 10.0,
+            "slippage_bps": 5.0,
+            "partial_fill_probability": 0.1,
+            "min_fill_ratio": 0.6,
+            "funding_rate_hourly": 0.0,
+        }
+        if paper_params:
+            self.paper_params.update({k: float(v) for k, v in paper_params.items()})
 
         if self.mode == "paper":
             bal = self._load_balance()
@@ -73,6 +96,8 @@ class BrokerCCXT:
             self._latency_log.append(
                 {"operation": operation, "duration": duration, "timestamp": start}
             )
+            if self.telemetry:
+                self.telemetry.record_latency(operation, duration)
 
     @property
     def latency_log(self) -> list[Dict[str, float]]:
@@ -149,30 +174,83 @@ class BrokerCCXT:
             return self.balance_data
         return self.exchange.fetch_balance()
 
-    def update_balance(self, pnl, qty, side, price, symbol):
+    def _normalize_position(self, base: str) -> Dict[str, float]:
+        raw = self.balance_data["positions"].get(base, {})
+        if isinstance(raw, dict):
+            qty = float(raw.get("qty", 0.0) or 0.0)
+            cost_basis = float(raw.get("cost_basis", 0.0) or 0.0)
+            last_funding = float(raw.get("last_funding", time.time()) or time.time())
+        else:
+            qty = float(raw or 0.0)
+            cost_basis = 0.0
+            last_funding = time.time()
+        return {"qty": qty, "cost_basis": cost_basis, "last_funding": last_funding}
+
+    def _apply_funding(self, base: str, mark_price: float) -> None:
+        funding_rate = float(self.paper_params.get("funding_rate_hourly", 0.0))
+        if funding_rate == 0:
+            return
+        position = self._normalize_position(base)
+        qty = position["qty"]
+        if qty == 0:
+            return
+        now = time.time()
+        hours = max(0.0, (now - position["last_funding"]) / 3600.0)
+        if hours <= 0:
+            return
+        funding = abs(qty) * mark_price * funding_rate * hours
+        if qty > 0:
+            self.balance_data["USD"] -= funding
+        else:
+            self.balance_data["USD"] += funding
+        position["last_funding"] = now
+        self.balance_data["positions"][base] = position
+
+    def update_balance(
+        self,
+        pnl: float,
+        qty: float,
+        side: str,
+        price: float,
+        symbol: str,
+        *,
+        fee: float,
+        remaining_qty: float,
+    ):
         if self.mode != "paper":
             return
 
         base, _quote = symbol.split("/")
+        self._apply_funding(base, price)
         cost = qty * price
 
         if side == "buy":
             if self.balance_data["USD"] < cost:
                 print(f"[BrokerCCXT] Not enough USD balance to buy {qty} {base}")
                 return False
-            self.balance_data["USD"] -= cost
-            self.balance_data["positions"][base] = self.balance_data["positions"].get(base, 0.0) + qty
+            self.balance_data["USD"] -= cost + fee
+            position = self._normalize_position(base)
+            total_cost = position["cost_basis"] * position["qty"] + cost
+            position["qty"] += qty
+            if position["qty"] > 0:
+                position["cost_basis"] = total_cost / position["qty"]
+            position["last_funding"] = time.time()
+            self.balance_data["positions"][base] = position
 
         elif side == "sell":
-            if self.balance_data["positions"].get(base, 0.0) < qty:
+            position = self._normalize_position(base)
+            if position["qty"] < qty:
                 print(f"[BrokerCCXT] Not enough {base} to sell {qty}")
                 return False
-            self.balance_data["positions"][base] -= qty
-            self.balance_data["USD"] += cost
+            position["qty"] -= qty
+            position["last_funding"] = time.time()
+            if position["qty"] <= 0:
+                position["cost_basis"] = 0.0
+            self.balance_data["positions"][base] = position
+            self.balance_data["USD"] += cost - fee
 
         # Apply PnL adjustments
         self.balance_data["USD"] += pnl
-
         self._save_balance()
 
         if self.balance_data["USD"] < 0:
@@ -188,15 +266,47 @@ class BrokerCCXT:
         price = self.fetch_price(symbol)
 
         if self.mode == "paper":
+            slippage = self.paper_params.get("slippage_bps", 0.0) / 10_000.0
+            fee_bps = self.paper_params.get("fee_bps", 0.0) / 10_000.0
+            fill_qty = qty
+            remaining_qty = 0.0
+            if self.paper_params.get("partial_fill_probability", 0.0) > 0:
+                if self._rng.random() < self.paper_params["partial_fill_probability"]:
+                    ratio = self._rng.uniform(
+                        float(self.paper_params.get("min_fill_ratio", 0.5)),
+                        1.0,
+                    )
+                    fill_qty = qty * ratio
+                    remaining_qty = qty - fill_qty
+
+            effective_price = price
+            if slippage:
+                slip = slippage * price
+                effective_price = price + slip if side == "buy" else price - slip
+
+            fee = abs(effective_price * fill_qty) * fee_bps
+
             trade = {
                 "symbol": symbol,
                 "side": side,
-                "qty": qty,
-                "price": price,
+                "requested_qty": qty,
+                "qty": fill_qty,
+                "price": effective_price,
                 "timestamp": time.time(),
+                "fee": fee,
+                "slippage": effective_price - price,
+                "remaining_qty": remaining_qty,
                 "pnl": 0.0,
             }
-            success = self.update_balance(pnl=0.0, qty=qty, side=side, price=price, symbol=symbol)
+            success = self.update_balance(
+                pnl=0.0,
+                qty=fill_qty,
+                side=side,
+                price=effective_price,
+                symbol=symbol,
+                fee=fee,
+                remaining_qty=remaining_qty,
+            )
             if not success:
                 return None
             with self._measure_latency("market_order"):

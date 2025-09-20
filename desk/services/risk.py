@@ -19,14 +19,14 @@ class RiskEngine:
         self,
         daily_dd: float | None,
         weekly_dd: float | None,
-        trade_stop_loss: float,
+        default_stop_pct: float,
         max_concurrent: int,
         halt_on_dd: bool,
         trapdoor_pct: float,
     ) -> None:
         self.daily_dd = daily_dd or 0.0
         self.weekly_dd = weekly_dd or 0.0
-        self.trade_stop_loss = trade_stop_loss
+        self.default_stop_pct = max(0.0001, float(default_stop_pct))
         self.max_concurrent = max_concurrent
         self.halt_on_dd = halt_on_dd
         self.trapdoor_pct = trapdoor_pct
@@ -76,10 +76,34 @@ class RiskEngine:
             return False
         return True
 
-    def per_trade_notional(self, price: float, allocation_usd: float) -> float:
-        if price <= 0:
+    def position_size(
+        self,
+        price: float,
+        risk_budget: float,
+        *,
+        stop_loss: float | None,
+        side: str,
+    ) -> float:
+        """Return quantity that respects the configured risk budget."""
+
+        if price <= 0 or risk_budget <= 0:
             return 0.0
-        max_loss = allocation_usd * self.trade_stop_loss
-        qty = max_loss / max(price * self.trade_stop_loss, 1e-9)
-        return qty
+
+        stop_distance = None
+        if stop_loss is not None:
+            if side.upper() == "BUY":
+                stop_distance = price - stop_loss
+            else:
+                stop_distance = stop_loss - price
+            if stop_distance is not None:
+                stop_distance = abs(stop_distance)
+
+        if not stop_distance or stop_distance <= 0:
+            stop_distance = price * self.default_stop_pct
+
+        if stop_distance <= 0:
+            return 0.0
+
+        qty = risk_budget / stop_distance
+        return max(qty, 0.0)
 

@@ -4,6 +4,7 @@ from typing import Dict, List
 import types
 
 from desk.services.worker import Intent, Worker
+from desk.services.risk import RiskEngine
 
 
 class StubLearner:
@@ -178,3 +179,15 @@ def test_compute_quantity_respects_minimum(monkeypatch):
     worker = build_worker(monkeypatch)
     qty = worker.compute_quantity(price=100, risk_budget=10)
     assert qty >= 0.01
+
+
+def test_worker_uses_risk_engine_for_sizing(monkeypatch):
+    worker = build_worker(monkeypatch)
+    worker.risk_engine = RiskEngine(0.05, 0.1, 0.02, 5, False, 0.05)
+    qty = worker.compute_quantity(
+        price=100,
+        risk_budget=50,
+        stop_loss=95,
+        side="BUY",
+    )
+    assert qty == 10
