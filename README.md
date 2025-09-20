@@ -57,6 +57,7 @@ requirements.txt         # Python dependencies
 
    ```bash
    cd "C:\Users\moe\Desktop\AI Trader"
+   py -3.11 -m venv .venv
    .\.venv\Scripts\Activate
    pip install --upgrade pip setuptools wheel
    pip install -r requirements.txt
