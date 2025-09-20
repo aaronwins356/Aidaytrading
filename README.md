@@ -58,7 +58,7 @@ Edit `desk/configs/config.yaml`. Example:
 
 ```yaml
 mode: paper
-exchange: binance
+exchange: kraken
 starting_cash: 10000
 workers:
   - rsi_mean_reversion

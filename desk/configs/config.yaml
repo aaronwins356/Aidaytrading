@@ -16,12 +16,12 @@ settings:
   paper_funding_rate_hourly: 0.0002
 
 feed:
-  exchange: binance
+  exchange: kraken
   symbols:
-    - BTC/USDT
-    - ETH/USDT
-    - SOL/USDT
-    - XRP/USDT
+    - BTC/USD
+    - ETH/USD
+    - SOL/USD
+    - XRP/USD
   timeframe: 1m
 
 risk:

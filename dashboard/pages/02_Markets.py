@@ -58,7 +58,7 @@ trades = st.session_state.get("data_sources", {}).get("trades", pd.DataFrame())
 if trades.empty:
     st.info("No trades available; displaying synthetic market data.")
 
-symbol = st.selectbox("Symbol", options=filters.get("symbols", ["BTC/USDT"]))
+symbol = st.selectbox("Symbol", options=filters.get("symbols", ["BTC/USD"]))
 timeframe = st.selectbox("Timeframe", options=["1m", "5m", "15m", "1h", "4h"], index=3)
 start, end = filters.get(
     "date_range",

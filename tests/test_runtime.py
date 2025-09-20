@@ -27,7 +27,7 @@ def _intent(name: str) -> Intent:
     worker = types.SimpleNamespace(name=name, allocation=1.0)
     return Intent(
         worker=worker,
-        symbol="BTC/USDT",
+        symbol="BTC/USD",
         side="BUY",
         qty=1.0,
         price=100.0,

@@ -36,8 +36,8 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "paper_funding_rate_hourly": 0.0,
     },
     "feed": {
-        "exchange": "binance",
-        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"],
+        "exchange": "kraken",
+        "symbols": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"],
         "timeframe": "1m",
     },
     "risk": {
