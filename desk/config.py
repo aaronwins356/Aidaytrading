@@ -53,6 +53,9 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "retrain_every": 15,
         "ml_weight": 0.6,
         "trapdoor_pct": 0.015,
+        "weekly_return_target": 1.0,
+        "trading_days_per_week": 5.0,
+        "expected_trades_per_day": None,
         "learning_risk": {
             "initial_multiplier": 1.5,
             "floor_multiplier": 0.85,
@@ -214,6 +217,20 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
                 )
             except ValueError as exc:
                 errors.append(str(exc))
+        if "weekly_return_target" in risk and risk.get("weekly_return_target") is not None:
+            try:
+                risk["weekly_return_target"] = float(risk.get("weekly_return_target"))
+            except (TypeError, ValueError):
+                errors.append("risk.weekly_return_target must be numeric")
+            else:
+                if risk["weekly_return_target"] < 0:
+                    errors.append("risk.weekly_return_target must not be negative")
+        for key in ("trading_days_per_week", "expected_trades_per_day"):
+            if key in risk and risk.get(key) is not None:
+                try:
+                    risk[key] = _validate_positive(f"risk.{key}", risk.get(key))
+                except ValueError as exc:
+                    errors.append(str(exc))
     validated["risk"] = risk
 
     workers = validated.get("workers", [])
