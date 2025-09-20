@@ -349,8 +349,8 @@ class ReportingConfig(BaseModel):
 
 
 class DeskConfig(BaseModel):
-    mode: str = Field("Paper")
-    base_currency: str = "USDT"
+    mode: str = Field("Paper", pattern=r"^(Paper|Live|Both)$")
+    base_currency: str = "USD"
     symbols: List[str] = Field(default_factory=lambda: SYMBOLS)
     workers: Dict[str, WorkerConfig] = Field(default_factory=dict)
     risk: RiskConfig = Field(default_factory=RiskConfig)
