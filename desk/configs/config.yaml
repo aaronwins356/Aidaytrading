@@ -1,9 +1,9 @@
 settings:
   mode: Paper
-  exchange: kraken
+  exchange: binance
   default_exchange: kraken
   fallback_exchanges:
-    - binance
+    - kraken
   api_key: ""
   api_secret: ""
   balance: 1000
@@ -19,9 +19,9 @@ settings:
   paper_funding_rate_hourly: 0.0002
 
 feed:
-  exchange: kraken
+  exchange: binance
   fallback_exchanges:
-    - binance
+    - kraken
   data_seeding:
     warm_candles: 1000
     synthetic_candles: 250
