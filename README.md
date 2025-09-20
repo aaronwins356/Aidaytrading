@@ -60,7 +60,7 @@ requirements.txt         # Python dependencies
    python -m venv .venv
    .\.venv\Scripts\Activate
    python -m pip install --upgrade pip
-   pip install -r requirements.txt
+   pip install --only-binary=:all: -r requirements.txt
    ```
 
 2. **Configure credentials and runtime settings**
