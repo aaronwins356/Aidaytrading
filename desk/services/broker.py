@@ -317,4 +317,14 @@ class BrokerCCXT:
             order = self.exchange.create_order(symbol, "market", side, qty)
         return order
 
+    def close(self) -> None:
+        """Close the underlying exchange session if supported."""
+
+        close = getattr(self.exchange, "close", None)
+        if callable(close):  # pragma: no cover - network resource cleanup
+            try:
+                close()
+            except Exception:
+                pass
+
 

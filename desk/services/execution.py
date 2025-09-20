@@ -150,6 +150,13 @@ class PositionStore:
             trades.append(OpenTrade.from_record(record))
         return trades
 
+    def close(self) -> None:
+        with self.lock:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+
 
 class ExecutionEngine:
     """Handles paper/live orders, monitors exits, and journals trades."""
@@ -382,4 +389,9 @@ class ExecutionEngine:
                 pnl = self._finalize_trade(trade, price, reason)
                 closed.append((trade, pnl, reason))
         return closed
+
+    def close(self) -> None:
+        """Release any persistent resources used by the execution engine."""
+
+        self.position_store.close()
 

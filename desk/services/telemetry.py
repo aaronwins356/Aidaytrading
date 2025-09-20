@@ -82,6 +82,7 @@ class TelemetryClient:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._backoff = self.flush_interval
+        self._drain_lock = threading.Lock()
         self._ensure_thread()
 
     # ------------------------------------------------------------------
@@ -91,10 +92,41 @@ class TelemetryClient:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def close(self) -> None:
+    def flush(self, timeout: Optional[float] = None) -> None:
+        """Synchronously drain the telemetry queue.
+
+        The background worker already handles dispatching events, but during
+        shutdown we want to minimise the likelihood of losing telemetry data.
+        ``flush`` processes queued events in the current thread, respecting the
+        same error-handling semantics as the async worker.  If publishing fails
+        the event is re-queued and the flush stops early so we can honour the
+        caller's timeout and avoid tight retry loops.
+        """
+
+        deadline = None if timeout is None else time.time() + max(0.0, timeout)
+        while True:
+            if deadline is not None and time.time() >= deadline:
+                break
+            try:
+                event = self._queue.get_nowait()
+            except queue.Empty:
+                break
+
+            with self._drain_lock:
+                try:
+                    self._publisher(event.payload)
+                    self._backoff = self.flush_interval
+                except Exception as exc:  # pragma: no cover - resiliency path
+                    print(f"[Telemetry] Failed to publish {event.event_type}: {exc}")
+                    self._queue.put(event)
+                    break
+
+    def close(self, *, drain: bool = True, timeout: float = 1.0) -> None:
+        if drain:
+            self.flush(timeout=timeout)
         self._stop.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=timeout)
 
     # ------------------------------------------------------------------
     def _run(self) -> None:
@@ -104,15 +136,16 @@ class TelemetryClient:
             except queue.Empty:
                 continue
 
-            try:
-                self._publisher(event.payload)
-                self._backoff = self.flush_interval
-            except Exception as exc:  # pragma: no cover - resiliency path
-                # Push back into the queue and sleep with backoff.
-                print(f"[Telemetry] Failed to publish {event.event_type}: {exc}")
-                time.sleep(self._backoff)
-                self._backoff = min(self._backoff * 2, self.max_backoff)
-                self._queue.put(event)
+            with self._drain_lock:
+                try:
+                    self._publisher(event.payload)
+                    self._backoff = self.flush_interval
+                except Exception as exc:  # pragma: no cover - resiliency path
+                    # Push back into the queue and sleep with backoff.
+                    print(f"[Telemetry] Failed to publish {event.event_type}: {exc}")
+                    time.sleep(self._backoff)
+                    self._backoff = min(self._backoff * 2, self.max_backoff)
+                    self._queue.put(event)
 
     # ------------------------------------------------------------------
     def _emit(self, event_type: str, payload: Dict[str, Any]) -> None:
