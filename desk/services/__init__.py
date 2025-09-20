@@ -1,7 +1,7 @@
 """Service layer exports for the trading desk runtime."""
 
 __all__ = [
-    "BrokerCCXT",
+    "KrakenBroker",
     "ExecutionEngine",
     "PositionStore",
     "OpenTrade",
@@ -19,10 +19,10 @@ __all__ = [
 
 
 def __getattr__(name: str):  # pragma: no cover - import hook
-    if name == "BrokerCCXT":
-        from .broker import BrokerCCXT
+    if name == "KrakenBroker":
+        from .broker import KrakenBroker
 
-        return BrokerCCXT
+        return KrakenBroker
     if name == "ExecutionEngine":
         from .execution import ExecutionEngine
 
