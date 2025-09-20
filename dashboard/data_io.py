@@ -73,7 +73,11 @@ def get_conn(db_path: str) -> sqlite3.Connection:
     """Return a cached SQLite connection with sensible defaults."""
 
     path = _cached_path(db_path)
-    conn = sqlite3.connect(path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    conn = sqlite3.connect(
+        path,
+        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)
     return conn
