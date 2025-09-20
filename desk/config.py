@@ -56,6 +56,9 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "weekly_return_target": 1.0,
         "trading_days_per_week": 5.0,
         "expected_trades_per_day": None,
+        "slippage_bps": 15.0,
+        "balance_buffer_pct": 0.05,
+        "duplicate_cooldown_seconds": 90.0,
         "learning_risk": {
             "initial_multiplier": 1.5,
             "floor_multiplier": 0.85,
@@ -205,9 +208,32 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
                     risk[key] = _validate_positive(f"risk.{key}", risk.get(key))
                 except ValueError as exc:
                     errors.append(str(exc))
+        if "balance_buffer_pct" in risk:
+            try:
+                risk["balance_buffer_pct"] = float(risk.get("balance_buffer_pct", 0.0))
+                if risk["balance_buffer_pct"] < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append("risk.balance_buffer_pct must be non-negative")
+        if "slippage_bps" in risk:
+            try:
+                risk["slippage_bps"] = _validate_positive(
+                    "risk.slippage_bps", risk.get("slippage_bps"), allow_zero=True
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
         if "max_concurrent" in risk:
             try:
                 risk["max_concurrent"] = int(_validate_positive("risk.max_concurrent", risk.get("max_concurrent")))
+            except ValueError as exc:
+                errors.append(str(exc))
+        if "duplicate_cooldown_seconds" in risk:
+            try:
+                risk["duplicate_cooldown_seconds"] = _validate_positive(
+                    "risk.duplicate_cooldown_seconds",
+                    risk.get("duplicate_cooldown_seconds"),
+                    allow_zero=True,
+                )
             except ValueError as exc:
                 errors.append(str(exc))
         if "max_position_value" in risk and risk.get("max_position_value") is not None:

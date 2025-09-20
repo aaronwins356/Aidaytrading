@@ -69,6 +69,8 @@ class Worker:
         logger: Optional[EventLogger] = None,
         learner: Optional[Learner] = None,
         risk_engine: Optional["RiskEngine"] = None,
+        *,
+        ml_weight: float = 0.5,
     ) -> None:
         self.name = name
         self.symbol = symbol
@@ -77,6 +79,7 @@ class Worker:
         self.logger = logger or EventLogger()
         self.learner = learner or Learner()
         self.risk_engine = risk_engine
+        self.ml_weight = max(0.0, min(1.0, float(ml_weight)))
 
         self.strategy = self._load_strategy()
         self.state: Dict[str, Any] = {
@@ -230,6 +233,29 @@ class Worker:
             return None
         return signal.upper()
 
+    def _rule_score(self, df: pd.DataFrame, side: str) -> float:
+        if "close" not in df.columns or len(df) < 5:
+            return 0.5
+        closes = df["close"]
+        try:
+            closes = closes.astype(float)  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+        short = closes.tail(5).mean()
+        long = closes.tail(20).mean() if len(closes) >= 20 else closes.mean()
+        if long == 0:
+            base = 0.5
+        else:
+            momentum = (short - long) / abs(long)
+            base = 0.5 + max(min(momentum * 5.0, 0.5), -0.5)
+        base = max(0.0, min(1.0, base))
+        if side == "SELL":
+            return 1.0 - base
+        return base
+
+    def _blend_scores(self, rule_score: float, ml_score: float) -> float:
+        return (1 - self.ml_weight) * rule_score + self.ml_weight * ml_score
+
     def _veto_checks(self, df: pd.DataFrame) -> List[VetoResult]:
         latest = df.iloc[-1]
         vetoes = []
@@ -303,7 +329,8 @@ class Worker:
 
         features = self._collect_features(df)
         ml_score = self.learner.predict_edge(self, features)
-        score = 0.6 + 0.4 * ml_score
+        rule_score = self._rule_score(df, side)
+        score = self._blend_scores(rule_score, ml_score)
 
         trade_plan: Dict[str, float] = {}
         try:
@@ -331,9 +358,11 @@ class Worker:
         enriched_features = dict(features)
         enriched_features["ml_edge"] = ml_score
         enriched_features["combined_score"] = score
+        enriched_features["rule_score"] = rule_score
         enriched_features["proposed_qty"] = qty
         enriched_features["risk_budget"] = adaptive_risk_budget
         enriched_features["learning_risk_multiplier"] = risk_multiplier
+        enriched_features["ml_weight"] = self.ml_weight
         enriched_features["side"] = 1.0 if side == "BUY" else -1.0
         if "stop_loss" in scaled_plan:
             enriched_features["plan_stop_loss"] = float(scaled_plan.get("stop_loss", 0.0) or 0.0)

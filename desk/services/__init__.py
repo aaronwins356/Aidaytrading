@@ -2,6 +2,7 @@
 
 __all__ = [
     "KrakenBroker",
+    "PaperBroker",
     "ExecutionEngine",
     "PositionStore",
     "OpenTrade",
@@ -23,6 +24,10 @@ def __getattr__(name: str):  # pragma: no cover - import hook
         from .broker import KrakenBroker
 
         return KrakenBroker
+    if name == "PaperBroker":
+        from .broker import PaperBroker
+
+        return PaperBroker
     if name == "ExecutionEngine":
         from .execution import ExecutionEngine
 

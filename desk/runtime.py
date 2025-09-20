@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 from desk.config import CONFIG_PATH, load_config
 from desk.services import (
     KrakenBroker,
+    PaperBroker,
     EventLogger,
     ExecutionEngine,
     FeedHandler,
@@ -30,7 +31,7 @@ class RuntimeState:
 
 
 class TradingRuntime:
-    """Coordinates services to run the live Kraken trading loop."""
+    """Coordinates services to run the Kraken trading loop in paper or live mode."""
 
     def __init__(self, config_path: Optional[str] = None) -> None:
         self.config_path = config_path or CONFIG_PATH
@@ -54,11 +55,10 @@ class TradingRuntime:
         risk_cfg = self.config.get("risk", {})
         portfolio_cfg = self.config.get("portfolio", {})
 
-        mode = str(settings.get("mode", "live")).strip().lower()
-        if mode != "live":
-            raise ValueError(
-                "TradingRuntime is configured for live Kraken trading only."
-            )
+        mode = str(settings.get("mode", "paper")).strip().lower()
+        if mode not in {"paper", "live"}:
+            raise ValueError("settings.mode must be either 'paper' or 'live'")
+        self.mode = mode
 
         feed_workers = settings.get("feed_workers")
         try:
@@ -69,19 +69,15 @@ class TradingRuntime:
         api_key = str(settings.get("api_key", ""))
         api_secret = str(settings.get("api_secret", ""))
 
+        if self.mode == "live" and (not api_key or not api_secret):
+            raise ValueError(
+                "Live trading requires non-empty Kraken API credentials."
+            )
+
         request_timeout = float(settings.get("request_timeout", 30.0))
         session_config = settings.get("kraken_session") or {}
         if not isinstance(session_config, dict):
             session_config = {}
-
-        self.broker = KrakenBroker(
-            api_key=api_key,
-            api_secret=api_secret,
-            telemetry=self.telemetry,
-            event_logger=self.logger,
-            request_timeout=request_timeout,
-            session_config=session_config,
-        )
         data_seed_cfg = dict(feed_cfg.get("data_seeding") or {})
         feed_timeframe = str(
             feed_cfg.get(
@@ -105,7 +101,7 @@ class TradingRuntime:
             exchange="kraken",
             symbols=feed_symbols,
             timeframe=feed_timeframe,
-            mode="live",
+            mode=self.mode,
             api_key=api_key,
             api_secret=api_secret,
             interval_seconds=float(settings.get("loop_delay", 60)),
@@ -113,6 +109,25 @@ class TradingRuntime:
             fallback_exchanges=[],
             seed_config=data_seed_cfg,
         )
+
+        if self.mode == "live":
+            self.broker = KrakenBroker(
+                api_key=api_key,
+                api_secret=api_secret,
+                telemetry=self.telemetry,
+                event_logger=self.logger,
+                request_timeout=request_timeout,
+                session_config=session_config,
+            )
+        else:
+            starting_cash = float(settings.get("balance", 1_000.0))
+            self.broker = PaperBroker(
+                store=self.feed_updater.store,
+                logger=self.logger,
+                telemetry=self.telemetry,
+                starting_cash=starting_cash,
+            )
+
         self._services_started = False
 
         self.feed = FeedHandler(
@@ -163,12 +178,16 @@ class TradingRuntime:
             epsilon=float(portfolio_cfg.get("epsilon", 0.1)),
             cooldown_minutes=float(portfolio_cfg.get("cooldown_minutes", 15)),
         )
+        self._ml_weight = float(risk_cfg.get("ml_weight", 0.5))
         self.workers = self._load_workers()
 
         self.executor.reconcile(self.workers, self.feed, portfolio=self.portfolio)
 
         self.loop_delay = float(settings.get("loop_delay", 60))
         self.warmup = int(settings.get("warmup_candles", 10))
+        self._warm_progress: Dict[str, int] = {}
+        self._retrain_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        self._risk_config = risk_cfg
 
     def start_services(self) -> None:
         if self._services_started:
@@ -203,6 +222,10 @@ class TradingRuntime:
             self.feed_updater.close()
         except Exception:
             pass
+        try:
+            self._retrain_executor.shutdown(wait=False)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     def _load_workers(self) -> List[Worker]:
@@ -221,6 +244,7 @@ class TradingRuntime:
                     logger=self.logger,
                     learner=self.learner,
                     risk_engine=self.risk_engine,
+                    ml_weight=self._ml_weight,
                 )
                 workers.append(worker)
             except Exception as exc:  # pragma: no cover - defensive bootstrap
@@ -284,7 +308,11 @@ class TradingRuntime:
         print(f"[RUNTIME] Starting loop with {len(self.workers)} workers")
 
         while self.state.running:
-            equity = float(self.broker.account_equity())
+            try:
+                equity = float(self.broker.account_equity())
+            except Exception as exc:
+                print(f"[RUNTIME] Failed to fetch account equity: {exc}")
+                equity = 0.0
             self.logger.write_equity(equity)
             self.telemetry.record_equity(equity)
             self.risk_engine.check_account(equity)
@@ -304,7 +332,15 @@ class TradingRuntime:
                     return None
                 worker.state["candles"] = candles
                 if len(candles) < self.warmup:
+                    progress = self._warm_progress.get(worker.name)
+                    if progress != len(candles):
+                        print(
+                            f"[Worker] {worker.name} warming: ({len(candles)}/{self.warmup} candles)"
+                        )
+                        self._warm_progress[worker.name] = len(candles)
                     return None
+                if worker.name in self._warm_progress:
+                    self._warm_progress.pop(worker.name, None)
                 intent = worker.build_intent(base_risk * worker.allocation)
                 if not intent or not intent.approved:
                     return None
@@ -316,7 +352,12 @@ class TradingRuntime:
                 ) as pool:
                     futures = {pool.submit(_evaluate, worker): worker for worker in self.workers}
                     for future in concurrent.futures.as_completed(futures):
-                        intent = future.result()
+                        worker = futures[future]
+                        try:
+                            intent = future.result()
+                        except Exception as exc:
+                            print(f"[RUNTIME] Worker {worker.name} evaluation failed: {exc}")
+                            continue
                         if intent:
                             intents.append(intent)
 
@@ -403,10 +444,22 @@ class TradingRuntime:
                         }
                         self.learner.record_result(worker.name, row)
 
-                        retrain_every = int(risk_cfg.get("retrain_every", 25))
-                        if retrain_every > 0 and worker.state.get("trades", 0) % retrain_every == 0:
+                        retrain_every = int(self._risk_config.get("retrain_every", 25))
+                        if (
+                            retrain_every > 0
+                            and worker.state.get("trades", 0) % retrain_every == 0
+                        ):
                             history = self.learner.load_trade_history(worker.name)
-                            self.learner.retrain_worker(worker, history)
+
+                            def _do_retrain():
+                                try:
+                                    self.learner.retrain_worker(worker, history)
+                                except Exception as exc:
+                                    print(
+                                        f"[RUNTIME] Retrain failed for {worker.name}: {exc}"
+                                    )
+
+                            self._retrain_executor.submit(_do_retrain)
 
             time.sleep(self.loop_delay)
 
