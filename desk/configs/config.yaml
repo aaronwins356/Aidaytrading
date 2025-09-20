@@ -1,5 +1,5 @@
 settings:
-  mode: paper
+  mode: Paper
   exchange: kraken
   default_exchange: kraken
   fallback_exchanges:
