@@ -1,10 +1,27 @@
-"""Live-trading broker implementation that targets Kraken exclusively."""
+"""Broker implementations used by the trading runtime.
+
+The module provides two concrete brokers:
+
+``KrakenBroker``
+    Thin wrapper around :mod:`ccxt` for routing live orders to Kraken.  The
+    implementation focuses on defensive error handling so network hiccups or
+    exchange downtime never bubble up as uncaught exceptions inside the trading
+    loop.
+
+``PaperBroker``
+    Deterministic in-memory simulator that mirrors the interface exposed by the
+    live broker.  It draws candles from the shared :class:`~desk.services.feed_updater.CandleStore`
+    and tracks account balances locally, making it safe to test trading logic
+    without touching a real exchange.
+"""
 
 from __future__ import annotations
 
 import contextlib
+import threading
 import time
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
 
 try:  # pragma: no cover - import guard for optional dependency
     import ccxt  # type: ignore
@@ -27,6 +44,27 @@ if TYPE_CHECKING:  # pragma: no cover - import hints only
     from desk.services.telemetry import TelemetryClient
 
 
+def _parse_symbol(symbol: str) -> Tuple[str, str]:
+    """Return ``(base, quote)`` currency codes from a CCXT style symbol."""
+
+    if "/" in symbol:
+        base, quote = symbol.split("/", 1)
+    elif "-" in symbol:
+        base, quote = symbol.split("-", 1)
+    else:
+        # Fallback to assuming the quote is USD when the symbol is a bare asset
+        base, quote = symbol, "USD"
+    return base.upper(), quote.upper()
+
+
+@dataclass(frozen=True)
+class BalanceSnapshot:
+    """Container returned by :meth:`KrakenBroker.available_balances`."""
+
+    base: float
+    quote: float
+
+
 class KrakenBroker:
     """Minimal live-trading wrapper for the Kraken REST API via ccxt."""
 
@@ -47,6 +85,8 @@ class KrakenBroker:
         self.request_timeout = max(1.0, float(request_timeout))
         self.session_config = dict(session_config or {})
         self._latency_log: list[Dict[str, float]] = []
+        self._last_balance: dict[str, Dict[str, float]] = {}
+        self.mode = "live"
 
         if self.session_config and "timeout" not in self.session_config:
             # ccxt expects timeout in milliseconds
@@ -140,6 +180,19 @@ class KrakenBroker:
         return float(price or 0.0)
 
     # ------------------------------------------------------------------
+    def fetch_balance(self) -> Dict[str, Dict[str, float]]:
+        """Return the raw balance payload from Kraken.
+
+        The response is cached so subsequent balance validations inside the same
+        loop iteration do not repeatedly hit the exchange.
+        """
+
+        payload = self._execute("fetch_balance", lambda ex: ex.fetch_balance())
+        if isinstance(payload, dict):
+            self._last_balance = payload
+        return self._last_balance
+
+    # ------------------------------------------------------------------
     def _normalize_order(
         self, order: object, *, symbol: str, requested_qty: float, reference_price: float
     ) -> Dict[str, float]:
@@ -192,7 +245,7 @@ class KrakenBroker:
 
     # ------------------------------------------------------------------
     def account_equity(self) -> float:
-        balances = self._execute("fetch_balance", lambda ex: ex.fetch_balance())
+        balances = self.fetch_balance()
         return self._extract_equity(balances)
 
     @staticmethod
@@ -222,9 +275,244 @@ class KrakenBroker:
                     pass
         return 0.0
 
+    def available_balances(self, symbol: str) -> BalanceSnapshot:
+        """Return available base/quote balances for ``symbol``.
+
+        Kraken's payload distinguishes between ``free`` and ``used`` balances.
+        To remain conservative during live trading we only consider the ``free``
+        funds available for routing new orders.
+        """
+
+        base, quote = _parse_symbol(symbol)
+        payload = self.fetch_balance()
+        total = payload.get("total") if isinstance(payload, dict) else None
+        free = payload.get("free") if isinstance(payload, dict) else None
+
+        def _resolve(container, currency: str) -> float:
+            if isinstance(container, dict) and currency in container:
+                value = container[currency]
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return 0.0
+            return 0.0
+
+        base_available = _resolve(free, base) or _resolve(total, base)
+        quote_available = _resolve(free, quote) or _resolve(total, quote)
+        return BalanceSnapshot(base=base_available, quote=quote_available)
+
+    def can_execute_market_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        *,
+        price: float,
+        slippage: float,
+    ) -> bool:
+        """Return ``True`` when sufficient balances exist for a trade."""
+
+        if qty <= 0 or price <= 0:
+            return False
+        balances = self.available_balances(symbol)
+        side = side.lower()
+        effective_price = price * (1 + slippage if side == "buy" else 1 - slippage)
+        if side == "buy":
+            required = effective_price * qty
+            return balances.quote >= required
+        required = qty
+        return balances.base >= required
+
     # ------------------------------------------------------------------
     def close(self) -> None:
         close = getattr(self.exchange, "close", None)
         if callable(close):  # pragma: no cover - network cleanup
             with contextlib.suppress(Exception):
                 close()
+
+
+class PaperBroker:
+    """Deterministic broker used for paper trading.
+
+    The simulator mirrors the surface area consumed by the runtime.  Prices are
+    sourced from the :class:`~desk.services.feed_updater.CandleStore` that is
+    already kept warm by :class:`~desk.services.feed_updater.FeedUpdater` so the
+    paper account reacts to exactly the same candles as the live system.
+    """
+
+    def __init__(
+        self,
+        *,
+        store,
+        logger: Optional["EventLogger"] = None,
+        telemetry: Optional["TelemetryClient"] = None,
+        starting_cash: float = 1000.0,
+    ) -> None:
+        from desk.services.feed_updater import CandleStore  # local import
+
+        if not isinstance(store, CandleStore):
+            raise TypeError("store must be a CandleStore instance")
+        self.store = store
+        self.logger = logger
+        self.telemetry = telemetry
+        self._cash = float(max(starting_cash, 0.0))
+        self._positions: Dict[str, float] = {}
+        self._latency_log: list[Dict[str, float]] = []
+        self._lock = threading.Lock()
+        self.mode = "paper"
+
+    # ------------------------------------------------------------------
+    def _log_event(self, level: str, message: str, *, symbol: str = "BROKER", **metadata) -> None:
+        payload = {k: v for k, v in metadata.items() if v is not None}
+        meta = ""
+        if payload:
+            meta = " | " + ", ".join(f"{key}={value}" for key, value in payload.items())
+        print(f"[PaperBroker][{level.upper()}] {symbol}: {message}{meta}")
+        if self.logger is not None:
+            self.logger.log_feed_event(level=level, symbol=symbol, message=message, **payload)
+
+    @contextlib.contextmanager
+    def _measure_latency(self, operation: str):
+        started = time.time()
+        try:
+            yield
+        finally:
+            elapsed = time.time() - started
+            self._latency_log.append(
+                {"operation": operation, "duration": elapsed, "timestamp": started}
+            )
+            if self.telemetry is not None:
+                self.telemetry.record_latency(operation, elapsed)
+
+    @property
+    def latency_log(self) -> list[Dict[str, float]]:
+        return list(self._latency_log)
+
+    # ------------------------------------------------------------------
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        *,
+        limit: int = 50,
+        since: Optional[int | float] = None,
+    ):
+        with self._measure_latency("fetch_ohlcv"):
+            candles = self.store.load(symbol, max(limit, 1))
+        if since is not None:
+            threshold = float(since) / (1000.0 if since > 1e12 else 1.0)
+            candles = [c for c in candles if c.get("timestamp", 0.0) >= threshold]
+        return candles
+
+    def fetch_price(self, symbol: str) -> float:
+        candles = self.fetch_ohlcv(symbol, limit=1)
+        if candles:
+            return float(candles[-1].get("close", 0.0) or 0.0)
+        return 0.0
+
+    def _update_position(self, symbol: str, delta: float) -> None:
+        new_qty = self._positions.get(symbol, 0.0) + delta
+        if abs(new_qty) < 1e-9:
+            self._positions.pop(symbol, None)
+        else:
+            self._positions[symbol] = new_qty
+
+    def market_order(self, symbol: str, side: str, qty: float):
+        side = side.lower().strip()
+        qty = float(qty)
+        if qty <= 0:
+            self._log_event(
+                "WARNING",
+                "Rejected paper trade with non-positive quantity",
+                symbol=symbol,
+                requested_qty=qty,
+            )
+            return None
+        price = self.fetch_price(symbol)
+        if price <= 0:
+            self._log_event(
+                "WARNING",
+                "Cannot fill paper trade due to missing price",
+                symbol=symbol,
+            )
+            return None
+        slippage = 0.0
+        with self._lock:
+            notional = price * qty
+            if side == "buy":
+                if self._cash < notional:
+                    self._log_event(
+                        "WARNING",
+                        "Insufficient paper cash for purchase",
+                        symbol=symbol,
+                        balance=self._cash,
+                        required=notional,
+                    )
+                    return None
+                self._cash -= notional
+                self._update_position(symbol, qty)
+            else:
+                holding = self._positions.get(symbol, 0.0)
+                if holding < qty:
+                    self._log_event(
+                        "WARNING",
+                        "Insufficient paper holdings for sale",
+                        symbol=symbol,
+                        holding=holding,
+                        requested=qty,
+                    )
+                    return None
+                self._cash += notional
+                self._update_position(symbol, -qty)
+
+        order = {
+            "id": f"paper-{time.time_ns()}",
+            "symbol": symbol,
+            "type": "market",
+            "side": side,
+            "amount": qty,
+            "price": price,
+            "cost": price * qty,
+            "filled": qty,
+            "fee": 0.0,
+            "slippage": slippage,
+        }
+        return order
+
+    def available_balances(self, symbol: str) -> BalanceSnapshot:
+        with self._lock:
+            base_qty = self._positions.get(symbol, 0.0)
+            cash = self._cash
+        return BalanceSnapshot(base=base_qty, quote=cash)
+
+    def can_execute_market_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        *,
+        price: float,
+        slippage: float,
+    ) -> bool:
+        if qty <= 0 or price <= 0:
+            return False
+        balances = self.available_balances(symbol)
+        side = side.lower()
+        effective_price = price * (1 + slippage if side == "buy" else 1 - slippage)
+        if side == "buy":
+            return balances.quote >= effective_price * qty
+        return balances.base >= qty
+
+    def account_equity(self) -> float:
+        with self._lock:
+            cash = self._cash
+            holdings = list(self._positions.items())
+        equity = cash
+        for symbol, qty in holdings:
+            price = self.fetch_price(symbol)
+            equity += price * qty
+        return equity
+
+    def close(self) -> None:
+        # Nothing to clean up for the paper broker.
+        return None

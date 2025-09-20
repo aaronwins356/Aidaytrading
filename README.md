@@ -16,13 +16,14 @@ operations.
 
 ## 🔍 Project highlights
 
-- **Live-first runtime** – `TradingRuntime` boots a Kraken broker, feed updater, risk
+- **Dual-mode runtime** – `TradingRuntime` boots either a paper broker backed by the
+  local candle store or a live Kraken broker, then wires up the feed updater, risk
   engine, execution engine, learner, and telemetry pipeline before entering the main
   trading loop. The loop continuously snapshots candles, scores worker intents, routes
   orders, and records results for retraining.【F:main.py†L1-L12】【F:desk/runtime.py†L20-L227】【F:desk/runtime.py†L244-L399】
 - **Structured logging & telemetry** – every trade, equity update, and feed event is
-  persisted to `desk/logs` as both JSONL and SQLite. Telemetry is dispatched
-  asynchronously with retry and optional HTTP publishing.【F:desk/services/logger.py†L1-L119】【F:desk/services/telemetry.py†L1-L134】
+  persisted to `desk/logs` as both JSONL, SQLite, and a CSV trade journal. Telemetry is
+  dispatched asynchronously with retry and optional HTTP publishing.【F:desk/services/logger.py†L1-L119】【F:desk/services/execution.py†L6-L188】【F:desk/services/telemetry.py†L1-L134】
 - **Concurrent workers with ML feedback** – strategies are isolated modules loaded by
   `Worker`, which handles candle buffering, risk multipliers, ML scoring, and intent
   vetos before forwarding orders to the execution engine.【F:desk/services/worker.py†L1-L186】
@@ -56,19 +57,28 @@ requirements.txt         # Python dependencies
 1. **Clone & create a virtual environment**
 
    ```bash
+   # Windows (PowerShell)
    cd "C:\Users\moe\Desktop\AI Trader"
    py -3.11 -m venv .venv
    .\.venv\Scripts\Activate
+
+   # macOS/Linux
+   cd ~/projects/Aidaytrading
+   python3.11 -m venv .venv
+   source .venv/bin/activate
+
+   # install dependencies
    pip install --upgrade pip setuptools wheel
    pip install -r requirements.txt
-
    ```
 
 2. **Configure credentials and runtime settings**
 
-   Edit `desk/configs/config.yaml` to add your Kraken API key/secret and adjust
-   runtime parameters. The default file is configured for live trading with
-   five example workers and 1 minute candles.【F:desk/configs/config.yaml†L1-L97】
+   Edit `desk/configs/config.yaml` to choose the trading `mode` (`paper` for a
+   fully simulated account or `live` for real orders), provide Kraken API
+   credentials when live trading, and tune risk parameters such as slippage,
+   duplicate-trade cooldown, and fixed USD risk. Five example workers with
+   one-minute candles are included as a starting point.【F:desk/configs/config.yaml†L1-L97】
 
 3. **Run the trading runtime**
 
@@ -76,9 +86,10 @@ requirements.txt         # Python dependencies
    python main.py
    ```
 
-   The runtime validates configuration, seeds historical candles if needed, and
-   then enters the live loop. It will exit automatically if the risk engine halts
-   trading or when you send SIGINT/SIGTERM (Ctrl+C).【F:desk/runtime.py†L85-L167】【F:desk/runtime.py†L244-L318】
+   The runtime validates configuration (preventing live mode unless keys are
+   present), seeds historical candles if needed, and then enters the trading
+   loop. It will exit automatically if the risk engine halts trading or when you
+   send SIGINT/SIGTERM (Ctrl+C).【F:desk/runtime.py†L85-L167】【F:desk/runtime.py†L244-L318】
 
 4. **Launch the dashboard (optional)**
 
@@ -99,7 +110,8 @@ requirements.txt         # Python dependencies
 The YAML configuration drives every subsystem. Key sections in
 `desk/configs/config.yaml` include:
 
-- **`settings`** – core runtime switches such as `mode` (must remain `live`), Kraken
+- **`settings`** – core runtime switches such as `mode` (`paper` for simulation or
+  `live` for production), Kraken
   credentials, candle `timeframe`, lookback depth, and loop cadence.【F:desk/configs/config.yaml†L1-L13】
 - **`feed`** – candle seeding and subscription options for the feed updater, including
   symbols, timeframe, and historical seed lengths.【F:desk/configs/config.yaml†L15-L26】
@@ -192,6 +204,29 @@ environment or exporting `PYTHONPATH=$(pwd)` achieves this).【F:tests/test_runt
 3. **Hook in telemetry** – point the telemetry client at your collector by providing an
    HTTP endpoint in the configuration or inject a custom publisher when instantiating
    `TradingRuntime`.【F:desk/runtime.py†L50-L72】【F:desk/services/telemetry.py†L26-L58】
+
+---
+
+## 🛡️ Go-live safety checklist (start with ~$200)
+
+1. **Paper trade first** – run the bot in `mode: paper` for several days to validate
+   strategy behaviour, confirm the duplicate-trade guard, and review the generated
+   CSV/SQLite trade logs under `desk/logs`.【F:desk/runtime.py†L85-L167】【F:desk/services/execution.py†L55-L181】
+2. **Verify Kraken credentials** – switch to `mode: live` only after populating
+   `api_key` and `api_secret`. The runtime hard-stops if keys are missing to prevent
+   accidental live deployment.【F:desk/runtime.py†L85-L130】
+3. **Scale risk conservatively** – start with `risk.fixed_risk_usd` around $5–$10,
+   keep `balance_buffer_pct` ≥ 0.05, and confirm that the computed quantities respect
+   Kraken minimums in the trade journal. Increase allocations gradually as realised
+   equity grows.【F:desk/configs/config.yaml†L28-L51】【F:desk/services/execution.py†L118-L181】
+4. **Monitor order routing** – spot check the `trade_history.csv` and `trades.db`
+   outputs after each session to confirm filled prices, stop-losses, and exit reasons
+   match expectations. Investigate any skipped orders logged as insufficient balance or
+   duplicate guard triggers before increasing size.【F:desk/services/logger.py†L14-L119】【F:desk/services/execution.py†L182-L249】
+5. **Backtest frequently** – retrain ML models and adjust strategy parameters only
+   after offline backtests or paper sessions demonstrate consistent win rates at the
+   configured `ml_weight`. Avoid enabling new workers live without a historical burn-in
+   period.【F:desk/services/worker.py†L78-L214】【F:desk/services/learner.py†L1-L199】
 
 ---
 

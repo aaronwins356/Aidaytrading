@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import time
+import csv
 import json
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
 from desk.config import DESK_ROOT
 from desk.data import candles_to_dataframe
@@ -177,10 +178,44 @@ class ExecutionEngine:
         self.position_store = position_store or PositionStore()
         self.open_positions: Dict[str, List[OpenTrade]] = {}
         self._load_persisted_positions()
+        self.slippage_bps = float(self.risk_config.get("slippage_bps", 15.0))
+        self.balance_buffer_pct = float(
+            self.risk_config.get("balance_buffer_pct", 0.05)
+        )
+        self.duplicate_cooldown = float(
+            self.risk_config.get("duplicate_cooldown_seconds", 90.0)
+        )
+        self._last_trade_times: Dict[Tuple[str, str, str], float] = {}
+        self._journal_path = DESK_ROOT / "logs" / "trade_history.csv"
+        self._ensure_journal()
 
     def _load_persisted_positions(self) -> None:
         for trade in self.position_store.load():
             self.open_positions.setdefault(trade.symbol, []).append(trade)
+
+    def _ensure_journal(self) -> None:
+        self._journal_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._journal_path.exists():
+            with self._journal_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "timestamp",
+                        "trade_id",
+                        "worker",
+                        "symbol",
+                        "side",
+                        "qty",
+                        "entry_price",
+                        "exit_price",
+                        "stop_loss",
+                        "take_profit",
+                        "pnl",
+                        "exit_reason",
+                        "mode",
+                    ],
+                )
+                writer.writeheader()
 
     # ------------------------------------------------------------------
     # Trade lifecycle helpers
@@ -241,12 +276,60 @@ class ExecutionEngine:
         if qty <= 0:
             return None
 
+        duplicate_key = (worker.name, symbol, side.upper())
+        now = time.time()
+        last_trade = self._last_trade_times.get(duplicate_key)
+        if last_trade and (now - last_trade) < self.duplicate_cooldown:
+            self.logger.write(
+                {
+                    "type": "trade_skipped",
+                    "reason": "duplicate_guard",
+                    "worker": worker.name,
+                    "symbol": symbol,
+                    "side": side,
+                }
+            )
+            return None
+
+        slippage = max(self.slippage_bps / 10_000.0, 0.0)
+        reference_price = price * (1 + slippage if side.upper() == "BUY" else 1 - slippage)
+
+        can_execute = True
+        balance_check_error: Optional[str] = None
+        balance_guard = getattr(self.broker, "can_execute_market_order", None)
+        if callable(balance_guard):
+            try:
+                can_execute = bool(
+                    balance_guard(
+                        symbol,
+                        side,
+                        qty,
+                        price=reference_price,
+                        slippage=slippage + self.balance_buffer_pct,
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - defensive broker guard
+                balance_check_error = str(exc)
+                can_execute = False
+        if not can_execute:
+            self.logger.write(
+                {
+                    "type": "trade_skipped",
+                    "reason": "insufficient_balance",
+                    "worker": worker.name,
+                    "symbol": symbol,
+                    "side": side,
+                    "detail": balance_check_error,
+                }
+            )
+            return None
+
         trade = self._build_trade(
             worker.name,
             symbol,
             side,
             qty,
-            price,
+            reference_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
             max_hold_minutes=max_hold_minutes,
@@ -257,10 +340,10 @@ class ExecutionEngine:
             return None
 
         fill_qty = qty
-        fill_price = price
+        fill_price = reference_price
         if isinstance(placed_order, dict):
             fill_qty = float(placed_order.get("qty", qty) or qty)
-            fill_price = float(placed_order.get("price", price) or price)
+            fill_price = float(placed_order.get("price", reference_price) or reference_price)
             remaining = float(placed_order.get("remaining_qty", 0.0) or 0.0)
             trade.metadata.setdefault("execution", {})
             trade.metadata["execution"].update(
@@ -269,7 +352,7 @@ class ExecutionEngine:
                     "filled_qty": fill_qty,
                     "remaining_qty": remaining,
                     "fee": float(placed_order.get("fee", 0.0) or 0.0),
-                    "slippage": float(placed_order.get("slippage", 0.0) or 0.0),
+                    "slippage": float(placed_order.get("slippage", slippage) or slippage),
                 }
             )
         if fill_qty <= 0:
@@ -279,7 +362,7 @@ class ExecutionEngine:
 
         self.open_positions.setdefault(symbol, []).append(trade)
         self.position_store.persist(trade)
-        self.logger.log_trade(worker, symbol, side, qty, price, pnl=0.0)
+        self.logger.log_trade(worker, symbol, side, qty, fill_price, pnl=0.0)
         self.logger.write(
             {
                 "type": "trade_opened",
@@ -287,7 +370,7 @@ class ExecutionEngine:
                 "symbol": symbol,
                 "side": side,
                 "qty": qty,
-                "price": price,
+                "price": fill_price,
                 "risk_amount": risk_amount,
             }
         )
@@ -299,10 +382,11 @@ class ExecutionEngine:
                     "symbol": symbol,
                     "side": side,
                     "qty": qty,
-                    "price": price,
+                    "price": fill_price,
                     "order": placed_order,
                 }
             )
+        self._last_trade_times[duplicate_key] = now
         return trade
 
     def positions_for_symbol(self, symbol: str) -> List[OpenTrade]:
@@ -342,6 +426,45 @@ class ExecutionEngine:
                     "pnl": pnl,
                 }
             )
+        try:
+            with self._journal_path.open("a", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "timestamp",
+                        "trade_id",
+                        "worker",
+                        "symbol",
+                        "side",
+                        "qty",
+                        "entry_price",
+                        "exit_price",
+                        "stop_loss",
+                        "take_profit",
+                        "pnl",
+                        "exit_reason",
+                        "mode",
+                    ],
+                )
+                writer.writerow(
+                    {
+                        "timestamp": time.time(),
+                        "trade_id": trade.trade_id,
+                        "worker": trade.worker,
+                        "symbol": trade.symbol,
+                        "side": trade.side,
+                        "qty": trade.qty,
+                        "entry_price": trade.entry_price,
+                        "exit_price": exit_price,
+                        "stop_loss": trade.stop_loss,
+                        "take_profit": trade.take_profit,
+                        "pnl": pnl,
+                        "exit_reason": exit_reason,
+                        "mode": getattr(self.broker, "mode", "live"),
+                    }
+                )
+        except Exception:  # pragma: no cover - best effort logging
+            pass
         return pnl
 
     # ------------------------------------------------------------------
