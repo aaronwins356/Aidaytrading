@@ -53,7 +53,10 @@ class BrokerCCXT:
         paper_params: Optional[Dict[str, float]] = None,
         fallback_exchanges: Optional[Iterable[str]] = None,
     ) -> None:
-        self.mode = mode
+        normalized_mode = str(mode or "").strip().lower()
+        if not normalized_mode:
+            normalized_mode = "paper"
+        self.mode = normalized_mode
         self.exchange_name = exchange_name
         self.api_key = api_key
         self.api_secret = api_secret
@@ -93,7 +96,7 @@ class BrokerCCXT:
         else:
             self.balance_data = None
 
-        print(f"[BrokerCCXT] Running in {mode.upper()} mode")
+        print(f"[BrokerCCXT] Running in {self.mode.upper()} mode")
 
     @staticmethod
     def _error_message(exc: Exception) -> str:
