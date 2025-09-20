@@ -122,6 +122,20 @@ class TradingRuntime:
             max_workers=feed_workers,
             local_store=self.feed_updater.store,
         )
+        self._fixed_risk_usd = float(risk_cfg.get("fixed_risk_usd", 50.0) or 0.0)
+        self._weekly_return_target = float(risk_cfg.get("weekly_return_target", 0.0) or 0.0)
+        self._trading_days_per_week = float(risk_cfg.get("trading_days_per_week", 5.0) or 5.0)
+        expected_trades_per_day = risk_cfg.get("expected_trades_per_day")
+        try:
+            self._expected_trades_per_day: Optional[float]
+            self._expected_trades_per_day = (
+                float(expected_trades_per_day)
+                if expected_trades_per_day is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            self._expected_trades_per_day = None
+
         self.risk_engine = RiskEngine(
             daily_dd=risk_cfg.get("daily_dd"),
             weekly_dd=risk_cfg.get("weekly_dd"),
@@ -228,6 +242,33 @@ class TradingRuntime:
                 continue
         return cleaned
 
+    def _resolve_expected_trades_per_day(self) -> float:
+        if self._expected_trades_per_day and self._expected_trades_per_day > 0:
+            return float(self._expected_trades_per_day)
+        return float(max(len(self.workers), 1))
+
+    def _compute_base_risk(self, equity: float) -> float:
+        """Derive the per-trade risk budget from account equity."""
+
+        if equity <= 0:
+            return max(self._fixed_risk_usd, 0.0)
+
+        weekly_target = max(self._weekly_return_target, 0.0)
+        if weekly_target <= 0:
+            return max(self._fixed_risk_usd, 0.0)
+
+        trading_days = max(self._trading_days_per_week, 1.0)
+        expected_trades = max(self._resolve_expected_trades_per_day(), 1.0)
+
+        daily_target = (1.0 + weekly_target) ** (1.0 / trading_days) - 1.0
+        if daily_target <= 0:
+            return max(self._fixed_risk_usd, 0.0)
+
+        base_risk = equity * (daily_target / expected_trades)
+        if base_risk <= 0:
+            return max(self._fixed_risk_usd, 0.0)
+        return base_risk
+
     def run(self) -> None:
         if not self.workers:
             print("[RUNTIME] No workers configured. Exiting.")
@@ -240,12 +281,20 @@ class TradingRuntime:
         self.start_services()
 
         symbols = {worker.symbol for worker in self.workers}
-        risk_cfg = self.config.get("risk", {})
-        base_risk = float(risk_cfg.get("fixed_risk_usd", 50.0))
-
         print(f"[RUNTIME] Starting loop with {len(self.workers)} workers")
 
         while self.state.running:
+            equity = float(self.broker.account_equity())
+            self.logger.write_equity(equity)
+            self.telemetry.record_equity(equity)
+            self.risk_engine.check_account(equity)
+            if self.risk_engine.halted:
+                print("[RUNTIME] Risk engine halted trading. Exiting loop.")
+                self.state.running = False
+                break
+
+            base_risk = self._compute_base_risk(equity)
+
             snapshot = self.feed.snapshot(symbols)
             intents = []
 
@@ -358,14 +407,6 @@ class TradingRuntime:
                         if retrain_every > 0 and worker.state.get("trades", 0) % retrain_every == 0:
                             history = self.learner.load_trade_history(worker.name)
                             self.learner.retrain_worker(worker, history)
-
-            equity = float(self.broker.account_equity())
-            self.logger.write_equity(equity)
-            self.telemetry.record_equity(equity)
-            self.risk_engine.check_account(equity)
-            if self.risk_engine.halted:
-                print("[RUNTIME] Risk engine halted trading. Exiting loop.")
-                self.state.running = False
 
             time.sleep(self.loop_delay)
 
