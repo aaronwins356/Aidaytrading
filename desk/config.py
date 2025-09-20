@@ -35,6 +35,11 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "paper_min_fill_ratio": 0.6,
         "paper_funding_rate_hourly": 0.0,
     },
+    "feed": {
+        "exchange": "binance",
+        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"],
+        "timeframe": "1m",
+    },
     "risk": {
         "fixed_risk_usd": 120.0,
         "rr_ratio": 2.0,
