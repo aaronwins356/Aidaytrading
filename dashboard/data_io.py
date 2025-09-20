@@ -292,7 +292,7 @@ class ReportingConfig(BaseModel):
 
 
 class DeskConfig(BaseModel):
-    mode: str = Field("Paper", regex="^(Paper|Live|Both)$")
+    mode: str = Field("Paper", pattern=r"^(Paper|Live|Both)$")
     base_currency: str = "USDT"
     symbols: List[str] = Field(default_factory=lambda: SYMBOLS)
     workers: Dict[str, WorkerConfig] = Field(default_factory=dict)
