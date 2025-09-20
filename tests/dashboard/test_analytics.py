@@ -12,7 +12,7 @@ def sample_trades() -> pd.DataFrame:
             "trade_id": ["t1", "t2", "t3"],
             "opened_at": pd.date_range("2024-01-01", periods=3, freq="D"),
             "closed_at": pd.date_range("2024-01-02", periods=3, freq="D"),
-            "symbol": ["BTC/USDT", "ETH/USDT", "BTC/USDT"],
+            "symbol": ["BTC/USD", "ETH/USD", "BTC/USD"],
             "worker": ["alpha", "beta", "alpha"],
             "qty": [1.0, 2.0, 1.5],
             "pnl": [100.0, -50.0, 200.0],

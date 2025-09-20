@@ -39,12 +39,12 @@ def test_feed_retries_and_caches_success(monkeypatch):
         max_retries=2,
         backoff_factor=0,
     )
-    candles = handler.fetch("BTC/USDT")
+    candles = handler.fetch("BTC/USD")
     assert candles
     assert candles[-1]["latency"] >= 0
     # second call should succeed without additional failures
     calls_before = broker.calls
-    candles_again = handler.fetch("BTC/USDT")
+    candles_again = handler.fetch("BTC/USD")
     assert broker.calls == calls_before + 1
     assert candles_again[-1]["close"] == candles[-1]["close"]
 
@@ -62,10 +62,10 @@ def test_feed_uses_fallback_and_circuit_breaker(monkeypatch):
         circuit_reset_seconds=30,
         fallback_broker=fallback,
     )
-    candles = handler.fetch("BTC/USDT")
+    candles = handler.fetch("BTC/USD")
     assert candles[0]["close"] == 200
     # circuit breaker active should prevent additional broker calls
     initial_calls = broker.calls
-    candles2 = handler.fetch("BTC/USDT")
+    candles2 = handler.fetch("BTC/USD")
     assert broker.calls == initial_calls
     assert candles2 == candles

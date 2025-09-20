@@ -85,7 +85,7 @@ class TradingRuntime:
                 if worker_cfg.get("symbol")
             ]
         if not feed_symbols:
-            feed_symbols = ["BTC/USDT"]
+            feed_symbols = ["BTC/USD"]
 
         self.feed_updater = FeedUpdater(
             exchange=feed_exchange,

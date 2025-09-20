@@ -74,7 +74,7 @@ if not LOGGER.handlers:
     LOGGER.addHandler(handler)
 LOGGER.setLevel(logging.INFO)
 
-SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
+SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"]
 
 
 def _asdict(model: BaseModel) -> Dict[str, Any]:
@@ -350,7 +350,7 @@ class ReportingConfig(BaseModel):
 
 class DeskConfig(BaseModel):
     mode: str = Field("Paper", pattern=r"^(Paper|Live|Both)$")
-    base_currency: str = "USDT"
+    base_currency: str = "USD"
     symbols: List[str] = Field(default_factory=lambda: SYMBOLS)
     workers: Dict[str, WorkerConfig] = Field(default_factory=dict)
     risk: RiskConfig = Field(default_factory=RiskConfig)

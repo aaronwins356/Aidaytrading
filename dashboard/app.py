@@ -41,7 +41,7 @@ if not LOGGER.handlers:
     LOGGER.addHandler(handler)
 LOGGER.setLevel(logging.INFO)
 
-PRIMARY_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
+PRIMARY_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"]
 TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h"]
 DATE_PRESETS = ["1D", "7D", "30D", "YTD", "Custom"]
 CACHE_TTL_SECONDS = 60
@@ -290,7 +290,7 @@ def main() -> None:
     else:
         st.info("No equity data available yet. Displaying demo curve.")
         filters = st.session_state["filters"]
-        demo = get_demo_market("BTC/USDT", *filters.get("date_range", (date.today() - timedelta(days=7), date.today())), filters.get("timeframe", "1h"))
+        demo = get_demo_market("BTC/USD", *filters.get("date_range", (date.today() - timedelta(days=7), date.today())), filters.get("timeframe", "1h"))
         if not demo.empty:
             demo_fig = equity_with_drawdown(
                 drawdown_series(
