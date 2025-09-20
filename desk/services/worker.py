@@ -6,7 +6,10 @@ import importlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-import pandas as pd
+try:  # pragma: no cover - import guard
+    import pandas as pd  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    pd = None  # type: ignore
 
 from desk.data import candles_to_dataframe
 from desk.services.learner import Learner
@@ -226,6 +229,21 @@ class Worker:
                     features[f"candle_{column}"] = float(latest[column])
                 except (TypeError, ValueError):
                     continue
+
+        # Derived features for richer ML context.
+        if "close" in df.columns:
+            returns = df["close"].pct_change().fillna(0.0)
+            short_window = returns.tail(5)
+            long_window = returns.tail(20)
+            features["signal_return_volatility_short"] = float(short_window.std() or 0.0)
+            features["signal_return_volatility_long"] = float(long_window.std() or 0.0)
+            long_vol = features["signal_return_volatility_long"] or 1e-9
+            features["signal_volatility_cluster_ratio"] = float(
+                features["signal_return_volatility_short"] / long_vol
+            )
+        if "volume" in df.columns and len(df) > 1:
+            prev_volume = df["volume"].iloc[-2]
+            features["signal_volume_delta"] = float(latest["volume"] - prev_volume)
 
         try:
             strat_features = self.strategy.extract_features(df) or {}

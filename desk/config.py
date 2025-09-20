@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 from pathlib import Path
 from typing import Any, Dict
 
-import yaml
+try:  # pragma: no cover - import guard
+    import yaml  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    from desk._yaml_stub import yaml  # type: ignore
 
 # Path to the repository root (two levels up from this file)
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -70,13 +75,48 @@ def _ensure_config_file(path: Path) -> None:
             yaml.safe_dump(_DEFAULT_CONFIG, handle, sort_keys=False)
 
 
+def _parse_env_value(value: str) -> Any:
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        if any(char in value for char in (".", "e", "E")):
+            return float(value)
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
+    overrides: Dict[str, Any] = {}
+    prefix = "DESK_"
+    for key, value in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        path = key[len(prefix) :].split("__")
+        cursor = overrides
+        for part in path[:-1]:
+            cursor = cursor.setdefault(part.lower(), {})
+        cursor[path[-1].lower()] = _parse_env_value(value)
+    if overrides:
+        config = _deep_merge(config, overrides)
+    return config
+
+
 def load_config(path: Path | None = None) -> Dict[str, Any]:
     """Load the bot configuration, falling back to sane defaults."""
     path = path or CONFIG_PATH
     _ensure_config_file(path)
     with path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
-    return _deep_merge(_DEFAULT_CONFIG, raw)
+    # normalise keys to lowercase for env override compatibility
+    merged = _deep_merge(_DEFAULT_CONFIG, raw)
+    merged = _apply_env_overrides(merged)
+    return merged
 
 
 def save_config(config: Dict[str, Any], path: Path | None = None) -> None:

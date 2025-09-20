@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
-import pandas as pd
+try:  # pragma: no cover - import guard
+    import pandas as pd  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    pd = None  # type: ignore
 
 OHLCV_KEYS = ("timestamp", "open", "high", "low", "close", "volume")
 
@@ -32,6 +35,8 @@ def normalize_ohlcv(candles: Iterable[Sequence[Any] | Mapping[str, Any]]) -> Lis
 
 def candles_to_dataframe(candles: Iterable[Sequence[Any] | Mapping[str, Any]]) -> pd.DataFrame:
     """Convert raw candles to a Pandas DataFrame sorted by timestamp."""
+    if pd is None:  # pragma: no cover - dependency guard
+        raise ModuleNotFoundError("pandas is required for dataframe operations")
     normalized = normalize_ohlcv(candles)
     if not normalized:
         return pd.DataFrame(columns=OHLCV_KEYS)

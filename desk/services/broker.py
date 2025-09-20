@@ -6,10 +6,20 @@ import ast
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Optional
 
-import ccxt
+try:  # pragma: no cover - import guard
+    import ccxt  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    class _MissingCCXT:
+        def __getattr__(self, name: str):
+            raise ModuleNotFoundError(
+                "ccxt is required for live trading but is not installed"
+            )
+
+    ccxt = _MissingCCXT()  # type: ignore
 
 from desk.config import DESK_ROOT
 
@@ -39,6 +49,7 @@ class BrokerCCXT:
         self.starting_balance = starting_balance
         self.db_path = Path(db_path or DESK_ROOT / "logs" / "balances.db")
         self._init_db()
+        self._latency_log: list[Dict[str, float]] = []
 
         if self.mode == "paper":
             bal = self._load_balance()
@@ -51,6 +62,21 @@ class BrokerCCXT:
             self.balance_data = None
 
         print(f"[BrokerCCXT] Running in {mode.upper()} mode")
+
+    @contextmanager
+    def _measure_latency(self, operation: str):
+        start = time.time()
+        try:
+            yield
+        finally:
+            duration = time.time() - start
+            self._latency_log.append(
+                {"operation": operation, "duration": duration, "timestamp": start}
+            )
+
+    @property
+    def latency_log(self) -> list[Dict[str, float]]:
+        return list(self._latency_log)
 
     # ----------------------------
     # Database persistence
@@ -107,10 +133,12 @@ class BrokerCCXT:
     # Price + Candle Data
     # ----------------------------
     def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 50):
-        return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        with self._measure_latency("fetch_ohlcv"):
+            return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
     def fetch_price(self, symbol: str) -> float:
-        ticker = self.exchange.fetch_ticker(symbol)
+        with self._measure_latency("fetch_price"):
+            ticker = self.exchange.fetch_ticker(symbol)
         return float(ticker["last"])
 
     # ----------------------------
@@ -171,9 +199,12 @@ class BrokerCCXT:
             success = self.update_balance(pnl=0.0, qty=qty, side=side, price=price, symbol=symbol)
             if not success:
                 return None
+            with self._measure_latency("market_order"):
+                pass
             return trade
 
-        order = self.exchange.create_order(symbol, "market", side, qty)
+        with self._measure_latency("market_order"):
+            order = self.exchange.create_order(symbol, "market", side, qty)
         return order
 
 
