@@ -1,0 +1,107 @@
+settings:
+  mode: paper
+  exchange: kraken
+  api_key: ""
+  api_secret: ""
+  balance: 1000
+  loop_delay: 60
+  warmup_candles: 50
+  timeframe: 1m
+  lookback: 250
+
+risk:
+  fixed_risk_usd: 50
+  rr_ratio: 2.0
+  stop_loss_pct: 0.02
+  max_hold_minutes: 15
+  daily_dd: 0.02
+  weekly_dd: 0.05
+  trade_stop_loss: 1.0
+  max_concurrent: 8
+  halt_on_dd: true
+  retrain_every: 25
+  ml_weight: 0.5
+  trapdoor_pct: 0.02
+
+portfolio:
+  min_weight: 0.05
+  max_weight: 0.25
+  epsilon: 0.1
+  cooldown_minutes: 15
+
+workers:
+  - name: BTC SMA
+    symbol: BTC/USD
+    strategy: sma_crossover
+    allocation: 0.10
+    params:
+      fast_length: 20
+      slow_length: 50
+      risk_per_trade: 0.40
+
+  - name: BTC RSI
+    symbol: BTC/USD
+    strategy: rsi_mean_reversion
+    allocation: 0.10
+    params:
+      length: 14         # was rsi_length
+      low: 30            # was oversold
+      high: 70           # was overbought
+      risk_per_trade: 0.40
+
+  - name: ETH EMA
+    symbol: ETH/USD
+    strategy: ema_breakout
+    allocation: 0.10
+    params:
+      length: 50         # was ema_length
+      risk_per_trade: 0.40
+
+  - name: ETH MACD
+    symbol: ETH/USD
+    strategy: macd_trend
+    allocation: 0.10
+    params:
+      fast: 12           # was fast_length
+      slow: 26           # was slow_length
+      signal: 9          # was signal_length
+      risk_per_trade: 0.40
+
+  - name: SOL Momentum
+    symbol: SOL/USD
+    strategy: momentum
+    allocation: 0.10
+    params:
+      length: 14         # was lookback
+      threshold: 0.7
+      risk_per_trade: 0.40
+
+  - name: SOL ATR
+    symbol: SOL/USD
+    strategy: atr_trailing_stop
+    allocation: 0.10
+    params:
+      atr_length: 14
+      atr_mult: 3        # was multiplier
+      risk_per_trade: 0.40
+
+  - name: XRP Bollinger
+    symbol: XRP/USD
+    strategy: bollinger_band
+    allocation: 0.10
+    params:
+      length: 20
+      mult: 2            # was std_dev
+      risk_per_trade: 0.40
+
+  - name: XRP Stochastic
+    symbol: XRP/USD
+    strategy: stochastic_oscillator
+    allocation: 0.10
+    params:
+      k: 14              # was k_length
+      d: 3               # was d_length
+      low: 20            # was oversold
+      high: 80           # was overbought
+      risk_per_trade: 0.40
+
