@@ -5,7 +5,7 @@ from __future__ import annotations
 import signal
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from desk.config import CONFIG_PATH, load_config
 from desk.services import (
@@ -94,6 +94,16 @@ class TradingRuntime:
         print(f"[RUNTIME] Received signal {signum}. Shutting down...")
         self.state.running = False
 
+    @staticmethod
+    def _sanitize_features(features: Dict[str, float]) -> Dict[str, float]:
+        cleaned: Dict[str, float] = {}
+        for key, value in features.items():
+            try:
+                cleaned[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return cleaned
+
     def run(self) -> None:
         if not self.workers:
             print("[RUNTIME] No workers configured. Exiting.")
@@ -148,6 +158,11 @@ class TradingRuntime:
                         qty,
                         intent.price,
                         risk_budget,
+                        metadata={
+                            "features": intent.features,
+                            "score": intent.score,
+                            "ml_edge": intent.ml_score,
+                        },
                     )
                     if trade:
                         self.portfolio.mark_routed(intent.worker.name)
@@ -160,6 +175,9 @@ class TradingRuntime:
                                 "qty": qty,
                                 "entry_price": intent.price,
                                 "timestamp": time.time(),
+                                "features": intent.features,
+                                "ml_edge": intent.ml_score,
+                                "score": intent.score,
                             }
                         )
 
@@ -170,6 +188,23 @@ class TradingRuntime:
                     if worker:
                         worker.record_trade(pnl)
                         self.portfolio.update_stats(worker.name, pnl)
+                        row = {
+                            **self._sanitize_features(trade.metadata.get("features", {})),
+                            "entry_price": trade.entry_price,
+                            "stop_loss": trade.stop_loss,
+                            "take_profit": trade.take_profit,
+                            "qty": trade.qty,
+                            "score": trade.metadata.get("score", 0.0),
+                            "ml_edge": trade.metadata.get("ml_edge", 0.5),
+                            "hold_time": time.time() - trade.opened_at,
+                            "pnl": pnl,
+                        }
+                        self.learner.record_result(worker.name, row)
+
+                        retrain_every = int(risk_cfg.get("retrain_every", 25))
+                        if retrain_every > 0 and worker.state.get("trades", 0) % retrain_every == 0:
+                            history = self.learner.load_trade_history(worker.name)
+                            self.learner.retrain_worker(worker, history)
 
             balance = self.broker.balance()
             equity = 0.0

@@ -29,6 +29,8 @@ class Intent:
     price: float
     score: float
     vetoes: List[VetoResult]
+    features: Dict[str, float]
+    ml_score: float
 
     @property
     def approved(self) -> bool:
@@ -150,10 +152,18 @@ class Worker:
         price = float(df["close"].iloc[-1])
         vetoes = self._veto_checks(df)
 
-        ml_score = self.learner.predict_edge(self, df.iloc[-1].to_dict())
+        features = self._collect_features(df)
+        ml_score = self.learner.predict_edge(self, features)
         score = 0.6 + 0.4 * ml_score
 
         qty = self.compute_quantity(price, risk_budget)
+
+        enriched_features = dict(features)
+        enriched_features["ml_edge"] = ml_score
+        enriched_features["combined_score"] = score
+        enriched_features["proposed_qty"] = qty
+        enriched_features["risk_budget"] = risk_budget
+        enriched_features["side"] = 1.0 if side == "BUY" else -1.0
 
         return Intent(
             worker=self,
@@ -163,7 +173,36 @@ class Worker:
             price=price,
             score=score,
             vetoes=vetoes,
+            features=enriched_features,
+            ml_score=ml_score,
         )
+
+    # ------------------------------------------------------------------
+    def _collect_features(self, df: pd.DataFrame) -> Dict[str, float]:
+        """Compile candle + strategy features for downstream learning."""
+
+        latest = df.iloc[-1]
+        features: Dict[str, float] = {}
+
+        for column in ("open", "high", "low", "close", "volume"):
+            if column in df.columns:
+                try:
+                    features[f"candle_{column}"] = float(latest[column])
+                except (TypeError, ValueError):
+                    continue
+
+        try:
+            strat_features = self.strategy.extract_features(df) or {}
+        except Exception:  # pragma: no cover - defensive, strategy bug shouldn't crash
+            strat_features = {}
+
+        for key, value in strat_features.items():
+            try:
+                features[f"signal_{key}"] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+        return features
 
     # ------------------------------------------------------------------
     def record_trade(self, pnl: float) -> None:
