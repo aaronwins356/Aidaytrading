@@ -9,7 +9,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 try:  # pragma: no cover - import guard
     import ccxt  # type: ignore
@@ -33,6 +33,10 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
     from desk.services.telemetry import TelemetryClient
 
 
+class ExchangeBlockedError(RuntimeError):
+    """Raised when an exchange rejects the connection due to geo restrictions."""
+
+
 class BrokerCCXT:
     """Paper/live execution wrapper with simple balance persistence."""
 
@@ -47,16 +51,21 @@ class BrokerCCXT:
         *,
         telemetry: Optional["TelemetryClient"] = None,
         paper_params: Optional[Dict[str, float]] = None,
+        fallback_exchanges: Optional[Iterable[str]] = None,
     ) -> None:
         self.mode = mode
         self.exchange_name = exchange_name
         self.api_key = api_key
         self.api_secret = api_secret
-        self.exchange = getattr(ccxt, exchange_name)({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "enableRateLimit": True
-        })
+        self._fallback_exchanges = [
+            str(name)
+            for name in (fallback_exchanges or [])
+            if str(name or "").strip()
+        ]
+        self._blocked_until: dict[str, float] = {}
+        self._blocked_retry_seconds = 900.0
+        self._candidate_exchanges = self._build_candidate_list(exchange_name)
+        self.exchange = self._initialise_exchange()
 
         self.starting_balance = starting_balance
         self.db_path = Path(db_path or DESK_ROOT / "logs" / "balances.db")
@@ -86,6 +95,130 @@ class BrokerCCXT:
 
         print(f"[BrokerCCXT] Running in {mode.upper()} mode")
 
+    @staticmethod
+    def _error_message(exc: Exception) -> str:
+        message = "".join(str(part) for part in getattr(exc, "args", []) if part)
+        return message or str(exc)
+
+    @staticmethod
+    def _is_geo_blocked(exc: Exception) -> bool:
+        message = BrokerCCXT._error_message(exc).lower()
+        if not message:
+            return False
+        blockers = ("restricted", "forbidden", "not available", "denied", "prohibited")
+        if "us" not in message and "united states" not in message:
+            return False
+        return any(token in message for token in blockers)
+
+    @staticmethod
+    def _is_transient(exc: Exception) -> bool:
+        message = BrokerCCXT._error_message(exc).lower()
+        transient_terms = (
+            "timeout",
+            "temporarily",
+            "service unavailable",
+            "connection reset",
+            "network",
+            "rate limit",
+        )
+        return any(term in message for term in transient_terms)
+
+    def _build_candidate_list(self, primary: str) -> list[str]:
+        seen = set()
+        candidates: list[str] = []
+        for name in [primary, *self._fallback_exchanges]:
+            if not name:
+                continue
+            lname = name.lower()
+            if lname in seen:
+                continue
+            seen.add(lname)
+            candidates.append(name)
+        if not candidates:
+            candidates.append("kraken")
+        return candidates
+
+    def _mark_blocked(self, name: str, reason: str) -> None:
+        retry_at = time.time() + self._blocked_retry_seconds
+        self._blocked_until[name.lower()] = retry_at
+        print(f"[BrokerCCXT] Exchange {name} blocked until {retry_at:.0f}: {reason}")
+
+    def _is_blocked(self, name: str) -> bool:
+        retry_at = self._blocked_until.get(name.lower())
+        if not retry_at:
+            return False
+        if retry_at <= time.time():
+            self._blocked_until.pop(name.lower(), None)
+            return False
+        return True
+
+    def _create_exchange(self, name: str):
+        exchange_cls = getattr(ccxt, name)
+        exchange = exchange_cls(
+            {
+                "apiKey": self.api_key,
+                "secret": self.api_secret,
+                "enableRateLimit": True,
+            }
+        )
+        load_markets = getattr(exchange, "load_markets", None)
+        if callable(load_markets):
+            try:
+                load_markets()
+            except Exception as exc:  # pragma: no cover - network guard
+                if self._is_geo_blocked(exc):
+                    exchange.close() if hasattr(exchange, "close") else None
+                    raise ExchangeBlockedError(self._error_message(exc)) from exc
+                raise
+        return exchange
+
+    def _initialise_exchange(self):  # pragma: no cover - network heavy
+        last_error: Exception | None = None
+        for name in self._candidate_exchanges:
+            if self._is_blocked(name):
+                continue
+            try:
+                exchange = self._create_exchange(name)
+            except ExchangeBlockedError as exc:
+                self._mark_blocked(name, self._error_message(exc))
+                last_error = exc
+                continue
+            except Exception as exc:  # pragma: no cover - network guard
+                last_error = exc
+                continue
+            self.exchange_name = name
+            if name != self._candidate_exchanges[0]:
+                print(f"[BrokerCCXT] Using fallback exchange {name}")
+            return exchange
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Unable to initialise any exchange")
+
+    def _promote_fallback(self, *, reason: str) -> bool:  # pragma: no cover - network heavy
+        for name in self._candidate_exchanges:
+            if name == self.exchange_name:
+                continue
+            if self._is_blocked(name):
+                continue
+            try:
+                exchange = self._create_exchange(name)
+            except ExchangeBlockedError as exc:
+                self._mark_blocked(name, self._error_message(exc))
+                continue
+            except Exception as exc:  # pragma: no cover - network guard
+                print(f"[BrokerCCXT] Failed to promote {name}: {self._error_message(exc)}")
+                continue
+            old_exchange = self.exchange
+            self.exchange = exchange
+            self.exchange_name = name
+            print(f"[BrokerCCXT] Switched to {name} due to: {reason}")
+            try:
+                old_exchange.close()
+            except Exception:
+                pass
+            return True
+        return False
+
     @contextmanager
     def _measure_latency(self, operation: str):
         start = time.time()
@@ -102,6 +235,39 @@ class BrokerCCXT:
     @property
     def latency_log(self) -> list[Dict[str, float]]:
         return list(self._latency_log)
+
+    def _execute_with_retry(self, operation: str, func):  # pragma: no cover - network heavy
+        attempts = 0
+        backoff = 1.0
+        last_exc: Exception | None = None
+        while attempts < 5:
+            attempts += 1
+            try:
+                with self._measure_latency(operation):
+                    return func(self.exchange)
+            except Exception as exc:
+                last_exc = exc
+                message = self._error_message(exc)
+                if self._is_geo_blocked(exc):
+                    self._mark_blocked(self.exchange_name, message)
+                    if self._promote_fallback(reason=message):
+                        backoff = 1.0
+                        continue
+                else:
+                    switched = False
+                    if not self._is_transient(exc) or attempts >= 2:
+                        switched = self._promote_fallback(reason=message)
+                    if switched:
+                        backoff = 1.0
+                        continue
+                if attempts < 5:
+                    time.sleep(min(backoff, 15.0))
+                    backoff = min(self._blocked_retry_seconds / 2, backoff * 2)
+                    continue
+                break
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"{operation} failed without raising an exception")
 
     # ----------------------------
     # Database persistence
@@ -166,17 +332,20 @@ class BrokerCCXT:
         since: int | float | None = None,
     ):
         normalized_since = int(since) if since is not None else None
-        with self._measure_latency("fetch_ohlcv"):
-            return self.exchange.fetch_ohlcv(
+        return self._execute_with_retry(
+            "fetch_ohlcv",
+            lambda exchange: exchange.fetch_ohlcv(
                 symbol,
                 timeframe=timeframe,
                 limit=limit,
                 since=normalized_since,
-            )
+            ),
+        )
 
     def fetch_price(self, symbol: str) -> float:
-        with self._measure_latency("fetch_price"):
-            ticker = self.exchange.fetch_ticker(symbol)
+        ticker = self._execute_with_retry(
+            "fetch_price", lambda exchange: exchange.fetch_ticker(symbol)
+        )
         return float(ticker["last"])
 
     # ----------------------------

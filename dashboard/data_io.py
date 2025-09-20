@@ -358,6 +358,29 @@ class DeskConfig(BaseModel):
     kraken_api_key: str = ""
     kraken_api_secret: str = ""
 
+    if field_validator:  # pragma: no branch - handled by import guard above
+
+        @field_validator("mode")
+        @classmethod
+        def _validate_mode(cls, value: str) -> str:
+            allowed = {"Paper", "Live", "Both"}
+            if value not in allowed:
+                raise ValueError(
+                    "mode must match pattern ^(Paper|Live|Both)$"
+                )
+            return value
+
+    else:  # pragma: no cover - exercised under pydantic v1
+
+        @validator("mode")
+        def _validate_mode(cls, value: str) -> str:
+            allowed = {"Paper", "Live", "Both"}
+            if value not in allowed:
+                raise ValueError(
+                    "mode must match pattern ^(Paper|Live|Both)$"
+                )
+            return value
+
 
 def _default_config() -> DeskConfig:
     return DeskConfig(
