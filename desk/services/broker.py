@@ -157,9 +157,22 @@ class BrokerCCXT:
     # ----------------------------
     # Price + Candle Data
     # ----------------------------
-    def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 50):
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        *,
+        limit: int = 50,
+        since: int | float | None = None,
+    ):
+        normalized_since = int(since) if since is not None else None
         with self._measure_latency("fetch_ohlcv"):
-            return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            return self.exchange.fetch_ohlcv(
+                symbol,
+                timeframe=timeframe,
+                limit=limit,
+                since=normalized_since,
+            )
 
     def fetch_price(self, symbol: str) -> float:
         with self._measure_latency("fetch_price"):

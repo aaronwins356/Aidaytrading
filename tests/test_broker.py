@@ -12,7 +12,7 @@ class DummyExchange:
         self.orders: list[Dict[str, Any]] = []
         self.ohlcv = [[1, 100, 101, 99, 100, 5]]
 
-    def fetch_ohlcv(self, symbol, timeframe="1m", limit=50):
+    def fetch_ohlcv(self, symbol, timeframe="1m", limit=50, since=None):
         return self.ohlcv
 
     def fetch_ticker(self, symbol):
