@@ -225,13 +225,15 @@ class FeedUpdater:
             "synthetic_volatility": 0.01,
             "synthetic_volume_mean": 10_000.0,
             "synthetic_volume_std": 2_500.0,
+            "seed_length": 1_000,
+            "seed_timeframe": "1m",
         }
         if seed_config:
             for key, value in seed_config.items():
                 if value is None:
                     continue
                 try:
-                    if key in {"warm_candles", "synthetic_candles"}:
+                    if key in {"warm_candles", "synthetic_candles", "seed_length"}:
                         default_seed[key] = int(float(value))
                     elif key in {"allow_synthetic"}:
                         default_seed[key] = bool(value)
@@ -241,11 +243,19 @@ class FeedUpdater:
                     continue
         self.seed_config = default_seed
         try:
-            self._warm_candles = max(
-                10, int(float(self.seed_config.get("warm_candles", 500)))
+            self._seed_length = max(
+                10, int(float(self.seed_config.get("seed_length", 1_000)))
             )
         except (TypeError, ValueError):
-            self._warm_candles = 500
+            self._seed_length = 1_000
+        try:
+            self._warm_candles = max(
+                self._seed_length,
+                10,
+                int(float(self.seed_config.get("warm_candles", 500))),
+            )
+        except (TypeError, ValueError):
+            self._warm_candles = max(self._seed_length, 500)
         try:
             self._synthetic_batch = max(
                 1, int(float(self.seed_config.get("synthetic_candles", 200)))
@@ -257,6 +267,9 @@ class FeedUpdater:
         )
         self._stale_threshold = float(
             self.seed_config.get("max_stale_seconds", self._timeframe_seconds * 6)
+        )
+        self._seed_timeframe = str(
+            self.seed_config.get("seed_timeframe") or self.timeframe
         )
         self._rng = random.Random()
         self._exchange = self._build_exchange()
@@ -275,7 +288,8 @@ class FeedUpdater:
                 continue
             seen.add(lname)
             candidates.append(name)
-        if not candidates:
+        if "kraken" not in seen:
+            seen.add("kraken")
             candidates.append("kraken")
         return candidates
 
@@ -446,10 +460,15 @@ class FeedUpdater:
     # Logging helpers
     # ------------------------------------------------------------------
     def _log(self, level: str, symbol: str, message: str, **metadata) -> None:
-        if self.logger is None:
-            return
         payload = {"attempt": metadata.get("attempt"), "detail": metadata.get("detail")}
         payload = {k: v for k, v in payload.items() if v is not None}
+        meta_str = ""
+        if payload:
+            detail_parts = [f"{key}={value}" for key, value in payload.items()]
+            meta_str = " | " + ", ".join(detail_parts)
+        print(f"[FeedUpdater][{level.upper()}] {symbol}: {message}{meta_str}")
+        if self.logger is None:
+            return
         self.logger.log_feed_event(level=level, symbol=symbol, message=message, **payload)
 
     # ------------------------------------------------------------------
@@ -535,6 +554,100 @@ class FeedUpdater:
             price = close_price
         return candles
 
+    def _fallback_candles(
+        self,
+        symbol: str,
+        limit: int,
+        *,
+        allow_synthetic: bool = True,
+    ) -> List[Dict[str, float]]:
+        cached: List[Dict[str, float]] = []
+        try:
+            cached = self.store.load(symbol, limit)
+        except Exception as exc:
+            self._log(
+                "ERROR",
+                symbol,
+                "Failed to load cached candles",
+                detail=self._error_message(exc),
+            )
+        if cached:
+            last_ts = float(cached[-1].get("timestamp", 0.0) or 0.0)
+            age = time.time() - self._normalize_timestamp(last_ts)
+            if not self._candles_are_stale(cached):
+                self._log(
+                    "INFO",
+                    symbol,
+                    "Using cached candles while exchange recovers",
+                    detail=f"count={len(cached)}",
+                )
+                return cached
+            self._log(
+                "WARNING",
+                symbol,
+                "Cached candles are stale",
+                detail=f"age={age:.2f}s",
+            )
+        if allow_synthetic and self.mode.lower() == "paper":
+            synthetic = self._generate_synthetic_candles(
+                symbol, min(limit, self._synthetic_batch)
+            )
+            if synthetic:
+                self._log(
+                    "WARNING",
+                    symbol,
+                    "Generated synthetic candles for fallback",
+                    detail=f"count={len(synthetic)}",
+                )
+                return synthetic
+        return []
+
+    def _seed_from_kraken(self, symbol: str, limit: int) -> List[Dict[str, float]]:
+        try:
+            exchange = self._ensure_exchange("kraken")
+        except Exception as exc:
+            self._log(
+                "WARNING",
+                symbol,
+                "Kraken unavailable for seeding",
+                detail=self._error_message(exc),
+            )
+            return []
+        try:
+            raw = exchange.fetch_ohlcv(
+                symbol,
+                timeframe=self._seed_timeframe,
+                limit=limit,
+            )
+        except Exception as exc:  # pragma: no cover - network guard
+            self._log(
+                "WARNING",
+                symbol,
+                "Kraken fetch failed for seeding",
+                detail=self._error_message(exc),
+            )
+            return []
+        candles = normalize_ohlcv(raw)
+        if candles and self._candles_are_stale(candles):
+            age = time.time() - self._normalize_timestamp(
+                float(candles[-1].get("timestamp", 0.0))
+            )
+            self._log(
+                "WARNING",
+                symbol,
+                "Kraken returned stale seed candles",
+                detail=f"age={age:.2f}s",
+            )
+            return []
+        if candles:
+            self._log(
+                "INFO",
+                symbol,
+                "Seeded candles fetched from Kraken",
+                detail=f"count={len(candles)}",
+            )
+        return candles[-limit:]
+
     def _maybe_seed_symbol(self, symbol: str, *, reason: str, count: Optional[int] = None) -> bool:
         if self.mode.lower() != "paper":
             return False
@@ -554,35 +667,78 @@ class FeedUpdater:
 
     def seed_if_needed(self) -> None:
         for symbol in self.symbols:
-            latest = self.store.latest_timestamp(symbol)
-            if latest is not None and not self._symbol_stale(latest):
-                continue
             try:
-                fresh = self._fetch(
-                    symbol,
-                    limit=self._warm_candles,
-                    since=None,
-                    allow_synthetic=self.mode.lower() == "paper",
+                existing = self.store.load(symbol, self._seed_length)
+            except Exception:
+                existing = []
+            latest = None
+            if existing:
+                latest = int(float(existing[-1].get("timestamp", 0.0)))
+            has_enough = len(existing) >= self._seed_length
+            if has_enough and latest is not None and not self._symbol_stale(latest):
+                continue
+            fresh: List[Dict[str, float]] = []
+            try:
+                fresh = self._seed_from_kraken(
+                    symbol, max(self._warm_candles, self._seed_length)
                 )
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover - defensive
                 self._log(
                     "WARNING",
                     symbol,
-                    "Failed to seed candles from exchange",
+                    "Unexpected error during Kraken seeding",
                     detail=self._error_message(exc),
                 )
-                if self.mode.lower() == "paper":
-                    self._maybe_seed_symbol(symbol, reason="initial_seed", count=self._warm_candles)
-                continue
+            if not fresh:
+                try:
+                    fresh = self._fetch(
+                        symbol,
+                        limit=max(self._warm_candles, self._seed_length),
+                        since=None,
+                        allow_synthetic=self.mode.lower() == "paper",
+                        timeframe=self._seed_timeframe,
+                    )
+                except Exception as exc:
+                    self._log(
+                        "WARNING",
+                        symbol,
+                        "Failed to seed candles from exchange",
+                        detail=self._error_message(exc),
+                    )
+                    if self.mode.lower() == "paper":
+                        self._maybe_seed_symbol(
+                            symbol,
+                            reason="initial_seed",
+                            count=max(self._seed_length, self._warm_candles),
+                        )
+                    continue
             if not fresh and self.mode.lower() == "paper":
                 self._maybe_seed_symbol(
                     symbol,
                     reason="initial_seed_empty",
-                    count=self._warm_candles,
+                    count=max(self._seed_length, self._warm_candles),
                 )
                 continue
             if fresh:
-                inserted = self.store.append(symbol, fresh[-self._warm_candles :])
+                if (
+                    len(fresh) < self._seed_length
+                    and self.mode.lower() == "paper"
+                ):
+                    deficit = self._seed_length - len(fresh)
+                    synthetic_extra = self._generate_synthetic_candles(
+                        symbol, deficit
+                    )
+                    if synthetic_extra:
+                        self._log(
+                            "WARNING",
+                            symbol,
+                            "Supplemented seed with synthetic candles",
+                            detail=f"count={len(synthetic_extra)}",
+                        )
+                        fresh = fresh + synthetic_extra
+                inserted = self.store.append(
+                    symbol, fresh[-max(self._warm_candles, self._seed_length) :]
+                )
                 if inserted:
                     self._log("INFO", symbol, f"Seeded {inserted} candles for startup")
 
@@ -612,6 +768,7 @@ class FeedUpdater:
         limit: int = 200,
         since: Optional[int] = None,
         allow_synthetic: bool = True,
+        timeframe: Optional[str] = None,
     ) -> List[Dict[str, float]]:
         if self._exchange is None:
             self._exchange = self._build_exchange()
@@ -621,9 +778,10 @@ class FeedUpdater:
         while attempt < self.max_retries:
             attempt += 1
             try:
+                active_timeframe = timeframe or self.timeframe
                 raw = self._exchange.fetch_ohlcv(
                     symbol,
-                    timeframe=self.timeframe,
+                    timeframe=active_timeframe,
                     limit=limit,
                     since=since,
                 )
@@ -635,7 +793,8 @@ class FeedUpdater:
                     raise RuntimeError(
                         f"Stale market data for {symbol} (age={age:.2f}s)"
                     )
-                return candles
+                if candles:
+                    return candles
             except Exception as exc:  # pragma: no cover - network guard
                 last_exc = exc
                 detail = self._error_message(exc)
@@ -662,17 +821,11 @@ class FeedUpdater:
                 if attempt < self.max_retries:
                     time.sleep(min(backoff, self.max_backoff))
                     backoff = min(self.max_backoff, backoff * 2)
-        if allow_synthetic and self.mode.lower() == "paper":
-            synthetic = self._generate_synthetic_candles(
-                symbol, min(limit, self._synthetic_batch)
-            )
-            if synthetic:
-                self._log(
-                    "WARNING",
-                    symbol,
-                    "Using synthetic candles after fetch failures",
-                )
-                return synthetic
+        fallback = self._fallback_candles(
+            symbol, limit, allow_synthetic=allow_synthetic
+        )
+        if fallback:
+            return fallback
         if last_exc is not None:
             raise RuntimeError(f"Failed to fetch candles for {symbol}") from last_exc
         raise RuntimeError(f"Failed to fetch candles for {symbol}")
