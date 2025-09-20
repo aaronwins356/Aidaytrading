@@ -70,3 +70,24 @@ def test_broker_close_handles_exchange_close(monkeypatch):
     broker.close()
 
     assert exchange.closed is True
+
+
+def test_broker_mode_normalization(monkeypatch, tmp_path):
+    class NoBalanceExchange(DummyExchange):
+        def fetch_balance(self):  # pragma: no cover - defensive guard
+            raise AssertionError("fetch_balance should not be called in paper mode")
+
+    fake_ccxt = types.SimpleNamespace()
+    fake_ccxt.kraken = lambda config: NoBalanceExchange()
+    monkeypatch.setattr(broker_module, "ccxt", fake_ccxt)
+
+    db_path = tmp_path / "balance.db"
+    broker = broker_module.BrokerCCXT(
+        mode="Paper",
+        exchange_name="kraken",
+        starting_balance=500,
+        db_path=db_path,
+    )
+
+    assert broker.mode == "paper"
+    assert broker.balance()["USD"] == 500
