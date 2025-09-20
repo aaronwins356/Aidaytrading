@@ -64,16 +64,38 @@ class TradingRuntime:
         except (TypeError, ValueError):
             feed_workers = None
 
+        default_exchange = str(settings.get("default_exchange", settings.get("exchange", "kraken")))
+        primary_exchange = str(settings.get("exchange", default_exchange))
+        fallback_exchanges = settings.get("fallback_exchanges") or []
+        fallback_exchanges = [
+            str(name)
+            for name in fallback_exchanges
+            if str(name or "").strip()
+        ]
+        if default_exchange and default_exchange not in fallback_exchanges and default_exchange != primary_exchange:
+            fallback_exchanges = list(fallback_exchanges) + [default_exchange]
+
         self.broker = BrokerCCXT(
             mode=settings.get("mode", "paper"),
-            exchange_name=settings.get("exchange", "kraken"),
+            exchange_name=primary_exchange,
             api_key=settings.get("api_key", ""),
             api_secret=settings.get("api_secret", ""),
             starting_balance=float(settings.get("balance", 1_000.0)),
             telemetry=self.telemetry,
             paper_params=paper_params,
+            fallback_exchanges=fallback_exchanges,
         )
-        feed_exchange = str(feed_cfg.get("exchange", settings.get("exchange", "kraken")))
+        feed_exchange = str(feed_cfg.get("exchange", primary_exchange))
+        feed_fallbacks = feed_cfg.get("fallback_exchanges")
+        if not feed_fallbacks:
+            feed_fallbacks = fallback_exchanges
+        else:
+            feed_fallbacks = [
+                str(name)
+                for name in feed_fallbacks
+                if str(name or "").strip()
+            ]
+        data_seed_cfg = feed_cfg.get("data_seeding") or {}
         feed_timeframe = str(feed_cfg.get("timeframe", settings.get("timeframe", "1m")))
         feed_symbols_cfg = feed_cfg.get("symbols")
         if feed_symbols_cfg:
@@ -96,6 +118,8 @@ class TradingRuntime:
             api_secret=str(settings.get("api_secret", "")),
             interval_seconds=float(settings.get("loop_delay", 60)),
             logger=self.logger,
+            fallback_exchanges=feed_fallbacks,
+            seed_config=data_seed_cfg,
         )
         self._services_started = False
 

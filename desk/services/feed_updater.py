@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import sqlite3
 import threading
 import time
@@ -22,6 +23,20 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in tests
 from desk.config import DESK_ROOT
 from desk.data import normalize_ohlcv
 from desk.services.logger import EventLogger
+
+
+class ExchangeBlockedError(RuntimeError):
+    """Raised when an exchange rejects requests due to jurisdiction limits."""
+
+
+def _timeframe_to_seconds(timeframe: str) -> float:
+    units = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+    try:
+        value = float(timeframe[:-1])
+        unit = timeframe[-1].lower()
+        return value * units.get(unit, 60.0)
+    except Exception:
+        return 60.0
 
 
 class CandleStore:
@@ -172,8 +187,10 @@ class FeedUpdater:
         store: Optional[CandleStore] = None,
         max_retries: int = 5,
         max_backoff: float = 30.0,
+        fallback_exchanges: Optional[Iterable[str]] = None,
+        seed_config: Optional[Dict[str, float]] = None,
     ) -> None:
-        self.exchange_name = exchange
+        self.exchange_name = str(exchange)
         self.symbols = [str(symbol) for symbol in symbols]
         self.timeframe = timeframe
         self.mode = mode
@@ -184,23 +201,246 @@ class FeedUpdater:
         self.store = store or CandleStore()
         self.max_retries = max(1, int(max_retries))
         self.max_backoff = max(5.0, float(max_backoff))
+        self.fallback_exchanges = [
+            str(name)
+            for name in (fallback_exchanges or [])
+            if str(name or "").strip()
+        ]
+        self._candidate_exchanges = self._build_candidate_list()
+        self._blocked_until: dict[str, float] = {}
+        self._exchange_pool: dict[str, object] = {}
+        self._active_exchange_name: Optional[str] = None
+        self._exchange: Optional[object] = None
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._timeframe_seconds = max(1.0, _timeframe_to_seconds(timeframe))
+
+        default_seed = {
+            "warm_candles": 500,
+            "synthetic_candles": 200,
+            "allow_synthetic": True,
+            "max_stale_seconds": self._timeframe_seconds * 6,
+            "blocked_retry_seconds": 900.0,
+            "synthetic_drift": 0.0,
+            "synthetic_volatility": 0.01,
+            "synthetic_volume_mean": 10_000.0,
+            "synthetic_volume_std": 2_500.0,
+        }
+        if seed_config:
+            for key, value in seed_config.items():
+                if value is None:
+                    continue
+                try:
+                    if key in {"warm_candles", "synthetic_candles"}:
+                        default_seed[key] = int(float(value))
+                    elif key in {"allow_synthetic"}:
+                        default_seed[key] = bool(value)
+                    else:
+                        default_seed[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        self.seed_config = default_seed
+        try:
+            self._warm_candles = max(
+                10, int(float(self.seed_config.get("warm_candles", 500)))
+            )
+        except (TypeError, ValueError):
+            self._warm_candles = 500
+        try:
+            self._synthetic_batch = max(
+                1, int(float(self.seed_config.get("synthetic_candles", 200)))
+            )
+        except (TypeError, ValueError):
+            self._synthetic_batch = 200
+        self._blocked_retry_seconds = max(
+            120.0, float(self.seed_config.get("blocked_retry_seconds", 900.0))
+        )
+        self._stale_threshold = float(
+            self.seed_config.get("max_stale_seconds", self._timeframe_seconds * 6)
+        )
+        self._rng = random.Random()
         self._exchange = self._build_exchange()
 
-    def _build_exchange(self):  # pragma: no cover - network heavy
-        exchange_cls = getattr(ccxt, self.exchange_name)
-        return exchange_cls(
+    # ------------------------------------------------------------------
+    # Exchange lifecycle helpers
+    # ------------------------------------------------------------------
+    def _build_candidate_list(self) -> List[str]:
+        seen = set()
+        candidates: List[str] = []
+        for name in [self.exchange_name, *self.fallback_exchanges]:
+            if not name:
+                continue
+            lname = name.lower()
+            if lname in seen:
+                continue
+            seen.add(lname)
+            candidates.append(name)
+        if not candidates:
+            candidates.append("kraken")
+        return candidates
+
+    @staticmethod
+    def _error_message(exc: Exception) -> str:
+        if not getattr(exc, "args", None):
+            return str(exc)
+        return " ".join(str(part) for part in exc.args if part)
+
+    @staticmethod
+    def _is_geo_blocked(exc: Exception) -> bool:
+        message = FeedUpdater._error_message(exc).lower()
+        if not message:
+            return False
+        if "us" not in message and "united states" not in message:
+            return False
+        keywords = ("restricted", "forbidden", "not available", "denied", "prohibited")
+        return any(word in message for word in keywords)
+
+    def _eligible_exchanges(self) -> List[str]:
+        now = time.time()
+        eligible: List[str] = []
+        for name in self._candidate_exchanges:
+            lname = name.lower()
+            retry_at = self._blocked_until.get(lname)
+            if retry_at and retry_at > now:
+                continue
+            if retry_at and retry_at <= now:
+                self._blocked_until.pop(lname, None)
+            eligible.append(name)
+        return eligible
+
+    def _mark_exchange_blocked(self, name: str, reason: str, *, symbol: str = "ALL") -> None:
+        retry_at = time.time() + self._blocked_retry_seconds
+        self._blocked_until[name.lower()] = retry_at
+        self._log(
+            "WARNING",
+            symbol,
+            f"Exchange {name} blocked until {retry_at:.0f}",
+            detail=reason,
+        )
+
+    def _instantiate_exchange(self, name: str):  # pragma: no cover - network heavy
+        exchange_cls = getattr(ccxt, name)
+        exchange = exchange_cls(
             {
                 "apiKey": self.api_key,
                 "secret": self.api_secret,
                 "enableRateLimit": True,
             }
         )
+        load_markets = getattr(exchange, "load_markets", None)
+        if callable(load_markets):
+            try:
+                load_markets()
+            except Exception as exc:  # pragma: no cover - network guard
+                if self._is_geo_blocked(exc):
+                    close = getattr(exchange, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            pass
+                    raise ExchangeBlockedError(self._error_message(exc)) from exc
+                raise
+        return exchange
 
-    def close(self) -> None:
-        self.stop()
-        self.store.close()
+    def _ensure_exchange(self, name: str, *, rebuild: bool = False):  # pragma: no cover - network heavy
+        key = name.lower()
+        existing = self._exchange_pool.get(key)
+        if rebuild:
+            preserved = existing
+            try:
+                exchange = self._instantiate_exchange(name)
+            except Exception:
+                if preserved is not None:
+                    self._exchange_pool[key] = preserved
+                raise
+            if preserved is not None and preserved is not exchange:
+                close = getattr(preserved, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+            self._exchange_pool[key] = exchange
+            return exchange
+        if existing is not None:
+            return existing
+        exchange = self._instantiate_exchange(name)
+        self._exchange_pool[key] = exchange
+        return exchange
+
+    def _build_exchange(self):  # pragma: no cover - network heavy
+        last_error: Exception | None = None
+        for name in self._eligible_exchanges():
+            try:
+                exchange = self._ensure_exchange(name, rebuild=True)
+            except ExchangeBlockedError as exc:
+                self._mark_exchange_blocked(name, self._error_message(exc))
+                last_error = exc
+                continue
+            except Exception as exc:
+                self._log("ERROR", "ALL", f"Failed to initialize {name}", detail=str(exc))
+                last_error = exc
+                continue
+            self._active_exchange_name = name
+            if name != self._candidate_exchanges[0]:
+                self._log("INFO", "ALL", f"Using fallback exchange {name}")
+            return exchange
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Unable to initialise any exchange for feed updater")
+
+    def _switch_exchange(self, symbol: str, reason: str) -> bool:  # pragma: no cover - network heavy
+        for name in self._eligible_exchanges():
+            if name == self._active_exchange_name:
+                continue
+            try:
+                exchange = self._ensure_exchange(name, rebuild=True)
+            except ExchangeBlockedError as exc:
+                self._mark_exchange_blocked(name, self._error_message(exc), symbol=symbol)
+                continue
+            except Exception as exc:
+                self._log("ERROR", symbol, f"Failed to switch to {name}", detail=str(exc))
+                continue
+            old = self._exchange
+            self._exchange = exchange
+            self._active_exchange_name = name
+            self._log("INFO", symbol, f"Switched feed to {name}", detail=reason)
+            if old is not None and old is not exchange:
+                close = getattr(old, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+            return True
+        if self._active_exchange_name:
+            try:
+                exchange = self._ensure_exchange(self._active_exchange_name, rebuild=True)
+            except ExchangeBlockedError as exc:
+                self._mark_exchange_blocked(
+                    self._active_exchange_name,
+                    self._error_message(exc),
+                    symbol=symbol,
+                )
+                return False
+            except Exception as exc:
+                self._log(
+                    "ERROR",
+                    symbol,
+                    "Failed to rebuild active exchange",
+                    detail=str(exc),
+                )
+                return False
+            self._exchange = exchange
+            self._log(
+                "INFO",
+                symbol,
+                f"Rebuilt exchange {self._active_exchange_name}",
+                detail=reason,
+            )
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -215,35 +455,169 @@ class FeedUpdater:
     # ------------------------------------------------------------------
     # Seeding helpers
     # ------------------------------------------------------------------
-    def seed_if_needed(self, *, candles: int = 1_000) -> None:
+    @staticmethod
+    def _normalize_timestamp(value: float) -> float:
+        if value > 1e12:
+            return value / 1000.0
+        if value > 1e10:
+            return value / 1000.0
+        return value
+
+    def _candles_are_stale(self, candles: List[Dict[str, float]]) -> bool:
+        if not candles:
+            return True
+        last_ts = self._normalize_timestamp(float(candles[-1].get("timestamp", 0.0)))
+        age = time.time() - last_ts
+        return age > self._stale_threshold
+
+    def _symbol_stale(self, latest: Optional[int]) -> bool:
+        if latest is None:
+            return True
+        ts = self._normalize_timestamp(float(latest))
+        return (time.time() - ts) > self._stale_threshold
+
+    def _default_price(self, symbol: str) -> float:
+        sym = symbol.upper()
+        if "BTC" in sym:
+            return 30_000.0
+        if "ETH" in sym:
+            return 2_000.0
+        if "SOL" in sym:
+            return 25.0
+        if "XRP" in sym:
+            return 0.6
+        return 100.0
+
+    def _generate_synthetic_candles(self, symbol: str, count: int) -> List[Dict[str, float]]:
+        if not self.seed_config.get("allow_synthetic", True):
+            return []
+        count = max(1, int(count))
+        try:
+            history = self.store.load(symbol, 1)
+        except Exception:
+            history = []
+        if history:
+            last_candle = history[-1]
+            last_ts = self._normalize_timestamp(float(last_candle.get("timestamp", 0.0)))
+            price = float(
+                last_candle.get("close")
+                or last_candle.get("open")
+                or self._default_price(symbol)
+            )
+        else:
+            last_ts = time.time() - self._timeframe_seconds * count
+            price = self._default_price(symbol)
+        candles: List[Dict[str, float]] = []
+        local_rng = random.Random(self._rng.random())
+        drift = float(self.seed_config.get("synthetic_drift", 0.0))
+        volatility = max(0.0001, float(self.seed_config.get("synthetic_volatility", 0.01)))
+        volume_mean = max(1.0, float(self.seed_config.get("synthetic_volume_mean", 10_000.0)))
+        volume_std = max(1.0, float(self.seed_config.get("synthetic_volume_std", volume_mean / 4.0)))
+        timestamp = last_ts
+        for _ in range(count):
+            timestamp += self._timeframe_seconds
+            open_price = price
+            move = local_rng.normalvariate(drift, volatility)
+            close_price = max(0.0001, open_price * (1.0 + move))
+            high = max(open_price, close_price) * (1.0 + abs(local_rng.normalvariate(0.0, volatility / 2.0)))
+            low = min(open_price, close_price) * (1.0 - abs(local_rng.normalvariate(0.0, volatility / 2.0)))
+            volume = max(1.0, local_rng.normalvariate(volume_mean, volume_std))
+            candles.append(
+                {
+                    "timestamp": int(timestamp * 1000.0),
+                    "open": float(open_price),
+                    "high": float(high),
+                    "low": float(low),
+                    "close": float(close_price),
+                    "volume": float(volume),
+                }
+            )
+            price = close_price
+        return candles
+
+    def _maybe_seed_symbol(self, symbol: str, *, reason: str, count: Optional[int] = None) -> bool:
         if self.mode.lower() != "paper":
-            return
+            return False
+        batch = count if count is not None else self._synthetic_batch
+        synthetic = self._generate_synthetic_candles(symbol, batch)
+        if not synthetic:
+            return False
+        inserted = self.store.append(symbol, synthetic)
+        if inserted:
+            self._log(
+                "WARNING",
+                symbol,
+                f"Seeded {inserted} synthetic candles ({reason})",
+            )
+            return True
+        return False
+
+    def seed_if_needed(self) -> None:
         for symbol in self.symbols:
-            if self.store.has_candles(symbol):
+            latest = self.store.latest_timestamp(symbol)
+            if latest is not None and not self._symbol_stale(latest):
                 continue
             try:
-                fresh = self._fetch(symbol, limit=candles)
-                if fresh:
-                    inserted = self.store.append(symbol, fresh)
-                    self._log(
-                        "INFO",
-                        symbol,
-                        f"Seeded {inserted} candles for paper mode",
-                    )
-            except Exception as exc:  # pragma: no cover - network guard
-                self._log(
-                    "ERROR",
+                fresh = self._fetch(
                     symbol,
-                    "Failed to seed candles",
-                    detail=str(exc),
+                    limit=self._warm_candles,
+                    since=None,
+                    allow_synthetic=self.mode.lower() == "paper",
                 )
+            except Exception as exc:
+                self._log(
+                    "WARNING",
+                    symbol,
+                    "Failed to seed candles from exchange",
+                    detail=self._error_message(exc),
+                )
+                if self.mode.lower() == "paper":
+                    self._maybe_seed_symbol(symbol, reason="initial_seed", count=self._warm_candles)
+                continue
+            if not fresh and self.mode.lower() == "paper":
+                self._maybe_seed_symbol(
+                    symbol,
+                    reason="initial_seed_empty",
+                    count=self._warm_candles,
+                )
+                continue
+            if fresh:
+                inserted = self.store.append(symbol, fresh[-self._warm_candles :])
+                if inserted:
+                    self._log("INFO", symbol, f"Seeded {inserted} candles for startup")
 
     # ------------------------------------------------------------------
     # Fetching
     # ------------------------------------------------------------------
-    def _fetch(self, symbol: str, *, limit: int = 200, since: Optional[int] = None):
-        backoff = 1.0
+    def _should_failover(self, exc: Exception, attempt: int) -> bool:
+        message = self._error_message(exc).lower()
+        if "stale market data" in message:
+            return True
+        transient_terms = (
+            "timeout",
+            "temporarily",
+            "connection reset",
+            "service unavailable",
+            "network",
+            "rate limit",
+        )
+        if any(term in message for term in transient_terms):
+            return attempt >= 2
+        return True
+
+    def _fetch(
+        self,
+        symbol: str,
+        *,
+        limit: int = 200,
+        since: Optional[int] = None,
+        allow_synthetic: bool = True,
+    ) -> List[Dict[str, float]]:
+        if self._exchange is None:
+            self._exchange = self._build_exchange()
         attempt = 0
+        backoff = 1.0
+        last_exc: Exception | None = None
         while attempt < self.max_retries:
             attempt += 1
             try:
@@ -253,49 +627,102 @@ class FeedUpdater:
                     limit=limit,
                     since=since,
                 )
-                return normalize_ohlcv(raw)
+                candles = normalize_ohlcv(raw)
+                if candles and self._candles_are_stale(candles):
+                    age = time.time() - self._normalize_timestamp(
+                        float(candles[-1].get("timestamp", 0.0))
+                    )
+                    raise RuntimeError(
+                        f"Stale market data for {symbol} (age={age:.2f}s)"
+                    )
+                return candles
             except Exception as exc:  # pragma: no cover - network guard
+                last_exc = exc
+                detail = self._error_message(exc)
                 self._log(
                     "WARNING",
                     symbol,
                     "Exchange fetch failed",
                     attempt=attempt,
-                    detail=str(exc),
+                    detail=detail,
                 )
-                if attempt >= self.max_retries:
-                    break
-                time.sleep(min(backoff, self.max_backoff))
-                backoff *= 2
+                if self._active_exchange_name and self._is_geo_blocked(exc):
+                    self._mark_exchange_blocked(
+                        self._active_exchange_name,
+                        detail,
+                        symbol=symbol,
+                    )
+                    if self._switch_exchange(symbol, detail):
+                        backoff = 1.0
+                        continue
+                elif self._should_failover(exc, attempt):
+                    if self._switch_exchange(symbol, detail):
+                        backoff = 1.0
+                        continue
+                if attempt < self.max_retries:
+                    time.sleep(min(backoff, self.max_backoff))
+                    backoff = min(self.max_backoff, backoff * 2)
+        if allow_synthetic and self.mode.lower() == "paper":
+            synthetic = self._generate_synthetic_candles(
+                symbol, min(limit, self._synthetic_batch)
+            )
+            if synthetic:
+                self._log(
+                    "WARNING",
+                    symbol,
+                    "Using synthetic candles after fetch failures",
+                )
+                return synthetic
+        if last_exc is not None:
+            raise RuntimeError(f"Failed to fetch candles for {symbol}") from last_exc
         raise RuntimeError(f"Failed to fetch candles for {symbol}")
 
     def _refresh_symbol(self, symbol: str) -> None:
         latest = self.store.latest_timestamp(symbol)
-        since = int(latest * 1000) if latest is not None else None
+        since = int(latest + 1) if latest is not None else None
+        limit = 250 if latest is None else 20
         try:
-            candles = self._fetch(symbol, limit=200 if since is None else 10, since=since)
+            candles = self._fetch(symbol, limit=limit, since=since)
         except Exception as exc:  # pragma: no cover - network guard
-            self._log("ERROR", symbol, "Exhausted retries fetching candles", detail=str(exc))
+            self._log(
+                "ERROR",
+                symbol,
+                "Exhausted retries fetching candles",
+                detail=self._error_message(exc),
+            )
+            if self.mode.lower() == "paper" and (
+                latest is None or self._symbol_stale(latest)
+            ):
+                self._maybe_seed_symbol(symbol, reason="refresh_failure")
             return
 
         if not candles:
+            if (
+                self.mode.lower() == "paper"
+                and latest is not None
+                and self._symbol_stale(latest)
+            ):
+                self._maybe_seed_symbol(symbol, reason="empty_fetch")
             return
 
-        filtered = []
+        filtered: List[Dict[str, float]] = []
         for candle in candles:
             ts = float(candle.get("timestamp", 0.0) or 0.0)
             if latest is None or ts > latest:
                 filtered.append(candle)
 
         if not filtered:
+            if (
+                self.mode.lower() == "paper"
+                and latest is not None
+                and self._symbol_stale(latest)
+            ):
+                self._maybe_seed_symbol(symbol, reason="stale_store_no_updates")
             return
 
         inserted = self.store.append(symbol, filtered)
         if inserted:
-            self._log(
-                "INFO",
-                symbol,
-                f"Appended {inserted} new candles",
-            )
+            self._log("INFO", symbol, f"Appended {inserted} new candles")
 
     # ------------------------------------------------------------------
     # Background loop
@@ -322,7 +749,9 @@ class FeedUpdater:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name="FeedUpdater", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, name="FeedUpdater", daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> None:  # pragma: no cover - threading
@@ -331,3 +760,15 @@ class FeedUpdater:
             self._thread.join(timeout=self.interval_seconds + 5)
         self._thread = None
 
+    def close(self) -> None:
+        self.stop()
+        for exchange in list(self._exchange_pool.values()):
+            close = getattr(exchange, "close", None)
+            if callable(close):  # pragma: no cover - network cleanup
+                try:
+                    close()
+                except Exception:
+                    pass
+        self._exchange_pool.clear()
+        self._exchange = None
+        self.store.close()
