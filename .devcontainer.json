@@ -1,0 +1,4 @@
+{
+  "postStartCommand": "bash run_dashboard.sh"
+}
+
