@@ -14,7 +14,7 @@ class FlakyBroker:
         ts = time.time() * 1000
         self.payload = [[ts, 100, 101, 99, 100, 10]]
 
-    def fetch_ohlcv(self, symbol, timeframe="1m", limit=50):
+    def fetch_ohlcv(self, symbol, timeframe="1m", limit=50, since=None):
         self.calls += 1
         if self.calls <= self.fail_times:
             raise RuntimeError("temporary failure")
@@ -26,7 +26,7 @@ class StaticBroker:
         ts = time.time() * 1000
         self.payload = [[ts, 200, 201, 199, 200, 5]]
 
-    def fetch_ohlcv(self, symbol, timeframe="1m", limit=50):
+    def fetch_ohlcv(self, symbol, timeframe="1m", limit=50, since=None):
         return self.payload
 
 

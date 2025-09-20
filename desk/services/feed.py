@@ -83,7 +83,16 @@ class FeedHandler:
             attempt += 1
             try:
                 start = time.time()
-                raw = self.broker.fetch_ohlcv(symbol, self.timeframe, limit=self.lookback)
+                since = None
+                if self._timeframe_seconds > 0 and self.lookback > 0:
+                    window = self.lookback * self._timeframe_seconds
+                    since = max(0, int((time.time() - window) * 1000))
+                raw = self.broker.fetch_ohlcv(
+                    symbol,
+                    self.timeframe,
+                    limit=self.lookback,
+                    since=since,
+                )
                 candles = normalize_ohlcv(raw)
                 if candles:
                     latency = time.time() - start
@@ -113,7 +122,16 @@ class FeedHandler:
 
         if self.fallback_broker is not None:
             try:
-                raw = self.fallback_broker.fetch_ohlcv(symbol, self.timeframe, limit=self.lookback)
+                since = None
+                if self._timeframe_seconds > 0 and self.lookback > 0:
+                    window = self.lookback * self._timeframe_seconds
+                    since = max(0, int((time.time() - window) * 1000))
+                raw = self.fallback_broker.fetch_ohlcv(
+                    symbol,
+                    self.timeframe,
+                    limit=self.lookback,
+                    since=since,
+                )
                 candles = normalize_ohlcv(raw)
                 if candles:
                     self.cache[symbol] = candles
