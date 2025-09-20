@@ -56,7 +56,7 @@ requirements.txt         # Python dependencies
 1. **Clone & create a virtual environment**
 
    ```bash
-   cd AI Trader
+   cd "C:\Users\moe\Desktop\AI Trader"
    python -m venv .venv
    .\.venv\Scripts\Activate
    python -m pip install --upgrade pip
