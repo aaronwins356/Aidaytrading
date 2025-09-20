@@ -55,8 +55,10 @@ python main.py
 ### 4. Dashboard
 
 ```bash
-streamlit run dashboard/app.py
+./run dashboard
 ```
+
+This convenience command activates the project virtual environment and launches the Streamlit dashboard. The existing `run_dashboard.sh` script is still available if you prefer to call it directly.
 
 Windows shortcuts:
 
