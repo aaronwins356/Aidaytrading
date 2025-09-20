@@ -13,10 +13,10 @@ class Executor:
             print(f"[EXECUTOR] Invalid side {side} for {worker.name}")
             return None
 
-        # Risk settings
-        sl_pct = self.config["risk"]["stop_loss_pct"]
-        rr = self.config["risk"]["rr_ratio"]
-        hold = self.config["risk"]["max_hold_minutes"] * 60
+        risk_cfg = self.config.get("risk", {})
+        sl_pct = float(risk_cfg.get("stop_loss_pct", 0.02))
+        rr = float(risk_cfg.get("rr_ratio", 2.0))
+        hold = float(risk_cfg.get("max_hold_minutes", 15.0)) * 60
 
         if side == "BUY":
             stop_loss = price * (1 - sl_pct)
@@ -32,7 +32,7 @@ class Executor:
             "qty": float(qty),
             "entry_price": float(price),
             "timestamp": time.time(),
-            "risk": risk_amount,
+            "risk": float(risk_amount),
             "stop_loss": stop_loss,       # renamed key
             "take_profit": take_profit,   # renamed key
             "max_hold": hold,
@@ -52,6 +52,10 @@ class Executor:
         symbol = trade["symbol"]
         if symbol in self.open_trades and trade in self.open_trades[symbol]:
             self.open_trades[symbol].remove(trade)
+
+        trade["exit_price"] = float(exit_price)
+        trade["exit_reason"] = exit_reason
+        trade["pnl"] = float(pnl)
 
         self.logger.log_trade_end(
             trade["worker"], trade["symbol"], exit_price, exit_reason, pnl

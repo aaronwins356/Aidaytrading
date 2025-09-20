@@ -8,6 +8,7 @@ class Learner:
     def __init__(self, model_dir="models"):
         self.model_dir = model_dir
         os.makedirs(model_dir, exist_ok=True)
+        self._observations_path = os.path.join(model_dir, "observations.csv")
 
     def retrain_worker(self, worker, trade_history=None):
         """
@@ -33,6 +34,34 @@ class Learner:
         joblib.dump(model, path)
 
         print(f"[LEARNER] Retrained model for {worker.name}, saved to {path}")
+
+    def observe(self, trade):
+        """Persist basic trade information for future ML retraining."""
+        if not trade:
+            return
+
+        required_keys = {"timestamp", "symbol", "side", "qty", "entry_price"}
+        if not required_keys.issubset(trade.keys()):
+            return
+
+        row = {
+            "timestamp": float(trade.get("timestamp", 0.0)),
+            "symbol": trade.get("symbol"),
+            "side": trade.get("side"),
+            "qty": float(trade.get("qty", 0.0)),
+            "entry_price": float(trade.get("entry_price", 0.0)),
+            "worker": trade.get("worker"),
+        }
+
+        try:
+            if os.path.exists(self._observations_path):
+                existing = pd.read_csv(self._observations_path)
+                updated = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
+            else:
+                updated = pd.DataFrame([row])
+            updated.to_csv(self._observations_path, index=False)
+        except Exception as exc:  # pragma: no cover - best effort logging
+            print(f"[LEARNER] Failed to persist observation: {exc}")
 
     def predict_edge(self, worker, latest_candle):
         """
