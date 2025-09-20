@@ -6,10 +6,42 @@ import json
 from pathlib import Path
 from typing import Dict, Optional
 
-import joblib
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+import pickle
+
+try:  # pragma: no cover - import guard
+    import joblib  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    class _JoblibShim:
+        @staticmethod
+        def dump(obj, path):
+            with open(path, "wb") as handle:
+                pickle.dump(obj, handle)
+
+        @staticmethod
+        def load(path):
+            with open(path, "rb") as handle:
+                return pickle.load(handle)
+
+    joblib = _JoblibShim()  # type: ignore
+
+try:  # pragma: no cover - import guard
+    import numpy as np  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    np = None  # type: ignore
+
+try:  # pragma: no cover - import guard
+    import pandas as pd  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    pd = None  # type: ignore
+
+try:  # pragma: no cover - import guard
+    from sklearn.ensemble import RandomForestClassifier  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    class RandomForestClassifier:  # type: ignore
+        def __init__(self, *args, **kwargs):
+            raise ModuleNotFoundError(
+                "scikit-learn is required for model training but is not installed"
+            )
 
 from desk.config import DESK_ROOT
 
