@@ -32,6 +32,26 @@ cd trader
 pip install -r requirements.txt
 ````
 
+> [!TIP]
+> **Windows build prerequisites** – Packages such as NumPy and SciPy ship pre-built
+> wheels for 64-bit Python, but when a matching wheel is not available pip will try
+> to compile them locally. On Windows that requires the Microsoft Visual C++ build
+> tools.
+>
+> 1. Install a 64-bit Python 3.10–3.11 interpreter (the same range used in our CI).
+> 2. Install the [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) and
+>    select the "Desktop development with C++" workload so that `vswhere.exe` and the
+>    MSVC compiler are on your machine.
+> 3. Upgrade your packaging toolchain before installing the requirements:
+>
+>    ```powershell
+>    python -m pip install --upgrade pip setuptools wheel
+>    ```
+>
+> After these prerequisites are satisfied, rerun `pip install -r requirements.txt`.
+> This ensures pip can locate the Visual Studio toolchain instead of failing with
+> `Could not find C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe`.
+
 ### 2. Configure
 
 Edit `desk/configs/config.yaml`. Example:
