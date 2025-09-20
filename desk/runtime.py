@@ -7,7 +7,7 @@ import copy
 import signal
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from desk.config import CONFIG_PATH, load_config
 from desk.services import (
@@ -207,13 +207,19 @@ class TradingRuntime:
 
             if intents:
                 intents.sort(key=lambda intent: intent.score, reverse=True)
-                allocations = self.portfolio.allocate([intent.worker for intent in intents])
-                all_positions = [pos for positions in self.executor.open_positions.values() for pos in positions]
+                eligible_intents, allocations = self._allocate_eligible_intents(intents)
+                all_positions = [
+                    pos
+                    for positions in self.executor.open_positions.values()
+                    for pos in positions
+                ]
 
-                for intent in intents:
-                    if not self.portfolio.eligible(intent.worker.name):
-                        continue
-                    risk_budget = base_risk * intent.worker.allocation * allocations.get(intent.worker.name, 0.0)
+                for intent in eligible_intents:
+                    risk_budget = (
+                        base_risk
+                        * intent.worker.allocation
+                        * allocations.get(intent.worker.name, 0.0)
+                    )
                     if risk_budget <= 0:
                         continue
                     if not self.risk_engine.enforce_position_limits(all_positions):
@@ -302,4 +308,27 @@ class TradingRuntime:
 
         print("[RUNTIME] Shutdown complete.")
         self._shutdown()
+
+    def _allocate_eligible_intents(
+        self, intents: List["Intent"]
+    ) -> Tuple[List["Intent"], Dict[str, float]]:
+        eligible: List["Intent"] = []
+        for intent in intents:
+            if self.portfolio.eligible(intent.worker.name):
+                eligible.append(intent)
+        if not eligible:
+            return [], {}
+
+        allocations = self.portfolio.allocate([intent.worker for intent in eligible])
+        filtered = {
+            intent.worker.name: float(allocations.get(intent.worker.name, 0.0))
+            for intent in eligible
+        }
+        total = sum(filtered.values())
+        if total <= 0:
+            weight = 1.0 / len(filtered)
+            return eligible, {name: weight for name in filtered}
+
+        normalized = {name: value / total for name, value in filtered.items()}
+        return eligible, normalized
 
