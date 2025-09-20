@@ -11,9 +11,14 @@ def test_trapdoor_halts_on_break():
         trapdoor_pct=0.05,
     )
     engine.initialise(10_000)
-    # Equity makes new high -> trapdoor moves up
-    engine.check_account(11_000)
-    assert engine.trapdoor is not None
+    equities = [10_500, 11_000, 12_000]
+    expected_floors = [equity * (1 - engine.trapdoor_pct) for equity in equities]
+
+    for equity, expected_floor in zip(equities, expected_floors):
+        engine.check_account(equity)
+        assert engine.trapdoor is not None
+        assert engine.trapdoor.floor == expected_floor
+
     floor = engine.trapdoor.floor
     # Drop below trapdoor should halt
     engine.check_account(floor - 1)

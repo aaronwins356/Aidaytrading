@@ -47,7 +47,8 @@ class RiskEngine:
             self.initialise(equity)
         assert self.start_equity is not None
 
-        self.equity_high = max(self.equity_high or equity, equity)
+        previous_high = self.equity_high if self.equity_high is not None else equity
+        self.equity_high = max(previous_high, equity)
 
         # Daily/weekly drawdown checks.
         if self.daily_dd and equity < self.start_equity * (1 - self.daily_dd):
@@ -62,7 +63,7 @@ class RiskEngine:
 
         # Trap door: once equity makes a new high, raise the floor.
         if self.trapdoor:
-            if equity > (self.equity_high or equity):
+            if equity > previous_high:
                 new_floor = equity * (1 - self.trapdoor_pct)
                 self.trapdoor = EquityTrapdoor(floor=new_floor, locked_at=time.time())
             elif equity < self.trapdoor.floor:
