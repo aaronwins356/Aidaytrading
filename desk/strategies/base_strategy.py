@@ -105,3 +105,21 @@ class StrategyBase(ABC):
         sl_pct = float(self.params.get("stop_loss_pct", 0.01))
         tp_pct = float(self.params.get("take_profit_pct", 0.02))
         return price * (1 - sl_pct), price * (1 + tp_pct)
+
+    def plan_trade(self, side: str, df: pd.DataFrame) -> Dict[str, float]:
+        """Return default risk parameters for a trade.
+
+        Strategies can override this to provide custom stop loss / take profit
+        levels or holding period guidance tailored to the current market
+        context.  The default implementation simply applies the static
+        percentages configured via ``stop_loss_pct`` and ``take_profit_pct``.
+        """
+
+        price = float(df["close"].iloc[-1])
+        stop_loss, take_profit = self.default_sl_tp(price)
+        hold_minutes = float(self.params.get("max_hold_minutes", 60.0))
+        return {
+            "stop_loss": float(stop_loss),
+            "take_profit": float(take_profit),
+            "max_hold_minutes": hold_minutes,
+        }
