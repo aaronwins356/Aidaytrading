@@ -56,6 +56,16 @@ class EventLogger:
                     equity REAL
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS feed_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL,
+                    level TEXT,
+                    symbol TEXT,
+                    message TEXT,
+                    metadata TEXT
+                )
+            """)
             self.conn.commit()
 
     # ---------- trade lifecycle ----------
@@ -116,6 +126,33 @@ class EventLogger:
             self.conn.execute(
                 "INSERT INTO equity (timestamp, equity) VALUES (?, ?)",
                 (float(time.time()), float(equity)),
+            )
+            self.conn.commit()
+
+    def log_feed_event(self, level: str, symbol: str, message: str, **metadata) -> None:
+        payload = {
+            "type": "feed",
+            "level": str(level).upper(),
+            "symbol": str(symbol),
+            "message": str(message),
+        }
+        if metadata:
+            payload["metadata"] = metadata
+        self.write(payload)
+        meta_json = json.dumps(metadata) if metadata else None
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO feed_events (timestamp, level, symbol, message, metadata)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    float(time.time()),
+                    str(level).upper(),
+                    str(symbol),
+                    str(message),
+                    meta_json,
+                ),
             )
             self.conn.commit()
 

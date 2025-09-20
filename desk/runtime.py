@@ -15,6 +15,7 @@ from desk.services import (
     EventLogger,
     ExecutionEngine,
     FeedHandler,
+    FeedUpdater,
     Learner,
     PortfolioManager,
     RiskEngine,
@@ -45,6 +46,7 @@ class TradingRuntime:
         )
 
         settings = self.config.get("settings", {})
+        feed_cfg = self.config.get("feed", {})
         risk_cfg = self.config.get("risk", {})
         portfolio_cfg = self.config.get("portfolio", {})
         paper_params = {
@@ -71,11 +73,38 @@ class TradingRuntime:
             telemetry=self.telemetry,
             paper_params=paper_params,
         )
+        feed_exchange = str(feed_cfg.get("exchange", settings.get("exchange", "kraken")))
+        feed_timeframe = str(feed_cfg.get("timeframe", settings.get("timeframe", "1m")))
+        feed_symbols_cfg = feed_cfg.get("symbols")
+        if feed_symbols_cfg:
+            feed_symbols = [str(symbol) for symbol in feed_symbols_cfg]
+        else:
+            feed_symbols = [
+                worker_cfg.get("symbol")
+                for worker_cfg in self.config.get("workers", [])
+                if worker_cfg.get("symbol")
+            ]
+        if not feed_symbols:
+            feed_symbols = ["BTC/USDT"]
+
+        self.feed_updater = FeedUpdater(
+            exchange=feed_exchange,
+            symbols=feed_symbols,
+            timeframe=feed_timeframe,
+            mode=str(settings.get("mode", "paper")),
+            api_key=str(settings.get("api_key", "")),
+            api_secret=str(settings.get("api_secret", "")),
+            interval_seconds=float(settings.get("loop_delay", 60)),
+            logger=self.logger,
+        )
+        self._services_started = False
+
         self.feed = FeedHandler(
             self.broker,
             timeframe=settings.get("timeframe", "1m"),
             lookback=int(settings.get("lookback", 250)),
             max_workers=feed_workers,
+            local_store=self.feed_updater.store,
         )
         self.risk_engine = RiskEngine(
             daily_dd=risk_cfg.get("daily_dd"),
@@ -106,6 +135,16 @@ class TradingRuntime:
         self.loop_delay = float(settings.get("loop_delay", 60))
         self.warmup = int(settings.get("warmup_candles", 10))
 
+    def start_services(self) -> None:
+        if self._services_started:
+            return
+        try:
+            self.feed_updater.seed_if_needed()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            print(f"[RUNTIME] Feed seeding failed: {exc}")
+        self.feed_updater.start()
+        self._services_started = True
+
     def _shutdown(self) -> None:
         """Flush and close long-lived resources."""
 
@@ -123,6 +162,10 @@ class TradingRuntime:
             pass
         try:
             self.broker.close()
+        except Exception:
+            pass
+        try:
+            self.feed_updater.close()
         except Exception:
             pass
 
@@ -172,6 +215,8 @@ class TradingRuntime:
 
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
+
+        self.start_services()
 
         symbols = {worker.symbol for worker in self.workers}
         risk_cfg = self.config.get("risk", {})

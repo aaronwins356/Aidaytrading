@@ -6,6 +6,7 @@ __all__ = [
     "PositionStore",
     "OpenTrade",
     "FeedHandler",
+    "FeedUpdater",
     "Learner",
     "EventLogger",
     "PortfolioManager",
@@ -38,6 +39,10 @@ def __getattr__(name: str):  # pragma: no cover - import hook
         from .feed import FeedHandler
 
         return FeedHandler
+    if name == "FeedUpdater":
+        from .feed_updater import FeedUpdater
+
+        return FeedUpdater
     if name == "Learner":
         from .learner import Learner
 

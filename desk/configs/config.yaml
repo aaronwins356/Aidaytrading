@@ -15,6 +15,15 @@ settings:
   paper_min_fill_ratio: 0.5
   paper_funding_rate_hourly: 0.0002
 
+feed:
+  exchange: binance
+  symbols:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - XRP/USDT
+  timeframe: 1m
+
 risk:
   fixed_risk_usd: 120
   rr_ratio: 2.0

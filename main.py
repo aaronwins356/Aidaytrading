@@ -5,6 +5,7 @@ from desk import TradingRuntime
 
 def main() -> None:
     runtime = TradingRuntime()
+    runtime.start_services()
     runtime.run()
 
 

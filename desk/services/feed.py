@@ -24,6 +24,7 @@ class FeedHandler:
         fallback_broker=None,
         stale_multiplier: float = 2.5,
         max_workers: int | None = None,
+        local_store=None,
     ):
         self.broker = broker
         self.timeframe = timeframe
@@ -39,6 +40,7 @@ class FeedHandler:
         self._stale_multiplier = max(1.0, stale_multiplier)
         self._timeframe_seconds = self._timeframe_to_seconds(timeframe)
         self._max_workers = max_workers or min(8, (len(getattr(broker, "symbols", [])) or 4))
+        self._local_store = local_store
 
     @staticmethod
     def _timeframe_to_seconds(timeframe: str) -> float:
@@ -71,6 +73,14 @@ class FeedHandler:
         return age > expiry
 
     def fetch(self, symbol: str) -> list[dict[str, float]]:
+        if self._local_store is not None:
+            try:
+                local_candles = self._local_store.load(symbol, self.lookback)
+            except Exception:
+                local_candles = []
+            if local_candles and not self._is_stale(local_candles):
+                self.cache[symbol] = local_candles
+                return local_candles
         now = time.time()
         circuit_until = self._circuit_open_until.get(symbol)
         if circuit_until and now < circuit_until:
@@ -144,6 +154,14 @@ class FeedHandler:
 
         if last_exception is not None:
             print(f"[FEED] Failed to fetch {symbol} after retries: {last_exception}")
+        if self._local_store is not None:
+            try:
+                cached = self._local_store.load(symbol, self.lookback)
+            except Exception:
+                cached = []
+            if cached:
+                self.cache[symbol] = cached
+                return cached
         return self.cache.get(symbol, [])
 
     def snapshot(self, symbols: Iterable[str]) -> Dict[str, list[dict[str, float]]]:
