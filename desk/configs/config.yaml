@@ -19,23 +19,20 @@ settings:
   paper_funding_rate_hourly: 0.0002
 
 feed:
-  exchange: binance
-  fallback_exchanges:
-    - kraken
+  exchange: kraken
   data_seeding:
-    warm_candles: 1000
-    synthetic_candles: 250
-    allow_synthetic: true
+    warm_candles: 10 
     max_stale_seconds: 900
     blocked_retry_seconds: 900
     synthetic_volatility: 0.0125
     synthetic_volume_mean: 25000
     synthetic_volume_std: 5000
+
   symbols:
-    - BTC/USDT
-    - ETH/USDT
-    - SOL/USDT
-    - XRP/USDT
+    - BTC/USD
+    - ETH/USD
+    - SOL/USD
+    - XRP/USD
   timeframe: 1m
 
 risk:
@@ -46,7 +43,7 @@ risk:
   daily_dd: null
   weekly_dd: null
   max_concurrent: 8
-  halt_on_dd: false
+  halt_on_dd: null
   retrain_every: 10
   ml_weight: 0.5
   trapdoor_pct: 0.02

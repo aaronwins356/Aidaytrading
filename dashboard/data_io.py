@@ -74,7 +74,7 @@ if not LOGGER.handlers:
     LOGGER.addHandler(handler)
 LOGGER.setLevel(logging.INFO)
 
-SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
+SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"]
 
 
 def _asdict(model: BaseModel) -> Dict[str, Any]:

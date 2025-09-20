@@ -155,7 +155,7 @@ def build_worker(monkeypatch) -> Worker:
 
     worker = Worker(
         name="stub",
-        symbol="BTC/USDT",
+        symbol="BTC/USD",
         strategy="stub",
         params=params,
         learner=learner,

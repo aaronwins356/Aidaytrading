@@ -32,7 +32,7 @@ def test_paper_market_order_updates_balance(monkeypatch):
     fake_ccxt.kraken = lambda config: DummyExchange()
     monkeypatch.setattr(broker_module, "ccxt", fake_ccxt)
     broker = broker_module.BrokerCCXT(mode="paper", exchange_name="kraken", starting_balance=1000)
-    trade = broker.market_order("BTC/USDT", "buy", 1)
+    trade = broker.market_order("BTC/USD", "buy", 1)
     assert trade is not None
     assert "fee" in trade
     assert trade["qty"] <= 1
@@ -46,7 +46,7 @@ def test_live_market_order_records_latency(monkeypatch):
     fake_ccxt.kraken = lambda config: exchange
     monkeypatch.setattr(broker_module, "ccxt", fake_ccxt)
     broker = broker_module.BrokerCCXT(mode="live", exchange_name="kraken", starting_balance=1000)
-    broker.market_order("BTC/USDT", "buy", 1)
+    broker.market_order("BTC/USD", "buy", 1)
     assert exchange.orders
     operations = {entry["operation"] for entry in broker.latency_log}
     assert {"fetch_price", "market_order"}.issubset(operations)
