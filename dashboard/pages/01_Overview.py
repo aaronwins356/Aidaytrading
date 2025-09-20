@@ -1,12 +1,10 @@
-"""Overview page with KPIs and equity analytics."""
 from __future__ import annotations
 
-import io
 from datetime import datetime
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 from fpdf import FPDF
 from tabulate import tabulate
@@ -22,10 +20,11 @@ from components import (
 )
 
 
-def _get_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+@st.cache_data(show_spinner=False)
+def _get_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     data = st.session_state.get("data_sources", {})
-    trades = data.get("trades", pd.DataFrame())
-    equity = data.get("equity", pd.DataFrame())
+    trades = data.get("trades", pd.DataFrame()).copy()
+    equity = data.get("equity", pd.DataFrame()).copy()
     return trades, equity
 
 
@@ -33,11 +32,7 @@ def _empty_state() -> None:
     st.info("No trades available. Seed demo data from Settings or adjust filters.")
 
 
-def _format_currency(value: float) -> str:
-    return f"${value:,.2f}"
-
-
-def _generate_pdf_report(kpis: dict, equity_fig, pnl_fig) -> bytes:
+def _generate_pdf_report(kpis: Dict[str, float]) -> bytes:
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
@@ -48,7 +43,10 @@ def _generate_pdf_report(kpis: dict, equity_fig, pnl_fig) -> bytes:
     pdf.set_font("Helvetica", "B", 12)
     pdf.cell(0, 8, "Key Metrics", ln=1)
     pdf.set_font("Helvetica", size=10)
-    table = tabulate([[k, f"{v:,.2f}" if isinstance(v, (int, float)) else v] for k, v in kpis.items()], headers=["Metric", "Value"])
+    table = tabulate(
+        [[k, f"{v:,.2f}" if isinstance(v, (int, float)) else v] for k, v in kpis.items()],
+        headers=["Metric", "Value"],
+    )
     for line in table.splitlines():
         pdf.cell(0, 5, line, ln=1)
     pdf.ln(4)
@@ -59,20 +57,19 @@ def _generate_pdf_report(kpis: dict, equity_fig, pnl_fig) -> bytes:
     return pdf.output(dest="S").encode("latin-1")
 
 
-def render_kpis(trades: pd.DataFrame, equity: pd.DataFrame) -> dict:
+def render_kpis(trades: pd.DataFrame, equity: pd.DataFrame) -> Dict[str, float]:
     metrics = aggregate_trade_kpis(trades, equity)
-    daily_returns = trades.groupby(trades["closed_at"].dt.date if not trades.empty else []).agg({"pnl": "sum"})
     realized = metrics.get("realized_pnl", 0.0)
-    unrealized = trades.get("unrealized", pd.Series(dtype=float)).sum() if "unrealized" in trades else 0.0
+    unrealized = float(trades.get("unrealized", pd.Series(dtype=float)).sum()) if "unrealized" in trades else 0.0
     metrics.update({"unrealized_pnl": unrealized, "net_pnl": realized + unrealized})
     metrics["win_rate"] = metrics.get("hit_rate", 0.0)
-    var, cvar = calc_var_cvar(trades["pnl"]) if "pnl" in trades else (0.0, 0.0)
+    pnl_series = trades.get("pnl", pd.Series(dtype=float))
+    var, cvar = calc_var_cvar(pnl_series) if not pnl_series.empty else (0.0, 0.0)
     metrics["VaR95"] = var
     metrics["CVaR95"] = cvar
     payoff = metrics.get("payoff_ratio", 0.0)
     metrics["Kelly"] = kelly_fraction(metrics.get("hit_rate", 0.0), payoff if payoff not in (np.inf, 0) else 1.0)
 
-    col_count = 4
     tiles = [
         ("Net PnL", metrics.get("net_pnl", 0.0)),
         ("Realized PnL", realized),
@@ -92,9 +89,9 @@ def render_kpis(trades: pd.DataFrame, equity: pd.DataFrame) -> dict:
         ("CVaR 95%", metrics.get("CVaR95", 0.0)),
         ("Kelly fraction", metrics.get("Kelly", 0.0)),
     ]
-    cols = st.columns(col_count)
+    cols = st.columns(4)
     for idx, (label, value) in enumerate(tiles):
-        with cols[idx % col_count]:
+        with cols[idx % 4]:
             kpi_tile(label, value)
     return metrics
 
@@ -102,14 +99,17 @@ def render_kpis(trades: pd.DataFrame, equity: pd.DataFrame) -> dict:
 def top_trades_table(trades: pd.DataFrame) -> None:
     if trades.empty:
         return
+    subset_cols = [c for c in ["trade_id", "symbol", "worker", "pnl", "opened_at", "closed_at", "note"] if c in trades]
     trades = trades.copy()
-    trades["duration"] = (trades["closed_at"] - trades["opened_at"]).dt.total_seconds() / 3600
-    top = trades.nlargest(10, "pnl")
-    worst = trades.nsmallest(10, "pnl")
+    trades["opened_at"] = pd.to_datetime(trades.get("opened_at"))
+    trades["closed_at"] = pd.to_datetime(trades.get("closed_at"))
+    trades["duration_h"] = (trades["closed_at"] - trades["opened_at"]).dt.total_seconds().div(3600).fillna(0)
+    top = trades.nlargest(10, "pnl") if "pnl" in trades else trades.head(10)
+    worst = trades.nsmallest(10, "pnl") if "pnl" in trades else trades.tail(10)
     st.subheader("Best trades")
-    st.dataframe(top[["trade_id", "symbol", "worker", "pnl", "duration", "note"]])
+    st.dataframe(top[subset_cols + ["duration_h"]])
     st.subheader("Tough trades")
-    st.dataframe(worst[["trade_id", "symbol", "worker", "pnl", "duration", "note"]])
+    st.dataframe(worst[subset_cols + ["duration_h"]])
 
 
 st.set_page_config(page_title="Overview · Aurora Desk", page_icon="🧭")
@@ -141,8 +141,7 @@ else:
 
     top_trades_table(trades)
 
-    csv = trades.to_csv(index=False).encode("utf-8")
-    st.download_button("Download trades CSV", data=csv, file_name="trades_overview.csv", mime="text/csv")
+    st.download_button("Download trades CSV", data=trades.to_csv(index=False), file_name="trades_overview.csv", mime="text/csv")
 
-    pdf_bytes = _generate_pdf_report(metrics, dd_fig, pnl_fig)
+    pdf_bytes = _generate_pdf_report(metrics)
     st.download_button("Download tear sheet PDF", data=pdf_bytes, file_name="aurora_tearsheet.pdf", mime="application/pdf")

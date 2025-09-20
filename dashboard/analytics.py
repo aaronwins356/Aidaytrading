@@ -1,9 +1,4 @@
-"""Portfolio analytics utilities for the trading dashboard.
-
-The functions in this module are intentionally pure/side-effect free so they can
-be unit tested and reused by the Streamlit front-end. All functions accept
-pandas DataFrames and return plain Python types.
-"""
+"""Portfolio analytics utilities for the trading dashboard."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,8 +6,12 @@ from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy import stats
-from statsmodels.tsa.stattools import acf
+
+try:  # pragma: no cover - optional dependency
+    from statsmodels.tsa.stattools import acf
+except Exception:  # pragma: no cover - fallback when statsmodels missing
+    def acf(series, nlags=5, fft=False):  # type: ignore
+        return np.ones(nlags + 1)
 
 __all__ = [
     "ensure_datetime_index",
@@ -40,7 +39,8 @@ def ensure_datetime_index(df: pd.DataFrame, column: str = "ts") -> pd.DataFrame:
     if df.empty:
         return df.copy()
     out = df.copy()
-    out[column] = pd.to_datetime(out[column])
+    out[column] = pd.to_datetime(out[column], errors="coerce")
+    out.dropna(subset=[column], inplace=True)
     out.set_index(column, inplace=True)
     out.sort_index(inplace=True)
     return out
@@ -51,19 +51,21 @@ def max_drawdown(equity: pd.Series) -> Tuple[float, pd.Series]:
 
     if equity.empty:
         return 0.0, pd.Series(dtype=float)
-    cummax = equity.cummax()
-    dd = equity / cummax - 1.0
+    s = equity.astype(float)
+    cummax = s.cummax()
+    dd = s / cummax.replace(0, np.nan) - 1.0
+    dd.fillna(0.0, inplace=True)
     return float(dd.min()), dd
 
 
 def drawdown_series(equity_df: pd.DataFrame, balance_col: str = "balance") -> pd.DataFrame:
-    if equity_df.empty:
-        return equity_df
+    if equity_df.empty or balance_col not in equity_df:
+        return equity_df.copy()
     s = equity_df[balance_col].astype(float)
     mdd, dd = max_drawdown(s)
     out = equity_df.copy()
-    out["drawdown"] = dd
-    out["rolling_max"] = s.cummax()
+    out["drawdown"] = dd.values
+    out["rolling_max"] = s.cummax().values
     out["max_drawdown"] = mdd
     return out
 
@@ -71,7 +73,7 @@ def drawdown_series(equity_df: pd.DataFrame, balance_col: str = "balance") -> pd
 def sharpe_ratio(returns: pd.Series, risk_free: float = 0.0, periods_per_year: int = 252) -> float:
     if returns.empty:
         return 0.0
-    excess = returns - risk_free / periods_per_year
+    excess = returns.astype(float) - risk_free / periods_per_year
     std = excess.std(ddof=1)
     if std == 0 or np.isnan(std):
         return 0.0
@@ -92,7 +94,7 @@ def sortino_ratio(returns: pd.Series, risk_free: float = 0.0, periods_per_year: 
 
 
 def profit_factor(trades: pd.DataFrame) -> float:
-    if trades.empty:
+    if trades.empty or "pnl" not in trades:
         return 0.0
     gross_profit = trades.loc[trades["pnl"] > 0, "pnl"].sum()
     gross_loss = trades.loc[trades["pnl"] < 0, "pnl"].abs().sum()
@@ -102,7 +104,7 @@ def profit_factor(trades: pd.DataFrame) -> float:
 
 
 def expectancy(trades: pd.DataFrame) -> float:
-    if trades.empty:
+    if trades.empty or "pnl" not in trades:
         return 0.0
     wins = trades[trades["pnl"] > 0]
     losses = trades[trades["pnl"] <= 0]
@@ -113,7 +115,7 @@ def expectancy(trades: pd.DataFrame) -> float:
 
 
 def hit_rate(trades: pd.DataFrame) -> float:
-    if trades.empty:
+    if trades.empty or "pnl" not in trades:
         return 0.0
     return float((trades["pnl"] > 0).mean())
 
@@ -133,48 +135,54 @@ def kelly_fraction(win_prob: float, payoff_ratio: float) -> float:
     if payoff_ratio <= -1:
         return 0.0
     edge = win_prob * (payoff_ratio + 1) - 1
-    denom = payoff_ratio
-    if denom == 0:
+    denom = payoff_ratio if payoff_ratio != 0 else np.nan
+    if np.isnan(denom) or denom == 0:
         return 0.0
     frac = edge / denom
     return float(np.clip(frac, 0, 1))
 
 
 def _daily_returns(trades: pd.DataFrame) -> pd.Series:
-    if trades.empty:
+    if trades.empty or "pnl" not in trades:
         return pd.Series(dtype=float)
     df = trades.copy()
-    df["closed_at"] = pd.to_datetime(df["closed_at"]).fillna(pd.to_datetime(df["opened_at"]))
+    df["closed_at"] = pd.to_datetime(df.get("closed_at", df.get("opened_at")))
+    opened = pd.to_datetime(df.get("opened_at"))
+    if "closed_at" in df:
+        df["closed_at"] = df["closed_at"].fillna(opened)
     daily = df.groupby(df["closed_at"].dt.date)["pnl"].sum()
-    return daily.div(daily.abs().mean() or 1.0)
+    return daily.div(max(daily.abs().mean(), 1.0))
 
 
 def aggregate_trade_kpis(trades: pd.DataFrame, equity: Optional[pd.DataFrame] = None) -> Dict[str, float]:
     """Compute a suite of KPIs from a trades DataFrame."""
 
-    metrics: Dict[str, float] = {k: 0.0 for k in [
-        "net_pnl",
-        "realized_pnl",
-        "fees",
-        "trades",
-        "avg_trade",
-        "median_trade",
-        "profit_factor",
-        "hit_rate",
-        "sharpe",
-        "sortino",
-        "max_drawdown",
-        "exposure",
-        "payoff_ratio",
-        "expectancy",
-    ]}
+    metrics: Dict[str, float] = {
+        k: 0.0
+        for k in [
+            "net_pnl",
+            "realized_pnl",
+            "fees",
+            "trades",
+            "avg_trade",
+            "median_trade",
+            "profit_factor",
+            "hit_rate",
+            "sharpe",
+            "sortino",
+            "max_drawdown",
+            "exposure",
+            "payoff_ratio",
+            "expectancy",
+        ]
+    }
     if trades.empty:
         return metrics
 
     trades = trades.copy()
     trades["pnl"] = trades["pnl"].astype(float)
     metrics["net_pnl"] = trades["pnl"].sum()
-    metrics["realized_pnl"] = trades["pnl"].sum()
+    metrics["realized_pnl"] = metrics["net_pnl"]
     metrics["fees"] = trades.get("fees", pd.Series(0.0, index=trades.index)).sum()
     metrics["trades"] = float(len(trades))
     metrics["avg_trade"] = trades["pnl"].mean()
@@ -190,15 +198,15 @@ def aggregate_trade_kpis(trades: pd.DataFrame, equity: Optional[pd.DataFrame] = 
     metrics["sharpe"] = sharpe_ratio(daily_returns)
     metrics["sortino"] = sortino_ratio(daily_returns)
 
-    if equity is not None and not equity.empty:
+    if equity is not None and not equity.empty and "ts" in equity and "balance" in equity:
         series = equity.set_index(pd.to_datetime(equity["ts"]))["balance"].astype(float)
         mdd, _ = max_drawdown(series)
         metrics["max_drawdown"] = abs(mdd)
-        exposure = trades["qty"].abs().sum() / (len(trades) or 1)
+        exposure = trades.get("qty", pd.Series(0.0, index=trades.index)).abs().sum() / max(len(trades), 1)
         metrics["exposure"] = float(exposure)
     else:
         metrics["max_drawdown"] = 0.0
-        metrics["exposure"] = float(trades["qty"].abs().mean() if "qty" in trades else 0.0)
+        metrics["exposure"] = float(trades.get("qty", pd.Series(0.0, index=trades.index)).abs().mean())
 
     return metrics
 
@@ -214,38 +222,50 @@ def attribution_by(trades: pd.DataFrame, key: str) -> pd.DataFrame:
 
 
 def correlation_matrix(trades: pd.DataFrame) -> pd.DataFrame:
-    if trades.empty:
+    if trades.empty or "worker" not in trades:
         return pd.DataFrame()
     trades = trades.copy()
-    trades["closed_at"] = pd.to_datetime(trades["closed_at"]).fillna(pd.to_datetime(trades["opened_at"]))
-    pivot = trades.pivot_table(index=trades["closed_at"].dt.date, columns="worker", values="pnl", aggfunc="sum")
-    return pivot.corr()
+    trades["closed_at"] = pd.to_datetime(trades.get("closed_at", trades.get("opened_at")))
+    pivot = trades.pivot_table(
+        index=trades["closed_at"].dt.date,
+        columns="worker",
+        values="pnl",
+        aggfunc="sum",
+    )
+    return pivot.corr().fillna(0.0)
 
 
 def lead_lag_correlations(trades: pd.DataFrame, max_lag: int = 5) -> pd.DataFrame:
-    if trades.empty:
-        return pd.DataFrame()
+    if trades.empty or "worker" not in trades:
+        return pd.DataFrame(columns=["worker", "lag", "autocorr"])
     corr_rows = []
     workers = trades["worker"].dropna().unique().tolist()
     for worker in workers:
         series = trades.loc[trades["worker"] == worker]
-        series = series.set_index(pd.to_datetime(series["closed_at"]))["pnl"].resample("1D").sum().fillna(0)
-        acf_values = acf(series, nlags=max_lag, fft=False)
+        series = (
+            series.set_index(pd.to_datetime(series.get("closed_at", series.get("opened_at"))))
+            ["pnl"].resample("1D").sum().fillna(0)
+        )
+        acf_values = acf(series.values, nlags=max_lag, fft=False)
         for lag, value in enumerate(acf_values[1:], start=1):
             corr_rows.append({"worker": worker, "lag": lag, "autocorr": float(value)})
     return pd.DataFrame(corr_rows)
 
 
 def rolling_sharpe(trades: pd.DataFrame, window: int = 20) -> pd.DataFrame:
-    if trades.empty:
+    if trades.empty or "worker" not in trades:
         return pd.DataFrame(columns=["ts", "worker", "sharpe"])
     trades = trades.copy()
-    trades["closed_at"] = pd.to_datetime(trades["closed_at"]).fillna(pd.to_datetime(trades["opened_at"]))
+    trades["closed_at"] = pd.to_datetime(trades.get("closed_at", trades.get("opened_at")))
     rows = []
     for worker, df in trades.groupby("worker"):
         daily = df.resample("1D", on="closed_at")["pnl"].sum().fillna(0)
+        if len(daily) < window:
+            continue
         rolling = daily.rolling(window=window).apply(lambda x: sharpe_ratio(pd.Series(x)), raw=False)
         rows.append(pd.DataFrame({"ts": rolling.index, "worker": worker, "sharpe": rolling.values}))
+    if not rows:
+        return pd.DataFrame(columns=["ts", "worker", "sharpe"])
     return pd.concat(rows, ignore_index=True)
 
 
@@ -256,7 +276,7 @@ def simulate_what_if(
     size_pct: float = 1.0,
     risk_cap: float = 1.0,
 ) -> Dict[str, float]:
-    if trades.empty:
+    if trades.empty or "pnl" not in trades:
         return {"net_pnl": 0.0, "sharpe": 0.0, "sortino": 0.0, "hit_rate": 0.0}
 
     trades = trades.copy()

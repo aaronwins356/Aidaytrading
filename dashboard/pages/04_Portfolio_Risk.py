@@ -51,11 +51,17 @@ st.subheader("Lead/Lag autocorrelation")
 lead_df = lead_lag_correlations(trades)
 if not lead_df.empty:
     st.dataframe(lead_df)
+    st.download_button(
+        "Export lead/lag CSV",
+        data=lead_df.to_csv(index=False),
+        file_name="lead_lag.csv",
+        mime="text/csv",
+    )
 else:
     st.info("Insufficient data for lead/lag analysis.")
 
 risk_metrics = aggregate_trade_kpis(trades, None)
-returns = trades.groupby(trades["closed_at"].dt.date)["pnl"].sum() if "closed_at" in trades else pd.Series(dtype=float)
+returns = trades.groupby(trades["closed_at"].dt.date)["pnl"].sum() if "closed_at" in trades and "pnl" in trades else pd.Series(dtype=float)
 var, cvar = calc_var_cvar(returns)
 kelly = risk_metrics.get("payoff_ratio", 0.0)
 metrics_cols = st.columns(3)
@@ -66,6 +72,7 @@ metrics_cols[2].metric("Kelly fraction", f"{kelly:,.2f}")
 st.subheader("Drawdown episodes")
 if not equity.empty and "drawdown" in equity:
     st.line_chart(equity.set_index("ts")["drawdown"])
+    equity = equity.copy()
     equity["episode"] = (equity["drawdown"].diff().fillna(0) >= 0).cumsum()
     dd_table = equity.groupby("episode").agg(start=("ts", "first"), end=("ts", "last"), depth=("drawdown", "min"))
     dd_table["recovery"] = dd_table["end"] - dd_table["start"]
@@ -86,9 +93,17 @@ if run:
     st.json(result)
 
 st.subheader("Exposure by symbol")
-exposure = trades.groupby("symbol")["qty"].sum().reset_index()
-if not exposure.empty:
-    st.bar_chart(exposure.set_index("symbol"))
+if "symbol" in trades and "qty" in trades:
+    exposure = trades.groupby("symbol")["qty"].sum().reset_index()
+    if not exposure.empty:
+        st.bar_chart(exposure.set_index("symbol"))
+        st.download_button(
+            "Export exposure CSV",
+            data=exposure.to_csv(index=False),
+            file_name="exposure.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("No exposure data.")
 else:
-    st.info("No exposure data.")
-
+    st.info("Trades dataset missing symbol/qty fields.")
