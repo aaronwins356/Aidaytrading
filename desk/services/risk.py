@@ -23,6 +23,8 @@ class RiskEngine:
         max_concurrent: int,
         halt_on_dd: bool,
         trapdoor_pct: float,
+        *,
+        max_position_value: float | None = None,
     ) -> None:
         self.daily_dd = daily_dd or 0.0
         self.weekly_dd = weekly_dd or 0.0
@@ -30,6 +32,7 @@ class RiskEngine:
         self.max_concurrent = max_concurrent
         self.halt_on_dd = halt_on_dd
         self.trapdoor_pct = trapdoor_pct
+        self.max_position_value = max_position_value if max_position_value and max_position_value > 0 else None
 
         self.start_equity: float | None = None
         self.equity_high: float | None = None
@@ -106,5 +109,8 @@ class RiskEngine:
             return 0.0
 
         qty = risk_budget / stop_distance
+        if self.max_position_value and price > 0:
+            max_qty = self.max_position_value / price
+            qty = min(qty, max_qty)
         return max(qty, 0.0)
 

@@ -5,7 +5,7 @@ import copy
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, List
 
 try:  # pragma: no cover - import guard
     import yaml  # type: ignore
@@ -133,6 +133,129 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def _validate_positive(name: str, value: Any, *, allow_zero: bool = False) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be numeric")
+    if allow_zero and numeric == 0:
+        return 0.0
+    if numeric <= 0:
+        raise ValueError(f"{name} must be positive")
+    return numeric
+
+
+def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and normalise the runtime configuration.
+
+    The function raises ``ValueError`` when unrecoverable validation errors are
+    encountered.  A defensive copy of ``config`` is returned to ensure callers
+    receive a stable dictionary that can be relied upon for live trading.
+    """
+
+    validated: Dict[str, Any] = copy.deepcopy(config)
+    errors: List[str] = []
+
+    settings = validated.get("settings")
+    if not isinstance(settings, dict):
+        errors.append("settings must be a mapping")
+        settings = {}
+    else:
+        try:
+            settings["loop_delay"] = _validate_positive("settings.loop_delay", settings.get("loop_delay"))
+        except ValueError as exc:
+            errors.append(str(exc))
+        try:
+            settings["warmup_candles"] = int(
+                _validate_positive(
+                    "settings.warmup_candles",
+                    settings.get("warmup_candles"),
+                )
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+    validated["settings"] = settings
+
+    feed = validated.get("feed")
+    if not isinstance(feed, dict):
+        errors.append("feed must be a mapping")
+        feed = {}
+    symbols = feed.get("symbols") if isinstance(feed, dict) else None
+    if not isinstance(symbols, Iterable) or isinstance(symbols, (str, bytes)):
+        errors.append("feed.symbols must be a list of symbols")
+        feed["symbols"] = []
+    else:
+        normalized_symbols = [str(symbol).upper() for symbol in symbols if str(symbol).strip()]
+        if not normalized_symbols:
+            errors.append("feed.symbols must contain at least one symbol")
+        feed["symbols"] = normalized_symbols
+    validated["feed"] = feed
+
+    risk = validated.get("risk")
+    if not isinstance(risk, dict):
+        errors.append("risk must be a mapping")
+        risk = {}
+    else:
+        for key in ("fixed_risk_usd", "stop_loss_pct"):
+            if key in risk:
+                try:
+                    risk[key] = _validate_positive(f"risk.{key}", risk.get(key))
+                except ValueError as exc:
+                    errors.append(str(exc))
+        if "max_concurrent" in risk:
+            try:
+                risk["max_concurrent"] = int(_validate_positive("risk.max_concurrent", risk.get("max_concurrent")))
+            except ValueError as exc:
+                errors.append(str(exc))
+        if "max_position_value" in risk and risk.get("max_position_value") is not None:
+            try:
+                risk["max_position_value"] = _validate_positive(
+                    "risk.max_position_value", risk.get("max_position_value")
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+    validated["risk"] = risk
+
+    workers = validated.get("workers", [])
+    if not isinstance(workers, list):
+        errors.append("workers must be a list")
+        workers = []
+    normalised_workers: List[Dict[str, Any]] = []
+    for idx, worker in enumerate(workers):
+        if not isinstance(worker, dict):
+            errors.append(f"workers[{idx}] must be a mapping")
+            continue
+        missing = [field for field in ("name", "symbol", "strategy") if not worker.get(field)]
+        if missing:
+            errors.append(f"workers[{idx}] missing fields: {', '.join(missing)}")
+            continue
+        allocation = worker.get("allocation", worker.get("weight", 0.1))
+        try:
+            allocation_value = _validate_positive(
+                f"workers[{idx}].allocation", allocation
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        if allocation_value > 1.0:
+            errors.append(
+                f"workers[{idx}].allocation must not exceed 1.0 (got {allocation_value})"
+            )
+            continue
+        worker = copy.deepcopy(worker)
+        worker["allocation"] = allocation_value
+        worker.setdefault("params", {})
+        normalised_workers.append(worker)
+
+    validated["workers"] = normalised_workers
+
+    if errors:
+        message = "; ".join(dict.fromkeys(errors))
+        raise ValueError(f"Invalid configuration: {message}")
+
+    return validated
+
+
 def load_config(path: Path | None = None) -> Dict[str, Any]:
     """Load the bot configuration, falling back to sane defaults."""
     path = path or CONFIG_PATH
@@ -142,7 +265,7 @@ def load_config(path: Path | None = None) -> Dict[str, Any]:
     # normalise keys to lowercase for env override compatibility
     merged = _deep_merge(_DEFAULT_CONFIG, raw)
     merged = _apply_env_overrides(merged)
-    return merged
+    return validate_config(merged)
 
 
 def save_config(config: Dict[str, Any], path: Path | None = None) -> None:

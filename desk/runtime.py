@@ -131,6 +131,11 @@ class TradingRuntime:
             max_concurrent=int(risk_cfg.get("max_concurrent", 8)),
             halt_on_dd=bool(risk_cfg.get("halt_on_dd", True)),
             trapdoor_pct=float(risk_cfg.get("trapdoor_pct", 0.02)),
+            max_position_value=(
+                float(risk_cfg.get("max_position_value"))
+                if risk_cfg.get("max_position_value")
+                else None
+            ),
         )
         self.executor = ExecutionEngine(
             self.broker,
