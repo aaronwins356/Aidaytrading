@@ -19,7 +19,7 @@ risk:
   trade_stop_loss: 1.0
   max_concurrent: 8
   halt_on_dd: true
-  retrain_every: 25
+  retrain_every: 10
   ml_weight: 0.5
   trapdoor_pct: 0.02
 
