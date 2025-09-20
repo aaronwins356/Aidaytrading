@@ -28,6 +28,12 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "warmup_candles": 50,
         "timeframe": "1m",
         "lookback": 250,
+        "feed_workers": None,
+        "paper_fee_bps": 10.0,
+        "paper_slippage_bps": 5.0,
+        "paper_partial_fill_probability": 0.1,
+        "paper_min_fill_ratio": 0.6,
+        "paper_funding_rate_hourly": 0.0,
     },
     "risk": {
         "fixed_risk_usd": 50.0,
@@ -36,7 +42,6 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "max_hold_minutes": 15,
         "daily_dd": 0.02,
         "weekly_dd": 0.05,
-        "trade_stop_loss": 1.0,
         "max_concurrent": 8,
         "halt_on_dd": True,
         "retrain_every": 25,
@@ -48,6 +53,11 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "max_weight": 0.25,
         "epsilon": 0.1,
         "cooldown_minutes": 15,
+    },
+    "telemetry": {
+        "endpoint": "",
+        "flush_interval": 1.0,
+        "max_backoff": 30.0,
     },
     "workers": [],
 }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import math
 import time
 from typing import Dict, Iterable
 
@@ -20,6 +22,8 @@ class FeedHandler:
         circuit_breaker_threshold: int = 5,
         circuit_reset_seconds: float = 30.0,
         fallback_broker=None,
+        stale_multiplier: float = 2.5,
+        max_workers: int | None = None,
     ):
         self.broker = broker
         self.timeframe = timeframe
@@ -32,6 +36,39 @@ class FeedHandler:
         self.fallback_broker = fallback_broker
         self._failure_counts: Dict[str, int] = {}
         self._circuit_open_until: Dict[str, float] = {}
+        self._stale_multiplier = max(1.0, stale_multiplier)
+        self._timeframe_seconds = self._timeframe_to_seconds(timeframe)
+        self._max_workers = max_workers or min(8, (len(getattr(broker, "symbols", [])) or 4))
+
+    @staticmethod
+    def _timeframe_to_seconds(timeframe: str) -> float:
+        units = {
+            "s": 1,
+            "m": 60,
+            "h": 3600,
+            "d": 86400,
+        }
+        try:
+            value = float(timeframe[:-1])
+            unit = timeframe[-1].lower()
+            return value * units.get(unit, 60)
+        except Exception:
+            return 60.0
+
+    @staticmethod
+    def _normalize_timestamp(ts: float) -> float:
+        # CCXT timestamps are often in ms.
+        if ts > 1e12:
+            return ts / 1000.0
+        return ts
+
+    def _is_stale(self, candles: list[dict[str, float]]) -> bool:
+        if not candles:
+            return True
+        last_ts = self._normalize_timestamp(float(candles[-1].get("timestamp", 0.0)))
+        age = time.time() - last_ts
+        expiry = self._timeframe_seconds * self._stale_multiplier
+        return age > expiry
 
     def fetch(self, symbol: str) -> list[dict[str, float]]:
         now = time.time()
@@ -51,6 +88,13 @@ class FeedHandler:
                 if candles:
                     latency = time.time() - start
                     candles[-1]["latency"] = latency
+                    if self._is_stale(candles):
+                        age = time.time() - self._normalize_timestamp(
+                            float(candles[-1].get("timestamp", 0.0))
+                        )
+                        raise RuntimeError(
+                            f"Stale market data for {symbol} (age={age:.2f}s)"
+                        )
                     self.cache[symbol] = candles
                     self._failure_counts.pop(symbol, None)
                     self._circuit_open_until.pop(symbol, None)
@@ -85,14 +129,25 @@ class FeedHandler:
         return self.cache.get(symbol, [])
 
     def snapshot(self, symbols: Iterable[str]) -> Dict[str, list[dict[str, float]]]:
-        snapshot = {}
-        for symbol in symbols:
-            try:
-                candles = self.fetch(symbol)
-                snapshot[symbol] = candles
-            except Exception as exc:  # pragma: no cover - defensive network guard
-                print(f"[FEED] Failed to fetch {symbol}: {exc}")
-                if symbol in self.cache:
-                    snapshot[symbol] = self.cache[symbol]
+        snapshot: Dict[str, list[dict[str, float]]] = {}
+        symbol_list = list(symbols)
+        if not symbol_list:
+            return snapshot
+
+        workers = min(len(symbol_list), max(1, int(math.ceil(len(symbol_list) / 2))))
+        workers = min(workers, self._max_workers)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {
+                executor.submit(self.fetch, symbol): symbol for symbol in symbol_list
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                symbol = future_map[future]
+                try:
+                    snapshot[symbol] = future.result()
+                except Exception as exc:  # pragma: no cover - defensive network guard
+                    print(f"[FEED] Failed to fetch {symbol}: {exc}")
+                    if symbol in self.cache:
+                        snapshot[symbol] = self.cache[symbol]
         return snapshot
 

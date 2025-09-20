@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import signal
 import time
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from desk.services import (
     Learner,
     PortfolioManager,
     RiskEngine,
+    TelemetryClient,
     Worker,
 )
 
@@ -34,10 +36,30 @@ class TradingRuntime:
         self.state = RuntimeState()
         self.logger = EventLogger()
         self.learner = Learner()
+        telemetry_cfg = self.config.get("telemetry", {})
+        self.telemetry = TelemetryClient(
+            telemetry_cfg.get("endpoint"),
+            flush_interval=float(telemetry_cfg.get("flush_interval", 1.0)),
+            max_backoff=float(telemetry_cfg.get("max_backoff", 30.0)),
+        )
 
         settings = self.config.get("settings", {})
         risk_cfg = self.config.get("risk", {})
         portfolio_cfg = self.config.get("portfolio", {})
+        paper_params = {
+            "fee_bps": float(settings.get("paper_fee_bps", 10.0)),
+            "slippage_bps": float(settings.get("paper_slippage_bps", 5.0)),
+            "partial_fill_probability": float(
+                settings.get("paper_partial_fill_probability", 0.1)
+            ),
+            "min_fill_ratio": float(settings.get("paper_min_fill_ratio", 0.6)),
+            "funding_rate_hourly": float(settings.get("paper_funding_rate_hourly", 0.0)),
+        }
+        feed_workers = settings.get("feed_workers")
+        try:
+            feed_workers = int(feed_workers) if feed_workers else None
+        except (TypeError, ValueError):
+            feed_workers = None
 
         self.broker = BrokerCCXT(
             mode=settings.get("mode", "paper"),
@@ -45,21 +67,31 @@ class TradingRuntime:
             api_key=settings.get("api_key", ""),
             api_secret=settings.get("api_secret", ""),
             starting_balance=float(settings.get("balance", 1_000.0)),
+            telemetry=self.telemetry,
+            paper_params=paper_params,
         )
         self.feed = FeedHandler(
             self.broker,
             timeframe=settings.get("timeframe", "1m"),
             lookback=int(settings.get("lookback", 250)),
+            max_workers=feed_workers,
         )
         self.risk_engine = RiskEngine(
             daily_dd=risk_cfg.get("daily_dd"),
             weekly_dd=risk_cfg.get("weekly_dd"),
-            trade_stop_loss=float(risk_cfg.get("trade_stop_loss", 1.0)),
+            default_stop_pct=float(
+                risk_cfg.get("stop_loss_pct", risk_cfg.get("trade_stop_loss", 0.02))
+            ),
             max_concurrent=int(risk_cfg.get("max_concurrent", 8)),
             halt_on_dd=bool(risk_cfg.get("halt_on_dd", True)),
             trapdoor_pct=float(risk_cfg.get("trapdoor_pct", 0.02)),
         )
-        self.executor = ExecutionEngine(self.broker, self.logger, risk_cfg)
+        self.executor = ExecutionEngine(
+            self.broker,
+            self.logger,
+            risk_cfg,
+            telemetry=self.telemetry,
+        )
         self.portfolio = PortfolioManager(
             min_weight=float(portfolio_cfg.get("min_weight", 0.01)),
             max_weight=float(portfolio_cfg.get("max_weight", 0.25)),
@@ -67,6 +99,8 @@ class TradingRuntime:
             cooldown_minutes=float(portfolio_cfg.get("cooldown_minutes", 15)),
         )
         self.workers = self._load_workers()
+
+        self.executor.reconcile(self.workers, self.feed, portfolio=self.portfolio)
 
         self.loop_delay = float(settings.get("loop_delay", 60))
         self.warmup = int(settings.get("warmup_candles", 50))
@@ -83,6 +117,7 @@ class TradingRuntime:
                     params=cfg,
                     logger=self.logger,
                     learner=self.learner,
+                    risk_engine=self.risk_engine,
                 )
                 workers.append(worker)
             except Exception as exc:  # pragma: no cover - defensive bootstrap
@@ -121,19 +156,28 @@ class TradingRuntime:
         while self.state.running:
             snapshot = self.feed.snapshot(symbols)
             intents = []
-            for worker in self.workers:
+
+            def _evaluate(worker):
                 candles = snapshot.get(worker.symbol, [])
                 if not candles:
-                    continue
+                    return None
                 worker.state["candles"] = candles
                 if len(candles) < self.warmup:
-                    continue
+                    return None
                 intent = worker.build_intent(base_risk * worker.allocation)
-                if not intent:
-                    continue
-                if not intent.approved:
-                    continue
-                intents.append(intent)
+                if not intent or not intent.approved:
+                    return None
+                return intent
+
+            if self.workers:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(len(self.workers), 8)
+                ) as pool:
+                    futures = {pool.submit(_evaluate, worker): worker for worker in self.workers}
+                    for future in concurrent.futures.as_completed(futures):
+                        intent = future.result()
+                        if intent:
+                            intents.append(intent)
 
             if intents:
                 intents.sort(key=lambda intent: intent.score, reverse=True)
@@ -148,7 +192,12 @@ class TradingRuntime:
                         continue
                     if not self.risk_engine.enforce_position_limits(all_positions):
                         break
-                    qty = intent.worker.compute_quantity(intent.price, risk_budget)
+                    qty = intent.worker.compute_quantity(
+                        intent.price,
+                        risk_budget,
+                        stop_loss=intent.stop_loss,
+                        side=intent.side,
+                    )
                     if qty <= 0:
                         continue
                     plan_metadata = intent.plan_metadata or {}
@@ -217,6 +266,7 @@ class TradingRuntime:
             if isinstance(balance, dict):
                 equity = float(balance.get("USD", balance.get("total", 0.0)) or 0.0)
             self.logger.write_equity(equity)
+            self.telemetry.record_equity(equity)
             self.risk_engine.check_account(equity)
             if self.risk_engine.halted:
                 print("[RUNTIME] Risk engine halted trading. Exiting loop.")
@@ -225,4 +275,5 @@ class TradingRuntime:
             time.sleep(self.loop_delay)
 
         print("[RUNTIME] Shutdown complete.")
+        self.telemetry.close()
 

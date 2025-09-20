@@ -5,7 +5,7 @@ def test_trapdoor_halts_on_break():
     engine = RiskEngine(
         daily_dd=0.05,
         weekly_dd=0.1,
-        trade_stop_loss=0.02,
+        default_stop_pct=0.02,
         max_concurrent=2,
         halt_on_dd=True,
         trapdoor_pct=0.05,
@@ -24,7 +24,7 @@ def test_enforce_position_limits_blocks_when_full():
     engine = RiskEngine(
         daily_dd=None,
         weekly_dd=None,
-        trade_stop_loss=0.02,
+        default_stop_pct=0.02,
         max_concurrent=1,
         halt_on_dd=False,
         trapdoor_pct=0.05,
@@ -33,8 +33,9 @@ def test_enforce_position_limits_blocks_when_full():
     assert engine.enforce_position_limits([]) is True
 
 
-def test_per_trade_notional_handles_invalid_price():
+def test_position_size_uses_stop_distance():
     engine = RiskEngine(0.05, 0.1, 0.02, 5, False, 0.05)
-    assert engine.per_trade_notional(0, 1000) == 0.0
-    qty = engine.per_trade_notional(100, 1000)
-    assert qty > 0
+    qty = engine.position_size(100, 50, stop_loss=98, side="BUY")
+    assert qty == 25
+    fallback = engine.position_size(100, 50, stop_loss=None, side="BUY")
+    assert fallback > 0

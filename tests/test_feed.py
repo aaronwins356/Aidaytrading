@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, List
 
+import time
+
 from desk.services.feed import FeedHandler
 
 
@@ -9,7 +11,8 @@ class FlakyBroker:
     def __init__(self, fail_times: int = 1):
         self.fail_times = fail_times
         self.calls = 0
-        self.payload = [[1, 100, 101, 99, 100, 10]]
+        ts = time.time() * 1000
+        self.payload = [[ts, 100, 101, 99, 100, 10]]
 
     def fetch_ohlcv(self, symbol, timeframe="1m", limit=50):
         self.calls += 1
@@ -20,7 +23,8 @@ class FlakyBroker:
 
 class StaticBroker:
     def __init__(self):
-        self.payload = [[1, 200, 201, 199, 200, 5]]
+        ts = time.time() * 1000
+        self.payload = [[ts, 200, 201, 199, 200, 5]]
 
     def fetch_ohlcv(self, symbol, timeframe="1m", limit=50):
         return self.payload

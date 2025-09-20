@@ -8,6 +8,12 @@ settings:
   warmup_candles: 50
   timeframe: 1m
   lookback: 250
+  feed_workers: 6
+  paper_fee_bps: 10
+  paper_slippage_bps: 8
+  paper_partial_fill_probability: 0.15
+  paper_min_fill_ratio: 0.5
+  paper_funding_rate_hourly: 0.0002
 
 risk:
   fixed_risk_usd: 50
@@ -16,12 +22,16 @@ risk:
   max_hold_minutes: 15
   daily_dd: 0.02
   weekly_dd: 0.05
-  trade_stop_loss: 1.0
   max_concurrent: 8
   halt_on_dd: true
   retrain_every: 10
   ml_weight: 0.5
   trapdoor_pct: 0.02
+
+telemetry:
+  endpoint: ""
+  flush_interval: 1.0
+  max_backoff: 30.0
 
 portfolio:
   min_weight: 0.05

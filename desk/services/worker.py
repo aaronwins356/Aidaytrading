@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 try:  # pragma: no cover - import guard
     import pandas as pd  # type: ignore
@@ -14,6 +14,9 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in tests
 from desk.data import candles_to_dataframe
 from desk.services.learner import Learner
 from desk.services.logger import EventLogger
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from desk.services.risk import RiskEngine
 
 
 def _is_number(value: Any) -> bool:
@@ -65,6 +68,7 @@ class Worker:
         params: Dict[str, Any],
         logger: Optional[EventLogger] = None,
         learner: Optional[Learner] = None,
+        risk_engine: Optional["RiskEngine"] = None,
     ) -> None:
         self.name = name
         self.symbol = symbol
@@ -72,6 +76,7 @@ class Worker:
         self.params = params
         self.logger = logger or EventLogger()
         self.learner = learner or Learner()
+        self.risk_engine = risk_engine
 
         self.strategy = self._load_strategy()
         self.state: Dict[str, Any] = {
@@ -146,9 +151,24 @@ class Worker:
 
         return vetoes
 
-    def compute_quantity(self, price: float, risk_budget: float) -> float:
+    def compute_quantity(
+        self,
+        price: float,
+        risk_budget: float,
+        *,
+        stop_loss: Optional[float] = None,
+        side: str = "BUY",
+    ) -> float:
         params = self.params.get("params", {})
-        qty = risk_budget / max(price, 1e-9)
+        if self.risk_engine is not None:
+            qty = self.risk_engine.position_size(
+                price,
+                risk_budget,
+                stop_loss=stop_loss,
+                side=side,
+            )
+        else:
+            qty = risk_budget / max(price, 1e-9)
         min_qty = float(params.get("min_qty", 0.0) or 0.0)
         if min_qty > 0:
             qty = max(qty, min_qty)
@@ -171,13 +191,18 @@ class Worker:
         ml_score = self.learner.predict_edge(self, features)
         score = 0.6 + 0.4 * ml_score
 
-        qty = self.compute_quantity(price, risk_budget)
-
         trade_plan: Dict[str, float] = {}
         try:
             trade_plan = self.strategy.plan_trade(side.lower(), df) or {}
         except Exception:
             trade_plan = {}
+
+        qty = self.compute_quantity(
+            price,
+            risk_budget,
+            stop_loss=trade_plan.get("stop_loss"),
+            side=side,
+        )
 
         plan_metadata = trade_plan.get("metadata")
         if isinstance(plan_metadata, dict):
