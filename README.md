@@ -86,8 +86,6 @@ requirements.txt         # Python dependencies
    Streamlit directly:
 
    ```bash
-   ./run dashboard        # wraps run_dashboard.sh and expects .venv
-   # or
    streamlit run dashboard/app.py
    ```
 
