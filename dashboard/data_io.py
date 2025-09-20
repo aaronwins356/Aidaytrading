@@ -355,6 +355,8 @@ class DeskConfig(BaseModel):
     workers: Dict[str, WorkerConfig] = Field(default_factory=dict)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
+    kraken_api_key: str = ""
+    kraken_api_secret: str = ""
 
 
 def _default_config() -> DeskConfig:

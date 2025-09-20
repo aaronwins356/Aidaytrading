@@ -16,6 +16,34 @@ config, raw = load_config(CONFIG_PATH)
 st.session_state["config"] = config
 st.session_state["config_raw"] = raw
 
+st.subheader("Exchange credentials")
+creds_submitted = False
+with st.form("kraken_credentials"):
+    api_key = st.text_input(
+        "Kraken API key",
+        value=getattr(st.session_state["config"], "kraken_api_key", ""),
+        help="Enter the API key generated in your Kraken account.",
+    )
+    api_secret = st.text_input(
+        "Kraken API secret",
+        value=getattr(st.session_state["config"], "kraken_api_secret", ""),
+        type="password",
+        help="Paste the corresponding secret. It will be stored in the configuration file.",
+    )
+    creds_submitted = st.form_submit_button("Save Kraken credentials", use_container_width=True)
+
+if creds_submitted:
+    new_config = st.session_state["config"].dict()
+    new_config["kraken_api_key"] = api_key.strip()
+    new_config["kraken_api_secret"] = api_secret.strip()
+    success, message = save_config(new_config)
+    if success:
+        st.success("Kraken credentials updated.")
+        st.session_state["config"] = st.session_state["config"].__class__(**new_config)
+        st.session_state["config_raw"] = new_config
+    else:
+        st.error(message)
+
 st.subheader("Configuration editor")
 with st.form("config_editor"):
     editable = yaml.safe_dump(raw or config.dict(), sort_keys=False, allow_unicode=True)
