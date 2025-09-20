@@ -50,6 +50,9 @@ class ExecutionEngine:
         side: str,
         qty: float,
         price: float,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+        max_hold_minutes: Optional[float] = None,
         metadata: Optional[Dict[str, float]] = None,
     ) -> OpenTrade:
         side = side.upper()
@@ -57,12 +60,16 @@ class ExecutionEngine:
         rr = float(self.risk_config.get("rr_ratio", 2.0))
         hold_seconds = float(self.risk_config.get("max_hold_minutes", 15.0)) * 60
 
-        if side == "BUY":
-            stop_loss = price * (1 - sl_pct)
-            take_profit = price * (1 + sl_pct * rr)
-        else:
-            stop_loss = price * (1 + sl_pct)
-            take_profit = price * (1 - sl_pct * rr)
+        if stop_loss is None or take_profit is None:
+            if side == "BUY":
+                stop_loss = price * (1 - sl_pct)
+                take_profit = price * (1 + sl_pct * rr)
+            else:
+                stop_loss = price * (1 + sl_pct)
+                take_profit = price * (1 - sl_pct * rr)
+
+        if max_hold_minutes is not None:
+            hold_seconds = float(max_hold_minutes) * 60
 
         return OpenTrade(
             worker=worker_name,
@@ -84,12 +91,25 @@ class ExecutionEngine:
         qty: float,
         price: float,
         risk_amount: float,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+        max_hold_minutes: Optional[float] = None,
         metadata: Optional[Dict[str, float]] = None,
     ) -> Optional[OpenTrade]:
         if qty <= 0:
             return None
 
-        trade = self._build_trade(worker.name, symbol, side, qty, price, metadata=metadata)
+        trade = self._build_trade(
+            worker.name,
+            symbol,
+            side,
+            qty,
+            price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            max_hold_minutes=max_hold_minutes,
+            metadata=metadata,
+        )
         placed_order = self.broker.market_order(symbol, side.lower(), qty)
         if placed_order is None:
             return None

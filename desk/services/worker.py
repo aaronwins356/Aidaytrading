@@ -13,6 +13,14 @@ from desk.services.learner import Learner
 from desk.services.logger import EventLogger
 
 
+def _is_number(value: Any) -> bool:
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 @dataclass
 class VetoResult:
     name: str
@@ -31,6 +39,10 @@ class Intent:
     vetoes: List[VetoResult]
     features: Dict[str, float]
     ml_score: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    max_hold_minutes: Optional[float] = None
+    plan_metadata: Dict[str, float] = field(default_factory=dict)
 
     @property
     def approved(self) -> bool:
@@ -158,12 +170,32 @@ class Worker:
 
         qty = self.compute_quantity(price, risk_budget)
 
+        trade_plan: Dict[str, float] = {}
+        try:
+            trade_plan = self.strategy.plan_trade(side.lower(), df) or {}
+        except Exception:
+            trade_plan = {}
+
+        plan_metadata = trade_plan.get("metadata")
+        if isinstance(plan_metadata, dict):
+            metadata_dict = {str(k): float(v) for k, v in plan_metadata.items() if _is_number(v)}
+        else:
+            metadata_dict = {}
+
         enriched_features = dict(features)
         enriched_features["ml_edge"] = ml_score
         enriched_features["combined_score"] = score
         enriched_features["proposed_qty"] = qty
         enriched_features["risk_budget"] = risk_budget
         enriched_features["side"] = 1.0 if side == "BUY" else -1.0
+        if "stop_loss" in trade_plan:
+            enriched_features["plan_stop_loss"] = float(trade_plan.get("stop_loss", 0.0) or 0.0)
+        if "take_profit" in trade_plan:
+            enriched_features["plan_take_profit"] = float(trade_plan.get("take_profit", 0.0) or 0.0)
+        if "max_hold_minutes" in trade_plan:
+            enriched_features["plan_max_hold_minutes"] = float(trade_plan.get("max_hold_minutes", 0.0) or 0.0)
+        for key, value in metadata_dict.items():
+            enriched_features[f"plan_meta_{key}"] = value
 
         return Intent(
             worker=self,
@@ -175,6 +207,10 @@ class Worker:
             vetoes=vetoes,
             features=enriched_features,
             ml_score=ml_score,
+            stop_loss=trade_plan.get("stop_loss"),
+            take_profit=trade_plan.get("take_profit"),
+            max_hold_minutes=trade_plan.get("max_hold_minutes"),
+            plan_metadata=metadata_dict,
         )
 
     # ------------------------------------------------------------------

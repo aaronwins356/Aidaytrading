@@ -151,6 +151,8 @@ class TradingRuntime:
                     qty = intent.worker.compute_quantity(intent.price, risk_budget)
                     if qty <= 0:
                         continue
+                    plan_metadata = intent.plan_metadata or {}
+
                     trade = self.executor.open_position(
                         intent.worker,
                         intent.symbol,
@@ -158,10 +160,14 @@ class TradingRuntime:
                         qty,
                         intent.price,
                         risk_budget,
+                        stop_loss=intent.stop_loss,
+                        take_profit=intent.take_profit,
+                        max_hold_minutes=intent.max_hold_minutes,
                         metadata={
                             "features": intent.features,
                             "score": intent.score,
                             "ml_edge": intent.ml_score,
+                            "plan": plan_metadata,
                         },
                     )
                     if trade:
