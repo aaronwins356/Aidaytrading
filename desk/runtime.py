@@ -49,15 +49,40 @@ class TradingRuntime:
         feed_cfg = self.config.get("feed", {})
         risk_cfg = self.config.get("risk", {})
         portfolio_cfg = self.config.get("portfolio", {})
+        paper_settings = settings.get("paper_params") or {}
         paper_params = {
-            "fee_bps": float(settings.get("paper_fee_bps", 10.0)),
-            "slippage_bps": float(settings.get("paper_slippage_bps", 5.0)),
-            "partial_fill_probability": float(
-                settings.get("paper_partial_fill_probability", 0.1)
+            "fee_bps": float(
+                paper_settings.get("fee_bps", settings.get("paper_fee_bps", 10.0))
             ),
-            "min_fill_ratio": float(settings.get("paper_min_fill_ratio", 0.6)),
-            "funding_rate_hourly": float(settings.get("paper_funding_rate_hourly", 0.0)),
+            "slippage_bps": float(
+                paper_settings.get(
+                    "slippage_bps", settings.get("paper_slippage_bps", 5.0)
+                )
+            ),
+            "partial_fill_probability": float(
+                paper_settings.get(
+                    "partial_fill_probability",
+                    settings.get("paper_partial_fill_probability", 0.1),
+                )
+            ),
+            "min_fill_ratio": float(
+                paper_settings.get(
+                    "min_fill_ratio", settings.get("paper_min_fill_ratio", 0.6)
+                )
+            ),
+            "funding_rate_hourly": float(
+                paper_settings.get(
+                    "funding_rate_hourly",
+                    settings.get("paper_funding_rate_hourly", 0.0),
+                )
+            ),
         }
+        try:
+            starting_balance = float(
+                paper_settings.get("starting_balance", settings.get("balance", 1_000.0))
+            )
+        except (TypeError, ValueError):
+            starting_balance = 1_000.0
         feed_workers = settings.get("feed_workers")
         try:
             feed_workers = int(feed_workers) if feed_workers else None
@@ -80,9 +105,10 @@ class TradingRuntime:
             exchange_name=primary_exchange,
             api_key=settings.get("api_key", ""),
             api_secret=settings.get("api_secret", ""),
-            starting_balance=float(settings.get("balance", 1_000.0)),
+            starting_balance=starting_balance,
             telemetry=self.telemetry,
             paper_params=paper_params,
+            event_logger=self.logger,
             fallback_exchanges=fallback_exchanges,
         )
         feed_exchange = str(feed_cfg.get("exchange", primary_exchange))
@@ -95,8 +121,19 @@ class TradingRuntime:
                 for name in feed_fallbacks
                 if str(name or "").strip()
             ]
-        data_seed_cfg = feed_cfg.get("data_seeding") or {}
-        feed_timeframe = str(feed_cfg.get("timeframe", settings.get("timeframe", "1m")))
+        data_seed_cfg = dict(feed_cfg.get("data_seeding") or {})
+        paper_seed_candles = paper_settings.get("seed_candles")
+        paper_seed_timeframe = paper_settings.get("timeframe")
+        if paper_seed_candles is not None and "seed_length" not in data_seed_cfg:
+            data_seed_cfg["seed_length"] = paper_seed_candles
+        if paper_seed_timeframe and "seed_timeframe" not in data_seed_cfg:
+            data_seed_cfg["seed_timeframe"] = paper_seed_timeframe
+        feed_timeframe = str(
+            feed_cfg.get(
+                "timeframe",
+                paper_seed_timeframe or settings.get("timeframe", "1m"),
+            )
+        )
         feed_symbols_cfg = feed_cfg.get("symbols")
         if feed_symbols_cfg:
             feed_symbols = [str(symbol) for symbol in feed_symbols_cfg]

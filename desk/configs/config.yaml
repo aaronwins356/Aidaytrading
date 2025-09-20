@@ -1,27 +1,37 @@
 settings:
-  mode: Paper
-  exchange: binance
+  mode: paper
+  exchange: kraken
   default_exchange: kraken
   fallback_exchanges:
-    - kraken
+    - binance
+    - coinbasepro
   api_key: ""
   api_secret: ""
-  balance: 1000
+  balance: 10000
   loop_delay: 60
   warmup_candles: 10
   timeframe: 1m
   lookback: 250
   feed_workers: 6
-  paper_fee_bps: 10
-  paper_slippage_bps: 8
-  paper_partial_fill_probability: 0.15
-  paper_min_fill_ratio: 0.5
-  paper_funding_rate_hourly: 0.0002
+  paper_params:
+    starting_balance: 10000
+    seed_candles: 1000
+    timeframe: 1m
+    fee_bps: 10
+    slippage_bps: 8
+    partial_fill_probability: 0.15
+    min_fill_ratio: 0.5
+    funding_rate_hourly: 0.0002
 
 feed:
   exchange: kraken
+  fallback_exchanges:
+    - binance
+    - kucoin
   data_seeding:
-    warm_candles: 10 
+    warm_candles: 1000
+    seed_length: 1000
+    seed_timeframe: 1m
     max_stale_seconds: 900
     blocked_retry_seconds: 900
     synthetic_volatility: 0.0125

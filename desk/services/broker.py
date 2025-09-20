@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover
     TYPE_CHECKING = False
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from desk.services.logger import EventLogger
     from desk.services.telemetry import TelemetryClient
 
 
@@ -52,6 +53,7 @@ class BrokerCCXT:
         telemetry: Optional["TelemetryClient"] = None,
         paper_params: Optional[Dict[str, float]] = None,
         fallback_exchanges: Optional[Iterable[str]] = None,
+        event_logger: Optional["EventLogger"] = None,
     ) -> None:
         normalized_mode = str(mode or "").strip().lower()
         if not normalized_mode:
@@ -86,6 +88,8 @@ class BrokerCCXT:
         if paper_params:
             self.paper_params.update({k: float(v) for k, v in paper_params.items()})
 
+        self.event_logger = event_logger
+
         if self.mode == "paper":
             bal = self._load_balance()
             if not bal:
@@ -97,6 +101,18 @@ class BrokerCCXT:
             self.balance_data = None
 
         print(f"[BrokerCCXT] Running in {self.mode.upper()} mode")
+
+    def _log_event(self, level: str, message: str, *, symbol: str = "BROKER", **metadata) -> None:
+        payload = {k: v for k, v in metadata.items() if v is not None}
+        meta_str = ""
+        if payload:
+            pairs = ", ".join(f"{key}={value}" for key, value in payload.items())
+            meta_str = f" | {pairs}"
+        print(f"[BrokerCCXT][{level.upper()}] {symbol}: {message}{meta_str}")
+        if self.event_logger is not None:
+            self.event_logger.log_feed_event(
+                level=level, symbol=symbol, message=message, **payload
+            )
 
     @staticmethod
     def _error_message(exc: Exception) -> str:
@@ -144,7 +160,11 @@ class BrokerCCXT:
     def _mark_blocked(self, name: str, reason: str) -> None:
         retry_at = time.time() + self._blocked_retry_seconds
         self._blocked_until[name.lower()] = retry_at
-        print(f"[BrokerCCXT] Exchange {name} blocked until {retry_at:.0f}: {reason}")
+        self._log_event(
+            "WARNING",
+            f"Exchange {name} blocked until {retry_at:.0f}",
+            detail=reason,
+        )
 
     def _is_blocked(self, name: str) -> bool:
         retry_at = self._blocked_until.get(name.lower())
@@ -191,7 +211,7 @@ class BrokerCCXT:
                 continue
             self.exchange_name = name
             if name != self._candidate_exchanges[0]:
-                print(f"[BrokerCCXT] Using fallback exchange {name}")
+                self._log_event("INFO", f"Using fallback exchange {name}")
             return exchange
         if last_error is not None:
             raise last_error
@@ -209,12 +229,18 @@ class BrokerCCXT:
                 self._mark_blocked(name, self._error_message(exc))
                 continue
             except Exception as exc:  # pragma: no cover - network guard
-                print(f"[BrokerCCXT] Failed to promote {name}: {self._error_message(exc)}")
+                self._log_event(
+                    "ERROR",
+                    f"Failed to promote {name}",
+                    detail=self._error_message(exc),
+                )
                 continue
             old_exchange = self.exchange
             self.exchange = exchange
             self.exchange_name = name
-            print(f"[BrokerCCXT] Switched to {name} due to: {reason}")
+            self._log_event(
+                "WARNING", f"Switched to {name}", detail=reason or "unknown"
+            )
             try:
                 old_exchange.close()
             except Exception:
@@ -238,6 +264,95 @@ class BrokerCCXT:
     @property
     def latency_log(self) -> list[Dict[str, float]]:
         return list(self._latency_log)
+
+    def _clip_order_qty(
+        self, symbol: str, side: str, requested_qty: float, price: float
+    ) -> float:
+        qty = float(max(0.0, requested_qty))
+        if qty <= 0.0:
+            return 0.0
+        try:
+            base, quote = symbol.split("/")
+        except ValueError:
+            base, quote = symbol, "USD"
+        base = base.strip().upper()
+        quote = quote.strip().upper()
+        fee_rate = max(0.0, float(self.paper_params.get("fee_bps", 0.0))) / 10_000.0
+        slippage = max(0.0, float(self.paper_params.get("slippage_bps", 0.0))) / 10_000.0
+
+        if self.mode == "paper":
+            usd_balance = float(self.balance_data.get("USD", 0.0))
+            if side == "buy":
+                effective_price = price * (1.0 + slippage)
+                unit_cost = effective_price * (1.0 + fee_rate)
+                if unit_cost <= 0:
+                    unit_cost = effective_price
+                max_qty = usd_balance / unit_cost if unit_cost > 0 else 0.0
+                qty = min(qty, max_qty)
+            else:
+                position = self._normalize_position(base)
+                max_qty = max(0.0, float(position.get("qty", 0.0)))
+                qty = min(qty, max_qty)
+        else:  # live trading path
+            try:
+                balances = self.exchange.fetch_balance()
+            except Exception as exc:  # pragma: no cover - network guard
+                self._log_event(
+                    "ERROR",
+                    "Failed to fetch balance prior to order",
+                    symbol=symbol,
+                    detail=self._error_message(exc),
+                )
+                return qty
+            free_balances = {}
+            if isinstance(balances, dict):
+                free_balances = balances.get("free") or {}
+            if side == "sell":
+                available = 0.0
+                if isinstance(free_balances, dict):
+                    available = float(free_balances.get(base, 0.0) or 0.0)
+                if available <= 0.0 and isinstance(balances, dict):
+                    currency_info = balances.get(base, {})
+                    if isinstance(currency_info, dict):
+                        available = float(currency_info.get("free", 0.0) or 0.0)
+                    elif currency_info is not None:
+                        available = float(currency_info or 0.0)
+                qty = min(qty, max(0.0, available))
+            else:
+                available_quote = 0.0
+                if isinstance(free_balances, dict):
+                    available_quote = float(free_balances.get(quote, 0.0) or 0.0)
+                if available_quote <= 0.0 and isinstance(balances, dict):
+                    currency_info = balances.get(quote, {})
+                    if isinstance(currency_info, dict):
+                        available_quote = float(currency_info.get("free", 0.0) or 0.0)
+                    elif currency_info is not None:
+                        available_quote = float(currency_info or 0.0)
+                unit_cost = price * (1.0 + fee_rate)
+                if unit_cost <= 0:
+                    unit_cost = price
+                max_qty = max(0.0, available_quote) / unit_cost if unit_cost > 0 else 0.0
+                qty = min(qty, max_qty)
+
+        if qty <= 0.0:
+            self._log_event(
+                "WARNING",
+                "Requested order exceeds available balance",
+                symbol=symbol,
+                side=side,
+                requested_qty=requested_qty,
+            )
+            return 0.0
+        if qty < requested_qty:
+            self._log_event(
+                "WARNING",
+                "Order size clipped to available balance",
+                symbol=symbol,
+                side=side,
+                requested_qty=requested_qty,
+                adjusted_qty=qty,
+            )
+        return qty
 
     def _execute_with_retry(self, operation: str, func):  # pragma: no cover - network heavy
         attempts = 0
@@ -411,7 +526,12 @@ class BrokerCCXT:
 
         if side == "buy":
             if self.balance_data["USD"] < cost:
-                print(f"[BrokerCCXT] Not enough USD balance to buy {qty} {base}")
+                self._log_event(
+                    "WARNING",
+                    f"Insufficient USD for buy {base}",
+                    symbol=symbol,
+                    requested_qty=qty,
+                )
                 return False
             self.balance_data["USD"] -= cost + fee
             position = self._normalize_position(base)
@@ -425,7 +545,12 @@ class BrokerCCXT:
         elif side == "sell":
             position = self._normalize_position(base)
             if position["qty"] < qty:
-                print(f"[BrokerCCXT] Not enough {base} to sell {qty}")
+                self._log_event(
+                    "WARNING",
+                    f"Insufficient {base} balance to sell",
+                    symbol=symbol,
+                    requested_qty=qty,
+                )
                 return False
             position["qty"] -= qty
             position["last_funding"] = time.time()
@@ -439,7 +564,12 @@ class BrokerCCXT:
         self._save_balance()
 
         if self.balance_data["USD"] < 0:
-            print("[BrokerCCXT] WARNING: USD balance negative!")
+            self._log_event(
+                "WARNING",
+                "USD balance negative",
+                symbol=symbol,
+                usd_balance=self.balance_data["USD"],
+            )
 
         return True
 
@@ -449,6 +579,18 @@ class BrokerCCXT:
     def market_order(self, symbol: str, side: str, qty: float):
         """Unified market order handler for paper + live mode."""
         price = self.fetch_price(symbol)
+        requested_qty = float(qty)
+        adjusted_qty = self._clip_order_qty(symbol, side, requested_qty, price)
+        if adjusted_qty <= 0:
+            self._log_event(
+                "WARNING",
+                "Order cancelled - insufficient balance",
+                symbol=symbol,
+                side=side,
+                requested_qty=requested_qty,
+            )
+            return None
+        qty = adjusted_qty
 
         if self.mode == "paper":
             slippage = self.paper_params.get("slippage_bps", 0.0) / 10_000.0
@@ -474,7 +616,7 @@ class BrokerCCXT:
             trade = {
                 "symbol": symbol,
                 "side": side,
-                "requested_qty": qty,
+                "requested_qty": requested_qty,
                 "qty": fill_qty,
                 "price": effective_price,
                 "timestamp": time.time(),
