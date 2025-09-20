@@ -44,3 +44,9 @@ def test_position_size_uses_stop_distance():
     assert qty == 25
     fallback = engine.position_size(100, 50, stop_loss=None, side="BUY")
     assert fallback > 0
+
+
+def test_position_size_respects_max_notional():
+    engine = RiskEngine(0.05, 0.1, 0.02, 5, False, 0.05, max_position_value=500)
+    qty = engine.position_size(25_000, 200, stop_loss=24_800, side="BUY")
+    assert qty <= 500 / 25_000

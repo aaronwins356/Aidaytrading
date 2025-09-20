@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 try:  # pragma: no cover - import guard
     import pandas as pd  # type: ignore
@@ -88,6 +88,7 @@ class Worker:
         }
         self.allocation = float(params.get("allocation", params.get("weight", 0.1)))
         self.risk_profile: Dict[str, Any] = dict(params.get("risk_profile", {}))
+        self._df_cache: Optional[Tuple[int, float, float, Tuple[Tuple[float, float], ...], "pd.DataFrame"]] = None
 
     # ------------------------------------------------------------------
     def _learning_risk_multiplier(self) -> float:
@@ -173,10 +174,14 @@ class Worker:
     # ------------------------------------------------------------------
     def _load_strategy(self):
         module = importlib.import_module(f"desk.strategies.{self.strategy_name}")
-        parts = self.strategy_name.split("_")
+        parts = [part for part in self.strategy_name.split("_") if part]
+        if parts and parts[-1] == "strategy":
+            parts = parts[:-1]
         class_name = "".join(
             part.upper() if part in self.ACRONYMS else part.title() for part in parts
-        ) + "Strategy"
+        )
+        if not class_name.endswith("Strategy"):
+            class_name += "Strategy"
         if not hasattr(module, class_name):
             raise ImportError(f"Strategy class {class_name} not found in {module}")
         strategy_cls = getattr(module, class_name)
@@ -190,7 +195,34 @@ class Worker:
 
     # ------------------------------------------------------------------
     def _candles_df(self) -> pd.DataFrame:
-        return candles_to_dataframe(self.state.get("candles", []))
+        """Return a cached dataframe representation of the worker candles."""
+
+        candles = list(self.state.get("candles", []))
+        if not candles:
+            return candles_to_dataframe(candles)
+
+        last_ts = float(candles[-1].get("timestamp", 0.0) or 0.0)
+        last_close = float(candles[-1].get("close", 0.0) or 0.0)
+        signature = tuple(
+            (
+                float(item.get("timestamp", 0.0) or 0.0),
+                float(item.get("close", 0.0) or 0.0),
+            )
+            for item in candles[-5:]
+        )
+        cache = self._df_cache
+        if (
+            cache
+            and cache[0] == len(candles)
+            and cache[1] == last_ts
+            and cache[2] == last_close
+            and cache[3] == signature
+        ):
+            return cache[4]
+
+        df = candles_to_dataframe(candles)
+        self._df_cache = (len(candles), last_ts, last_close, signature, df)
+        return df
 
     def _generate_signal(self, df: pd.DataFrame) -> Optional[str]:
         signal = self.strategy.generate_signals(df)
