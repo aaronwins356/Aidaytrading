@@ -50,6 +50,7 @@ class ExecutionEngine:
         side: str,
         qty: float,
         price: float,
+        metadata: Optional[Dict[str, float]] = None,
     ) -> OpenTrade:
         side = side.upper()
         sl_pct = float(self.risk_config.get("stop_loss_pct", 0.02))
@@ -72,6 +73,7 @@ class ExecutionEngine:
             stop_loss=float(stop_loss),
             take_profit=float(take_profit),
             max_hold_seconds=hold_seconds,
+            metadata=dict(metadata or {}),
         )
 
     def open_position(
@@ -82,11 +84,12 @@ class ExecutionEngine:
         qty: float,
         price: float,
         risk_amount: float,
+        metadata: Optional[Dict[str, float]] = None,
     ) -> Optional[OpenTrade]:
         if qty <= 0:
             return None
 
-        trade = self._build_trade(worker.name, symbol, side, qty, price)
+        trade = self._build_trade(worker.name, symbol, side, qty, price, metadata=metadata)
         placed_order = self.broker.market_order(symbol, side.lower(), qty)
         if placed_order is None:
             return None
