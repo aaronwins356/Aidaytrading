@@ -1,4 +1,3 @@
-"""Strategy insights page highlighting how each trading approach operates."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from components import download_chart_as_png
 
 st.set_page_config(page_title="Strategy Insights · Aurora Desk", page_icon="🧠")
 
@@ -27,6 +27,7 @@ class StrategyInfo:
     builder: Callable[[pd.DataFrame], Tuple[go.Figure, Dict[str, float]]]
 
 
+@st.cache_data(show_spinner=False)
 def _load_demo_market() -> pd.DataFrame:
     """Create a synthetic intraday market series for visualization."""
 
@@ -76,7 +77,9 @@ def _performance_from_positions(df: pd.DataFrame, positions: pd.Series) -> Dict[
     equity = (1 + strat_ret).cumprod()
     trades = positions.diff().abs() > 0
     trade_count = int(trades.sum() / 2)
-    hit_rate = float((strat_ret[strat_ret > 0].count() / max(strat_ret[strat_ret != 0].count(), 1)) * 100)
+    positives = strat_ret[strat_ret > 0]
+    non_zero = strat_ret[strat_ret != 0]
+    hit_rate = float((positives.count() / max(non_zero.count(), 1)) * 100) if not non_zero.empty else 0.0
     sharpe = float(np.sqrt(24) * strat_ret.mean() / strat_ret.std()) if strat_ret.std() > 0 else 0.0
     return {
         "Net return %": (equity.iloc[-1] - 1) * 100,
@@ -535,7 +538,15 @@ chart, statistics = strategy_info.builder(demo_df)
 _render_strategy_details(strategy_info, statistics)
 
 st.plotly_chart(chart, use_container_width=True)
+download_chart_as_png(chart, f"strategy_{selected}")
 
+stats_df = pd.DataFrame([statistics])
 st.caption(
     "Performance metrics derive from synthetic sample data and should only be used for comparative education, not live expectancy."
+)
+st.download_button(
+    "Export strategy stats CSV",
+    data=stats_df.to_csv(index=False),
+    file_name=f"{selected}_stats.csv",
+    mime="text/csv",
 )

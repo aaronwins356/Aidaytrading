@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Tuple
@@ -16,6 +17,8 @@ from data_io import (
     CONFIG_PATH,
     DB_LIVE,
     DB_PAPER,
+    DataHealth,
+    database_health,
     load_config,
     load_equity,
     load_trades,
@@ -29,36 +32,51 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+LOGGER = logging.getLogger("dashboard.app")
+if not LOGGER.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+    )
+    LOGGER.addHandler(handler)
+LOGGER.setLevel(logging.INFO)
+
 PRIMARY_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
 TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h"]
 DATE_PRESETS = ["1D", "7D", "30D", "YTD", "Custom"]
+CACHE_TTL_SECONDS = 60
 
 
 @st.cache_data
 def _load_styles() -> str:
     style_path = Path(__file__).with_name("styles.css")
+    if not style_path.exists():
+        return ""
     return style_path.read_text(encoding="utf-8")
 
 
 def inject_styles() -> None:
-    st.markdown(f"<style>{_load_styles()}</style>", unsafe_allow_html=True)
+    css = _load_styles()
+    if css:
+        st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=CACHE_TTL_SECONDS)
 def fetch_trades(mode: str) -> pd.DataFrame:
     frames = []
     if mode in ("Paper", "Both"):
-        frames.append(load_trades(DB_PAPER))
+        frames.append(load_trades(DB_PAPER, mode="Paper"))
     if mode in ("Live", "Both"):
-        frames.append(load_trades(DB_LIVE))
+        frames.append(load_trades(DB_LIVE, mode="Live"))
     if not frames:
         return pd.DataFrame()
     trades = pd.concat(frames, ignore_index=True)
-    trades.sort_values("opened_at", inplace=True)
+    if "opened_at" in trades:
+        trades.sort_values("opened_at", inplace=True)
     return trades
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=CACHE_TTL_SECONDS)
 def fetch_equity(mode: str) -> pd.DataFrame:
     frames = []
     if mode in ("Paper", "Both"):
@@ -68,54 +86,62 @@ def fetch_equity(mode: str) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     equity = pd.concat(frames, ignore_index=True)
-    equity.sort_values("ts", inplace=True)
+    if "ts" in equity:
+        equity.sort_values("ts", inplace=True)
     return equity
 
 
 def init_state() -> None:
-    if "filters" not in st.session_state:
-        now = date.today()
-        st.session_state["filters"] = {
+    now = date.today()
+    st.session_state.setdefault(
+        "filters",
+        {
             "date_preset": "30D",
             "date_range": (now - timedelta(days=30), now),
             "mode": "Paper",
             "symbols": PRIMARY_SYMBOLS,
             "timeframe": "1h",
             "workers": [],
-        }
+        },
+    )
     if "config" not in st.session_state:
-        config, raw = load_config(CONFIG_PATH)
+        try:
+            config, raw = load_config(CONFIG_PATH)
+        except Exception as exc:  # pragma: no cover - catastrophic config failure
+            LOGGER.exception("Failed to load configuration", exc_info=exc)
+            config, raw = load_config(CONFIG_PATH)
         st.session_state["config"] = config
         st.session_state["config_raw"] = raw
-    if "data_sources" not in st.session_state:
-        st.session_state["data_sources"] = {}
+    st.session_state.setdefault("data_sources", {})
+    st.session_state.setdefault("health", [])
 
 
 def apply_filters(trades: pd.DataFrame) -> pd.DataFrame:
-    filters = st.session_state["filters"]
+    filters = st.session_state.get("filters", {})
     if trades.empty:
         return trades
-    start, end = filters["date_range"]
     trades = trades.copy()
-    trades["opened_at"] = pd.to_datetime(trades["opened_at"])
+    trades["opened_at"] = pd.to_datetime(trades["opened_at"], errors="coerce")
+    trades.dropna(subset=["opened_at"], inplace=True)
+    start, end = filters.get("date_range", (date.today() - timedelta(days=30), date.today()))
     trades = trades[(trades["opened_at"].dt.date >= start) & (trades["opened_at"].dt.date <= end)]
-    trades = trades[trades["symbol"].isin(filters["symbols"])]
-    if filters["workers"]:
-        trades = trades[trades["worker"].isin(filters["workers"])]
+    symbols = filters.get("symbols", PRIMARY_SYMBOLS)
+    trades = trades[trades["symbol"].isin(symbols)] if "symbol" in trades else trades
+    workers = filters.get("workers") or []
+    if workers and "worker" in trades:
+        trades = trades[trades["worker"].isin(workers)]
     return trades
 
 
 def _update_date_range_from_preset(preset: str) -> Tuple[date, date]:
     today = date.today()
-    if preset == "1D":
-        return today - timedelta(days=1), today
-    if preset == "7D":
-        return today - timedelta(days=7), today
-    if preset == "30D":
-        return today - timedelta(days=30), today
-    if preset == "YTD":
-        return date(today.year, 1, 1), today
-    return st.session_state["filters"].get("date_range", (today - timedelta(days=30), today))
+    mapping = {
+        "1D": (today - timedelta(days=1), today),
+        "7D": (today - timedelta(days=7), today),
+        "30D": (today - timedelta(days=30), today),
+        "YTD": (date(today.year, 1, 1), today),
+    }
+    return mapping.get(preset, st.session_state["filters"].get("date_range", (today - timedelta(days=30), today)))
 
 
 def top_bar() -> None:
@@ -135,23 +161,26 @@ def top_bar() -> None:
     with st.container():
         col1, col2 = st.columns([2, 3])
         with col1:
-            preset_index = DATE_PRESETS.index(filters.get("date_preset", "30D")) if filters.get("date_preset", "30D") in DATE_PRESETS else DATE_PRESETS.index("30D")
-            preset = st.selectbox("Date preset", DATE_PRESETS, index=preset_index)
+            preset = st.selectbox("Date preset", DATE_PRESETS, index=DATE_PRESETS.index(filters.get("date_preset", "30D")))
             filters["date_preset"] = preset
             if preset != "Custom":
                 filters["date_range"] = _update_date_range_from_preset(preset)
         with col2:
-            filters["date_range"] = st.date_input("Date range", value=filters["date_range"], max_value=date.today())
+            filters["date_range"] = st.date_input(
+                "Date range",
+                value=filters.get("date_range", (date.today() - timedelta(days=30), date.today())),
+                max_value=date.today(),
+            )
             if isinstance(filters["date_range"], date):
                 filters["date_range"] = (filters["date_range"], filters["date_range"])
         c1, c2, c3 = st.columns(3)
         with c1:
-            filters["mode"] = st.selectbox("Mode", ["Paper", "Live", "Both"], index=["Paper", "Live", "Both"].index(filters["mode"]))
+            filters["mode"] = st.selectbox("Mode", ["Paper", "Live", "Both"], index=["Paper", "Live", "Both"].index(filters.get("mode", "Paper")))
         with c2:
             filters["symbols"] = st.multiselect("Symbols", PRIMARY_SYMBOLS, default=filters.get("symbols", PRIMARY_SYMBOLS))
         with c3:
             filters["timeframe"] = st.selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index(filters.get("timeframe", "1h")))
-        worker_options = sorted(st.session_state["config"].workers.keys())
+        worker_options = sorted(st.session_state.get("config", {}).workers.keys()) if hasattr(st.session_state.get("config"), "workers") else []
         filters["workers"] = st.multiselect("Workers", worker_options, default=filters.get("workers", []))
     st.session_state["filters"] = filters
     st.session_state.setdefault("keyboard_help", False)
@@ -172,6 +201,8 @@ def top_bar() -> None:
 def get_demo_market(symbol: str, start: date, end: date, timeframe: str) -> pd.DataFrame:
     freq_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1H", "4h": "4H"}
     rng = pd.date_range(start=start, end=end, freq=freq_map.get(timeframe, "1H"))
+    if not len(rng):
+        return pd.DataFrame()
     drift = np.linspace(0, 1, len(rng)) * 100
     noise = np.cumsum(np.random.normal(scale=20, size=len(rng)))
     base = 30_000 + drift + noise
@@ -190,12 +221,24 @@ def get_demo_market(symbol: str, start: date, end: date, timeframe: str) -> pd.D
 
 def refresh_data() -> None:
     filters = st.session_state["filters"]
-    trades = fetch_trades(filters["mode"])
+    try:
+        trades = fetch_trades(filters["mode"])
+    except Exception as exc:  # pragma: no cover - catastrophic failure path
+        LOGGER.exception("Failed to load trades", exc_info=exc)
+        trades = pd.DataFrame()
+    filtered = apply_filters(trades)
     st.session_state["data_sources"]["trades_raw"] = trades
-    st.session_state["data_sources"]["trades"] = apply_filters(trades)
-    equity = fetch_equity(filters["mode"])
+    st.session_state["data_sources"]["trades"] = filtered
+
+    try:
+        equity = fetch_equity(filters["mode"])
+    except Exception as exc:  # pragma: no cover
+        LOGGER.exception("Failed to load equity", exc_info=exc)
+        equity = pd.DataFrame()
     st.session_state["data_sources"]["equity_raw"] = equity
     st.session_state["data_sources"]["equity"] = drawdown_series(equity) if not equity.empty else equity
+
+    st.session_state["health"] = database_health([DB_PAPER, DB_LIVE])
 
 
 @st.cache_data(show_spinner=False)
@@ -214,18 +257,56 @@ def render_footer() -> None:
     )
 
 
+def render_health(health: Tuple[DataHealth, ...] | list[DataHealth]) -> None:
+    if not health:
+        st.warning("Health status unavailable.")
+        return
+    cols = st.columns(len(health))
+    for col, item in zip(cols, health):
+        with col:
+            status = item.status.upper()
+            detail = item.detail or "OK"
+            age = f"{item.age_minutes:.1f} min" if item.age_minutes is not None else "n/a"
+            st.metric(f"{item.name} status", status, help=f"{detail}\nData age: {age}")
+            if item.status != "ok":
+                st.warning(detail)
+
+
 def main() -> None:
     seed_demo_data()
     init_state()
     top_bar()
     refresh_data()
+
+    health = st.session_state.get("health", [])
+    render_health(health)
+
     equity = st.session_state["data_sources"].get("equity", pd.DataFrame())
     if not equity.empty:
         fig = equity_with_drawdown(equity)
         st.plotly_chart(fig, use_container_width=True)
         download_chart_as_png(fig, "equity_curve")
+        st.download_button("Export equity CSV", equity.to_csv(index=False), mime="text/csv", file_name="equity_curve.csv")
     else:
-        st.info("No equity data available yet. Seed demo data via Settings if required.")
+        st.info("No equity data available yet. Displaying demo curve.")
+        filters = st.session_state["filters"]
+        demo = get_demo_market("BTC/USDT", *filters.get("date_range", (date.today() - timedelta(days=7), date.today())), filters.get("timeframe", "1h"))
+        if not demo.empty:
+            demo_fig = equity_with_drawdown(
+                drawdown_series(
+                    demo.rename(columns={"ts": "ts", "close": "balance"})[["ts", "close"]].rename(columns={"close": "balance"})
+                )
+            )
+            st.plotly_chart(demo_fig, use_container_width=True)
+        else:
+            st.warning("Unable to generate demo equity series.")
+
+    trades = st.session_state["data_sources"].get("trades", pd.DataFrame())
+    if trades.empty:
+        st.info("No trades data in current slice. Adjust filters or seed demo data from Settings.")
+    else:
+        st.dataframe(trades.tail(25))
+        st.download_button("Export trades CSV", trades.to_csv(index=False), mime="text/csv", file_name="filtered_trades.csv")
 
     with st.expander("Keyboard shortcuts & help", expanded=False):
         st.json(json.loads(_generate_help()))

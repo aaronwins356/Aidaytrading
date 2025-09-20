@@ -1,25 +1,27 @@
 # Core numerical and data processing
-numpy>=1.24
-pandas>=1.5
-scipy>=1.10
-statsmodels>=0.14
+numpy==1.26.4
+pandas==2.2.1
+scipy==1.11.4
+statsmodels==0.14.1
 
 # Machine learning
-scikit-learn>=1.2
-joblib>=1.2
+scikit-learn==1.4.0
+joblib==1.3.2
 
 # Trading and market connectivity
-ccxt>=3.0
+ccxt==4.2.87
+sqlalchemy==2.0.25
 
 # Configuration, validation, and serialization
-PyYAML>=6.0
-pydantic>=1.10
+PyYAML==6.0.1
+pydantic==1.10.14
 
 # Dashboard and visualisation
-streamlit>=1.24
-plotly>=5.10
-fpdf2>=2.7
-tabulate>=0.9
+streamlit==1.49.0
+plotly==5.19.0
+kaleido==0.2.1
+fpdf2==2.7.8
+tabulate==0.9.0
 
 # Testing
-pytest>=7.0
+pytest==7.4.4

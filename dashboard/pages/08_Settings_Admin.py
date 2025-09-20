@@ -30,8 +30,13 @@ if submitted:
             st.success(message)
             st.session_state["config"] = config.__class__(**new_data)
             st.session_state["config_raw"] = new_data
-            diff = difflib.unified_diff(editable.splitlines(), yaml.safe_dump(new_data, sort_keys=False).splitlines(), lineterm="")
-            st.code("\n".join(diff) or "No changes", language="diff")
+            diff = difflib.unified_diff(
+                editable.splitlines(),
+                yaml.safe_dump(new_data, sort_keys=False).splitlines(),
+                lineterm="",
+            )
+            diff_text = "\n".join(diff) or "No changes"
+            st.code(diff_text, language="diff")
         else:
             st.error(message)
     except yaml.YAMLError as exc:
@@ -78,8 +83,10 @@ if st.button("Restore latest backup"):
     if backups:
         latest = backups[0]
         data = yaml.safe_load(latest.read_text())
-        save_config(data)
-        st.success(f"Restored from {latest}")
+        success, message = save_config(data)
+        if success:
+            st.success(f"Restored from {latest}")
+        else:
+            st.error(message)
     else:
         st.error("No backups found.")
-

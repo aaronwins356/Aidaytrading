@@ -1,8 +1,8 @@
-"""Reusable Streamlit UI components and Plotly helpers."""
+"""Reusable visual components for the Streamlit dashboard."""
 from __future__ import annotations
 
 import io
-from typing import Iterable, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -32,26 +32,38 @@ def apply_template(fig: go.Figure) -> go.Figure:
     return fig
 
 
-def kpi_tile(label: str, value: float | str, delta: Optional[float] = None, help_text: Optional[str] = None, trend: Optional[pd.Series] = None) -> None:
+def kpi_tile(
+    label: str,
+    value: float | str,
+    delta: Optional[float] = None,
+    help_text: Optional[str] = None,
+    trend: Optional[pd.Series] = None,
+) -> None:
     if st is None:
         return
     class_name = "positive" if isinstance(value, (int, float)) and value >= 0 else "negative"
     value_fmt = f"{value:,.2f}" if isinstance(value, (int, float)) else value
-    spark_html = ""
+    spark_chart = None
     if trend is not None and not trend.empty:
-        spark = sparkline(trend)
-        spark_html = st.plotly_chart(spark, use_container_width=True, key=f"spark_{label}")
+        spark_chart = sparkline(trend)
     with st.container():
-        st.markdown(f"<div class='kpi-tile'><h3>{label}</h3><div class='kpi-value {class_name}'>{value_fmt}</div></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='kpi-tile'><h3>{label}</h3><div class='kpi-value {class_name}'>{value_fmt}</div></div>",
+            unsafe_allow_html=True,
+        )
         if delta is not None:
             st.caption(f"Δ {delta:,.2f}")
         if help_text:
             st.caption(help_text)
+        if spark_chart is not None:
+            st.plotly_chart(spark_chart, use_container_width=True)
 
 
 def sparkline(series: pd.Series) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(y=series.values, mode="lines", fill="tozeroy", line=dict(color="#7C3AED")))
+    fig.add_trace(
+        go.Scatter(y=series.values, mode="lines", fill="tozeroy", line=dict(color="#7C3AED"))
+    )
     fig.update_layout(height=80, margin=dict(l=0, r=0, t=0, b=0), showlegend=False)
     return apply_template(fig)
 
@@ -59,11 +71,33 @@ def sparkline(series: pd.Series) -> go.Figure:
 def equity_with_drawdown(equity: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     if not equity.empty:
-        fig.add_trace(go.Scatter(x=equity["ts"], y=equity["balance"], name="Balance", line=dict(color="#7C3AED", width=3)))
+        fig.add_trace(
+            go.Scatter(
+                x=equity["ts"],
+                y=equity["balance"],
+                name="Balance",
+                line=dict(color="#7C3AED", width=3),
+            )
+        )
         if "rolling_max" in equity:
-            fig.add_trace(go.Scatter(x=equity["ts"], y=equity["rolling_max"], name="Rolling High", line=dict(color="rgba(139,92,246,0.4)", dash="dot")))
+            fig.add_trace(
+                go.Scatter(
+                    x=equity["ts"],
+                    y=equity["rolling_max"],
+                    name="Rolling High",
+                    line=dict(color="rgba(139,92,246,0.4)", dash="dot"),
+                )
+            )
         if "drawdown" in equity:
-            fig.add_trace(go.Bar(x=equity["ts"], y=equity["drawdown"], name="Drawdown", marker_color="rgba(239,68,68,0.5)", yaxis="y2"))
+            fig.add_trace(
+                go.Bar(
+                    x=equity["ts"],
+                    y=equity["drawdown"],
+                    name="Drawdown",
+                    marker_color="rgba(239,68,68,0.5)",
+                    yaxis="y2",
+                )
+            )
             fig.update_layout(yaxis2=dict(overlaying="y", side="right"))
     fig.update_layout(title="Equity & Drawdown")
     return apply_template(fig)
@@ -73,7 +107,9 @@ def pnl_histogram(trades: pd.DataFrame) -> go.Figure:
     if trades.empty:
         return apply_template(go.Figure())
     fig = go.Figure()
-    fig.add_trace(go.Histogram(x=trades["pnl"], nbinsx=40, name="PnL", marker_color="#7C3AED", opacity=0.7))
+    fig.add_trace(
+        go.Histogram(x=trades["pnl"], nbinsx=40, name="PnL", marker_color="#7C3AED", opacity=0.7)
+    )
     fig.update_layout(barmode="overlay", title="Distribution of Trade Returns")
     return apply_template(fig)
 
@@ -83,9 +119,29 @@ def pnl_heatmap_hod_dow(trades: pd.DataFrame) -> go.Figure:
         return apply_template(go.Figure())
     trades = trades.copy()
     trades["opened_at"] = pd.to_datetime(trades["opened_at"])
-    pivot = trades.pivot_table(index=trades["opened_at"].dt.day_name(), columns=trades["opened_at"].dt.hour, values="pnl", aggfunc="sum").fillna(0)
-    pivot = pivot.loc[["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]]
-    fig = go.Figure(go.Heatmap(z=pivot.values, x=pivot.columns, y=pivot.index, colorscale="Viridis", colorbar=dict(title="PnL")))
+    pivot = (
+        trades.pivot_table(
+            index=trades["opened_at"].dt.day_name(),
+            columns=trades["opened_at"].dt.hour,
+            values="pnl",
+            aggfunc="sum",
+        )
+        .fillna(0)
+        .reindex(
+            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+            axis=0,
+            fill_value=0,
+        )
+    )
+    fig = go.Figure(
+        go.Heatmap(
+            z=pivot.values,
+            x=pivot.columns,
+            y=pivot.index,
+            colorscale="Viridis",
+            colorbar=dict(title="PnL"),
+        )
+    )
     fig.update_layout(title="PnL by Day of Week / Hour of Day")
     return apply_template(fig)
 
@@ -93,19 +149,75 @@ def pnl_heatmap_hod_dow(trades: pd.DataFrame) -> go.Figure:
 def candles_with_trades(market: pd.DataFrame, trades: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     if not market.empty:
-        fig.add_trace(go.Candlestick(x=market["ts"], open=market["open"], high=market["high"], low=market["low"], close=market["close"], name="Price"))
+        fig.add_trace(
+            go.Candlestick(
+                x=market["ts"],
+                open=market["open"],
+                high=market["high"],
+                low=market["low"],
+                close=market["close"],
+                name="Price",
+            )
+        )
         for length, color in zip([9, 21, 50, 200], ["#8B5CF6", "#F59E0B", "#10B981", "#6366F1"]):
-            ma = market["close"].rolling(length).mean()
-            fig.add_trace(go.Scatter(x=market["ts"], y=ma, mode="lines", name=f"EMA {length}", line=dict(color=color)))
-        bb_mid = market["close"].rolling(20).mean()
-        bb_std = market["close"].rolling(20).std()
-        fig.add_trace(go.Scatter(x=market["ts"], y=bb_mid + 2 * bb_std, name="BB Upper", line=dict(color="rgba(124,58,237,0.4)", dash="dot")))
-        fig.add_trace(go.Scatter(x=market["ts"], y=bb_mid - 2 * bb_std, name="BB Lower", line=dict(color="rgba(124,58,237,0.4)", dash="dot")))
-    if not trades.empty:
+            ma = market["close"].rolling(length, min_periods=1).mean()
+            fig.add_trace(
+                go.Scatter(x=market["ts"], y=ma, mode="lines", name=f"EMA {length}", line=dict(color=color))
+            )
+        if len(market) >= 20:
+            bb_mid = market["close"].rolling(20, min_periods=20).mean()
+            bb_std = market["close"].rolling(20, min_periods=20).std()
+            fig.add_trace(
+                go.Scatter(
+                    x=market["ts"],
+                    y=bb_mid + 2 * bb_std,
+                    name="BB Upper",
+                    line=dict(color="rgba(124,58,237,0.4)", dash="dot"),
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=market["ts"],
+                    y=bb_mid - 2 * bb_std,
+                    name="BB Lower",
+                    line=dict(color="rgba(124,58,237,0.4)", dash="dot"),
+                )
+            )
+    if not trades.empty and {"opened_at", "entry", "side"}.issubset(trades.columns):
+        trades = trades.copy()
+        trades["opened_at"] = pd.to_datetime(trades["opened_at"])
         buys = trades[trades["side"].str.upper() == "LONG"]
         sells = trades[trades["side"].str.upper() != "LONG"]
-        fig.add_trace(go.Scatter(x=buys["opened_at"], y=buys["entry"], mode="markers", marker_symbol="triangle-up", marker_color="#10B981", marker_size=10, name="Buys", text=buys.apply(lambda r: f"{r['worker']} size {r['qty']:.2f} PnL {r['pnl']:.2f}", axis=1)))
-        fig.add_trace(go.Scatter(x=sells["opened_at"], y=sells["entry"], mode="markers", marker_symbol="triangle-down", marker_color="#EF4444", marker_size=10, name="Sells", text=sells.apply(lambda r: f"{r['worker']} size {r['qty']:.2f} PnL {r['pnl']:.2f}", axis=1)))
+        fig.add_trace(
+            go.Scatter(
+                x=buys["opened_at"],
+                y=buys["entry"],
+                mode="markers",
+                marker_symbol="triangle-up",
+                marker_color="#10B981",
+                marker_size=10,
+                name="Buys",
+                text=[
+                    f"{row['worker']} size {row['qty']:.2f} PnL {row['pnl']:.2f}"
+                    for _, row in buys.iterrows()
+                ],
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=sells["opened_at"],
+                y=sells["entry"],
+                mode="markers",
+                marker_symbol="triangle-down",
+                marker_color="#EF4444",
+                marker_size=10,
+                name="Sells",
+                text=[
+                    f"{row['worker']} size {row['qty']:.2f} PnL {row['pnl']:.2f}"
+                    for _, row in sells.iterrows()
+                ],
+            )
+        )
     fig.update_layout(title="Market Structure & Executions")
     return apply_template(fig)
 
@@ -113,7 +225,17 @@ def candles_with_trades(market: pd.DataFrame, trades: pd.DataFrame) -> go.Figure
 def correlation_heatmap(matrix: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     if not matrix.empty:
-        fig.add_trace(go.Heatmap(z=matrix.values, x=matrix.columns, y=matrix.index, colorscale="Magma", zmin=-1, zmax=1, colorbar=dict(title="ρ")))
+        fig.add_trace(
+            go.Heatmap(
+                z=matrix.values,
+                x=matrix.columns,
+                y=matrix.index,
+                colorscale="Magma",
+                zmin=-1,
+                zmax=1,
+                colorbar=dict(title="ρ"),
+            )
+        )
     fig.update_layout(title="Worker Return Correlations")
     return apply_template(fig)
 
@@ -148,15 +270,17 @@ def download_chart_as_png(fig: go.Figure, label: str) -> None:
     if st is None:
         return
     buffer = io.BytesIO()
+    file_name = f"{label}.png"
+    mime = "image/png"
     try:
         import plotly.io as pio
 
         pio.write_image(fig, buffer, format="png")
         data = buffer.getvalue()
-        mime = "image/png"
-    except Exception:  # pragma: no cover - fallback when kaleido missing
+    except Exception:
         html_buffer = io.StringIO()
         fig.write_html(html_buffer)
         data = html_buffer.getvalue().encode("utf-8")
+        file_name = f"{label}.html"
         mime = "text/html"
-    st.download_button(f"Download {label}", data=data, file_name=f"{label}.{'png' if mime=='image/png' else 'html'}", mime=mime)
+    st.download_button(f"Download {label}", data=data, file_name=file_name, mime=mime)
