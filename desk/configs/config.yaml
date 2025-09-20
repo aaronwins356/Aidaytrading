@@ -5,7 +5,7 @@ settings:
   api_secret: ""
   balance: 1000
   loop_delay: 60
-  warmup_candles: 50
+  warmup_candles: 10
   timeframe: 1m
   lookback: 250
   feed_workers: 6
@@ -16,17 +16,22 @@ settings:
   paper_funding_rate_hourly: 0.0002
 
 risk:
-  fixed_risk_usd: 50
+  fixed_risk_usd: 120
   rr_ratio: 2.0
   stop_loss_pct: 0.02
   max_hold_minutes: 15
-  daily_dd: 0.02
-  weekly_dd: 0.05
+  daily_dd: null
+  weekly_dd: null
   max_concurrent: 8
-  halt_on_dd: true
+  halt_on_dd: false
   retrain_every: 10
   ml_weight: 0.5
   trapdoor_pct: 0.02
+  learning_risk:
+    initial_multiplier: 1.8
+    floor_multiplier: 0.9
+    tighten_trades: 150
+    target_win_rate: 0.6
 
 telemetry:
   endpoint: ""
@@ -48,6 +53,11 @@ workers:
       fast_length: 20
       slow_length: 50
       risk_per_trade: 0.40
+    risk_profile:
+      initial_multiplier: 1.8
+      floor_multiplier: 0.9
+      tighten_trades: 150
+      target_win_rate: 0.6
 
   - name: BTC RSI
     symbol: BTC/USD
@@ -58,6 +68,11 @@ workers:
       low: 30            # was oversold
       high: 70           # was overbought
       risk_per_trade: 0.40
+    risk_profile:
+      initial_multiplier: 1.8
+      floor_multiplier: 0.9
+      tighten_trades: 150
+      target_win_rate: 0.6
 
   - name: ETH EMA
     symbol: ETH/USD
@@ -66,6 +81,11 @@ workers:
     params:
       length: 50         # was ema_length
       risk_per_trade: 0.40
+    risk_profile:
+      initial_multiplier: 1.8
+      floor_multiplier: 0.9
+      tighten_trades: 150
+      target_win_rate: 0.6
 
   - name: ETH MACD
     symbol: ETH/USD
@@ -76,6 +96,11 @@ workers:
       slow: 26           # was slow_length
       signal: 9          # was signal_length
       risk_per_trade: 0.40
+    risk_profile:
+      initial_multiplier: 1.8
+      floor_multiplier: 0.9
+      tighten_trades: 150
+      target_win_rate: 0.6
 
   - name: SOL Momentum
     symbol: SOL/USD
@@ -85,6 +110,11 @@ workers:
       length: 14         # was lookback
       threshold: 0.7
       risk_per_trade: 0.40
+    risk_profile:
+      initial_multiplier: 1.8
+      floor_multiplier: 0.9
+      tighten_trades: 150
+      target_win_rate: 0.6
 
   - name: SOL ATR
     symbol: SOL/USD
@@ -94,6 +124,11 @@ workers:
       atr_length: 14
       atr_mult: 3        # was multiplier
       risk_per_trade: 0.40
+    risk_profile:
+      initial_multiplier: 1.8
+      floor_multiplier: 0.9
+      tighten_trades: 150
+      target_win_rate: 0.6
 
   - name: XRP Bollinger
     symbol: XRP/USD
@@ -103,6 +138,11 @@ workers:
       length: 20
       mult: 2            # was std_dev
       risk_per_trade: 0.40
+    risk_profile:
+      initial_multiplier: 1.8
+      floor_multiplier: 0.9
+      tighten_trades: 150
+      target_win_rate: 0.6
 
   - name: XRP Stochastic
     symbol: XRP/USD
@@ -114,4 +154,9 @@ workers:
       low: 20            # was oversold
       high: 80           # was overbought
       risk_per_trade: 0.40
+    risk_profile:
+      initial_multiplier: 1.8
+      floor_multiplier: 0.9
+      tighten_trades: 150
+      target_win_rate: 0.6
 

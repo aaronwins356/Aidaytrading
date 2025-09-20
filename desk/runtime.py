@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import signal
 import time
 from dataclasses import dataclass
@@ -103,18 +104,22 @@ class TradingRuntime:
         self.executor.reconcile(self.workers, self.feed, portfolio=self.portfolio)
 
         self.loop_delay = float(settings.get("loop_delay", 60))
-        self.warmup = int(settings.get("warmup_candles", 50))
+        self.warmup = int(settings.get("warmup_candles", 10))
 
     # ------------------------------------------------------------------
     def _load_workers(self) -> List[Worker]:
         workers = []
+        risk_profile = self.config.get("risk", {}).get("learning_risk", {})
         for cfg in self.config.get("workers", []):
             try:
+                worker_cfg = copy.deepcopy(cfg)
+                if risk_profile and not worker_cfg.get("risk_profile"):
+                    worker_cfg["risk_profile"] = copy.deepcopy(risk_profile)
                 worker = Worker(
-                    name=cfg["name"],
-                    symbol=cfg["symbol"],
-                    strategy=cfg["strategy"],
-                    params=cfg,
+                    name=worker_cfg["name"],
+                    symbol=worker_cfg["symbol"],
+                    strategy=worker_cfg["strategy"],
+                    params=worker_cfg,
                     logger=self.logger,
                     learner=self.learner,
                     risk_engine=self.risk_engine,

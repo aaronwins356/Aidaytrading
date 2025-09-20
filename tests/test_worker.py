@@ -138,6 +138,14 @@ class StubStrategy:
     def extract_features(self, _df):
         return {"alpha": 1.0}
 
+    def plan_trade(self, _side, df):
+        price = df.iloc[-1]["close"]
+        return {
+            "stop_loss": price * 0.99,
+            "take_profit": price * 1.02,
+            "max_hold_minutes": 60,
+        }
+
 
 def build_worker(monkeypatch) -> Worker:
     params = {"params": {"fast_length": 3, "slow_length": 5, "min_qty": 0.01}}
@@ -173,6 +181,7 @@ def test_worker_builds_intent_with_features(monkeypatch):
     assert intent.features["ml_edge"] == 0.75
     assert "signal_return_volatility_short" in intent.features
     assert "signal_volume_delta" in intent.features
+    assert intent.features["learning_risk_multiplier"] == 1.0
 
 
 def test_compute_quantity_respects_minimum(monkeypatch):
@@ -191,3 +200,30 @@ def test_worker_uses_risk_engine_for_sizing(monkeypatch):
         side="BUY",
     )
     assert qty == 10
+
+
+def test_learning_risk_profile_scales_with_experience(monkeypatch):
+    worker = build_worker(monkeypatch)
+    worker.risk_profile = {
+        "initial_multiplier": 1.6,
+        "floor_multiplier": 0.8,
+        "tighten_trades": 50,
+        "target_win_rate": 0.6,
+    }
+
+    price = 100.0
+    for idx in range(1, 61):
+        price += 0.2
+        worker.push_candle(_candle(idx * 60 + 600, price, 200 + idx), max_history=120)
+
+    early_intent = worker.build_intent(risk_budget=50)
+    assert early_intent.features["learning_risk_multiplier"] > 1.0
+
+    worker.state["trades"] = 80
+    worker.state["wins"] = 50
+    worker.state["losses"] = 30
+
+    mature_intent = worker.build_intent(risk_budget=50)
+    assert mature_intent.features["learning_risk_multiplier"] <= early_intent.features["learning_risk_multiplier"]
+    assert mature_intent.qty < early_intent.qty
+    assert mature_intent.stop_loss > early_intent.stop_loss
