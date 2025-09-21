@@ -68,102 +68,158 @@ class EventLogger:
     # ---------- schema ----------
     def _init_tables(self):
         with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS trades (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp REAL,
-                    worker TEXT,
-                    symbol TEXT,
-                    side TEXT,
-                    qty REAL,
-                    entry_price REAL,
-                    exit_price REAL,
-                    exit_reason TEXT,
-                    pnl REAL
+            try:
+                cur = self.conn.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL,
+                        worker TEXT,
+                        symbol TEXT,
+                        side TEXT,
+                        qty REAL,
+                        entry_price REAL,
+                        exit_price REAL,
+                        exit_reason TEXT,
+                        pnl REAL
+                    )
+                    """
                 )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS equity (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp REAL,
-                    equity REAL
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS equity (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL,
+                        equity REAL
+                    )
+                    """
                 )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS feed_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp REAL,
-                    level TEXT,
-                    symbol TEXT,
-                    message TEXT,
-                    metadata TEXT
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS feed_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL,
+                        level TEXT,
+                        symbol TEXT,
+                        message TEXT,
+                        metadata TEXT
+                    )
+                    """
                 )
-            """)
-            self.conn.commit()
+                self.conn.commit()
+            except sqlite3.Error as exc:  # pragma: no cover - defensive
+                self._rollback_silently()
+                self._handle_sql_error("initialising tables", exc)
 
     # ---------- trade lifecycle ----------
-    def log_trade(self, worker, symbol: str, side: str, qty, price, pnl: float = 0.0) -> None:
+    def log_trade(
+        self,
+        worker,
+        symbol: str,
+        side: str,
+        qty,
+        price,
+        pnl: float = 0.0,
+    ) -> None:
         worker_name = getattr(worker, "name", str(worker)) if worker is not None else "Unknown"
+        inserted = False
         with self.lock:
-            self.conn.execute(
-                """
-                INSERT INTO trades
-                (timestamp, worker, symbol, side, qty, entry_price, exit_price, exit_reason, pnl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    float(time.time()),
-                    str(worker_name),
-                    str(symbol),
-                    str(side),
-                    float(qty),
-                    float(price),
-                    None,  # exit_price
-                    None,  # exit_reason
-                    float(pnl),
-                ),
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO trades
+                    (timestamp, worker, symbol, side, qty, entry_price, exit_price, exit_reason, pnl)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        float(time.time()),
+                        str(worker_name),
+                        str(symbol),
+                        str(side),
+                        float(qty),
+                        float(price),
+                        None,  # exit_price
+                        None,  # exit_reason
+                        float(pnl),
+                    ),
+                )
+                self.conn.commit()
+                inserted = True
+            except sqlite3.Error as exc:
+                self._rollback_silently()
+                self._handle_sql_error("logging trade open", exc)
+        if inserted:
+            self._emit_console(
+                "TRADE",
+                f"Trade logged: {worker_name} {side} {float(qty):.4f} {symbol} @ {float(price):.2f}"
+                f" | PnL {float(pnl):.2f}",
             )
-            self.conn.commit()
-        self._emit_console(
-            "TRADE",
-            f"Trade logged: {worker_name} {side} {float(qty):.4f} {symbol} @ {float(price):.2f}"
-            f" | PnL {float(pnl):.2f}",
-        )
 
     def log_trade_end(self, worker, symbol: str, exit_price, exit_reason: str, pnl: float) -> None:
         worker_name = getattr(worker, "name", str(worker)) if worker is not None else "Unknown"
+        updated = False
         with self.lock:
-            self.conn.execute(
-                """
-                UPDATE trades
-                SET exit_price=?, exit_reason=?, pnl=?
-                WHERE worker=? AND symbol=? AND exit_price IS NULL
-                ORDER BY id DESC LIMIT 1
-                """,
-                (
-                    float(exit_price),
-                    str(exit_reason),
-                    float(pnl),
-                    str(worker_name),
-                    str(symbol),
-                ),
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id FROM trades
+                    WHERE worker=? AND symbol=? AND exit_price IS NULL
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (
+                        str(worker_name),
+                        str(symbol),
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    message = (
+                        "No open trade found to close for worker="
+                        f"{worker_name} symbol={symbol}."
+                    )
+                    self._emit_console("WARNING", message)
+                    return
+                trade_id = int(row[0])
+                cursor.execute(
+                    """
+                    UPDATE trades
+                    SET exit_price=?, exit_reason=?, pnl=?
+                    WHERE id=?
+                    """,
+                    (
+                        float(exit_price),
+                        str(exit_reason),
+                        float(pnl),
+                        trade_id,
+                    ),
+                )
+                self.conn.commit()
+                updated = cursor.rowcount > 0
+            except sqlite3.Error as exc:
+                self._rollback_silently()
+                self._handle_sql_error("logging trade close", exc)
+        if updated:
+            self._emit_console(
+                "TRADE",
+                f"Trade closed: {worker_name} {exit_reason} @ {float(exit_price):.2f}"
+                f" | Realized PnL {float(pnl):.2f}",
             )
-            self.conn.commit()
-        self._emit_console(
-            "TRADE",
-            f"Trade closed: {worker_name} {exit_reason} @ {float(exit_price):.2f}"
-            f" | Realized PnL {float(pnl):.2f}",
-        )
 
     # ---------- equity snapshots ----------
     def write_equity(self, equity: float) -> None:
         with self.lock:
-            self.conn.execute(
-                "INSERT INTO equity (timestamp, equity) VALUES (?, ?)",
-                (float(time.time()), float(equity)),
-            )
-            self.conn.commit()
+            try:
+                self.conn.execute(
+                    "INSERT INTO equity (timestamp, equity) VALUES (?, ?)",
+                    (float(time.time()), float(equity)),
+                )
+                self.conn.commit()
+            except sqlite3.Error as exc:
+                self._rollback_silently()
+                self._handle_sql_error("writing equity snapshot", exc)
 
     def log_feed_event(self, level: str, symbol: str, message: str, **metadata) -> None:
         payload = {
@@ -176,22 +232,29 @@ class EventLogger:
             payload["metadata"] = metadata
         self.write(payload)
         meta_json = json.dumps(metadata) if metadata else None
+        wrote = False
         with self.lock:
-            self.conn.execute(
-                """
-                INSERT INTO feed_events (timestamp, level, symbol, message, metadata)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    float(time.time()),
-                    str(level).upper(),
-                    str(symbol),
-                    str(message),
-                    meta_json,
-                ),
-            )
-            self.conn.commit()
-        self._emit_console(str(level).upper(), f"Feed {symbol}: {message}")
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO feed_events (timestamp, level, symbol, message, metadata)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        float(time.time()),
+                        str(level).upper(),
+                        str(symbol),
+                        str(message),
+                        meta_json,
+                    ),
+                )
+                self.conn.commit()
+                wrote = True
+            except sqlite3.Error as exc:
+                self._rollback_silently()
+                self._handle_sql_error("logging feed event", exc)
+        if wrote:
+            self._emit_console(str(level).upper(), f"Feed {symbol}: {message}")
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
@@ -209,5 +272,19 @@ class EventLogger:
         try:
             log_level = getattr(logging, level.upper(), logging.INFO)
             self._rotating_logger.log(log_level, message)
+        except Exception:
+            pass
+
+    def _handle_sql_error(self, action: str, exc: Exception) -> None:
+        message = f"SQLite error while {action}: {exc}"
+        self._emit_console("ERROR", message)
+        try:
+            self._rotating_logger.exception(message)
+        except Exception:
+            pass
+
+    def _rollback_silently(self) -> None:
+        try:
+            self.conn.rollback()
         except Exception:
             pass
