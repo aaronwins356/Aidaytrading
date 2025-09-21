@@ -28,7 +28,7 @@ operations.
   vetos before forwarding orders to the execution engine.【F:desk/services/worker.py†L1-L186】
 - **Streamlit Control Room** – the dashboard app surfaces live equity curves, trade
   ledgers, worker attribution, and editable YAML configuration backed by the same
-  SQLite database.【F:desk/apps/dashboard.py†L1-L152】
+  SQLite database.【F:dashboard/app.py†L1-L160】
 
 ---
 
@@ -41,9 +41,8 @@ desk/
   configs/config.yaml    # Default live-trading configuration
   services/              # Broker, execution, feed, risk, learner, telemetry, logging
   strategies/            # Individual trading strategies (momentum, RSI, MACD, ...)
-  apps/dashboard.py      # Legacy Streamlit dashboard implementation
   ...
-dashboard/               # Streamlit Control Room (new dashboard)
+dashboard/               # Streamlit Control Room implementation
 run                      # Helper command wrapper (currently dashboard only)
 run_dashboard.sh         # Launches dashboard/app.py inside .venv
 requirements.txt         # Python dependencies
@@ -130,7 +129,7 @@ The YAML configuration drives every subsystem. Key sections in
   class that matches the slug.【F:desk/configs/config.yaml†L66-L97】【F:desk/services/worker.py†L125-L186】
 
 Configuration values are read once during startup, so restart the runtime after
-changes. The dashboard writes updates back to the same file.【F:desk/apps/dashboard.py†L64-L80】
+changes. The dashboard writes updates back to the same file.【F:dashboard/data_io.py†L1-L120】
 
 ---
 
