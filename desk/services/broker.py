@@ -114,9 +114,21 @@ class KrakenBroker:
         if not callable(method):
             raise RuntimeError("ccxt.kraken does not expose privatePostGetWebSocketsToken")
         response = method()
-        if not isinstance(response, dict) or "token" not in response:
+        if not isinstance(response, dict):
             raise RuntimeError("Unexpected Kraken token response")
-        return str(response["token"])
+        errors = response.get("error")
+        if isinstance(errors, (list, tuple)) and errors:
+            raise RuntimeError(f"Kraken token error: {errors}")
+        if isinstance(errors, str) and errors:
+            raise RuntimeError(f"Kraken token error: {errors}")
+        token = None
+        if "token" in response:
+            token = response.get("token")
+        elif isinstance(response.get("result"), dict):
+            token = response["result"].get("token")
+        if not token:
+            raise RuntimeError("Unexpected Kraken token response")
+        return str(token)
 
     def _create_websocket(self, timeframe: str) -> KrakenWebSocketClient:
         pairs = self._resolve_ws_pairs()
@@ -126,13 +138,21 @@ class KrakenBroker:
 
             store = CandleStore()
             self._candle_store = store
-        return KrakenWebSocketClient(
+        client = KrakenWebSocketClient(
             pairs=pairs or {"XBT/USD": "BTC/USD"},
             timeframe=timeframe,
             store=store,
             token_provider=self._ws_token,
             logger=self.event_logger,
         )
+        symbols = list((pairs or {"XBT/USD": "BTC/USD"}).values()) or list(self._symbols)
+        subscribe = getattr(client, "subscribe_public", None)
+        if symbols and callable(subscribe):
+            try:
+                subscribe(symbols, ["ticker", "trade", {"name": "book", "depth": 10}])
+            except Exception:
+                pass
+        return client
 
     # ------------------------------------------------------------------
     def _log_event(self, level: str, message: str, *, symbol: str = "BROKER", **metadata) -> None:
