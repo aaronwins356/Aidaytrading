@@ -16,6 +16,14 @@ from desk.config import DESK_ROOT
 from desk.data import candles_to_dataframe
 from desk.services.logger import EventLogger
 
+_FALLBACK_MINIMUM_ORDER_SIZES = {
+    "BTC": 0.0001,
+    "XBT": 0.0001,
+    "ETH": 0.01,
+    "SOL": 1.0,
+    "MATIC": 5.0,
+}
+
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from desk.services.dashboard_recorder import DashboardRecorder
     from desk.services.telemetry import TelemetryClient
@@ -220,6 +228,27 @@ class ExecutionEngine:
                 )
                 writer.writeheader()
 
+    @staticmethod
+    def _normalize_asset(symbol: str) -> str:
+        base = str(symbol or "").split("/")[0].split("-")[0].upper()
+        if base.startswith("X") and len(base) > 3:
+            base = base[1:]
+        if base.startswith("Z") and len(base) > 3:
+            base = base[1:]
+        aliases = {"XBT": "BTC"}
+        return aliases.get(base, base)
+
+    def _minimum_order_size(self, symbol: str) -> float:
+        broker_min = 0.0
+        minimum_config = getattr(self.broker, "minimum_order_config", None)
+        if callable(minimum_config):
+            try:
+                broker_min, _precision = minimum_config(symbol)
+            except Exception:
+                broker_min = 0.0
+        fallback = _FALLBACK_MINIMUM_ORDER_SIZES.get(self._normalize_asset(symbol), 0.0)
+        return max(float(broker_min or 0.0), float(fallback or 0.0))
+
     # ------------------------------------------------------------------
     # Trade lifecycle helpers
     # ------------------------------------------------------------------
@@ -323,6 +352,29 @@ class ExecutionEngine:
                     "symbol": symbol,
                     "side": side,
                     "detail": balance_check_error,
+                }
+            )
+            return None
+
+        minimum_qty = self._minimum_order_size(symbol)
+        if minimum_qty > 0 and float(qty) < minimum_qty:
+            self.logger.log_feed_event(
+                "WARNING",
+                symbol,
+                "Order below Kraken minimum; skipping execution.",
+                worker=worker.name,
+                requested_qty=float(qty),
+                minimum_qty=float(minimum_qty),
+            )
+            self.logger.write(
+                {
+                    "type": "trade_skipped",
+                    "reason": "below_minimum",
+                    "worker": worker.name,
+                    "symbol": symbol,
+                    "side": side,
+                    "requested_qty": float(qty),
+                    "minimum_qty": float(minimum_qty),
                 }
             )
             return None

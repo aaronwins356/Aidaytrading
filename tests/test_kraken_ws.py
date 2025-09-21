@@ -116,3 +116,45 @@ def test_balance_handler_updates_snapshot(tmp_path: Path) -> None:
     client._handle_balance_update({"balances": {"USD": "1500.5"}})
     snapshot = client.latest_balances()
     assert snapshot["USD"] == pytest.approx(1500.5)
+
+
+def test_public_loop_reconnects_and_uses_rest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    store = CandleStore(tmp_path / "ws3.db")
+    client = KrakenWebSocketClient(
+        pairs={"XBT/USD": "BTC/USD"},
+        timeframe="1m",
+        store=store,
+        token_provider=None,
+    )
+
+    class ExplodingContext:
+        async def __aenter__(self):
+            raise ConnectionResetError("boom")
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def fake_open_socket(*_args, **_kwargs):
+        return ExplodingContext()
+
+    monkeypatch.setattr(client, "_open_socket", fake_open_socket)
+
+    fallback_calls = {"count": 0}
+
+    async def fake_rest(symbols=None):
+        fallback_calls["count"] += 1
+
+    monkeypatch.setattr(client, "_rest_fallback_refresh", fake_rest)
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        client._stop_event.set()
+
+    monkeypatch.setattr("desk.services.kraken_ws.asyncio.sleep", fake_sleep)
+
+    asyncio.run(client._public_loop())
+
+    assert fallback_calls["count"] == 1
+    assert sleeps

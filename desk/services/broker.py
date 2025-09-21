@@ -19,6 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in tests
 
     ccxt = _MissingCCXT()  # type: ignore
 
+from desk.data import normalize_ohlcv
 from desk.services.kraken_ws import KrakenWebSocketClient
 from desk.services.logger import EventLogger
 
@@ -137,6 +138,18 @@ class KrakenBroker:
             base = str(market.get("baseId") or market.get("base") or resolved_symbol.split("/")[0])
             quote = str(market.get("quoteId") or market.get("quote") or resolved_symbol.split("/")[-1])
             pairs[f"{base}/{quote}"] = resolved_symbol
+        overrides = {
+            "BTC/USD": "XBT/USD",
+            "XBT/USD": "XBT/USD",
+            "ETH/USD": "ETH/USD",
+            "SOL/USD": "SOL/USD",
+            "MATIC/USD": "MATIC/USD",
+        }
+        for symbol in list(self._symbols):
+            resolved_symbol = self.resolve_symbol(symbol)
+            override_key = overrides.get(str(symbol).upper()) or overrides.get(resolved_symbol.upper())
+            if override_key:
+                pairs[override_key] = resolved_symbol
         return pairs
 
     def _ws_token(self) -> str:
@@ -219,6 +232,10 @@ class KrakenBroker:
             store=store,
             token_provider=self._ws_token,
             logger=self.event_logger,
+            rest_fetcher=lambda symbol, tf, limit: normalize_ohlcv(
+                self.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
+            ),
+            rest_candle_limit=5,
         )
         symbols = list((pairs or {"XBT/USD": "BTC/USD"}).values()) or list(self._symbols)
         subscribe = getattr(client, "subscribe_public", None)

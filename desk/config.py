@@ -42,7 +42,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "feed": {
         "exchange": "kraken",
-        "symbols": ["BTC/USD", "ETH/USD", "SOL/USD"],
+        "symbols": ["BTC/USD", "ETH/USD", "SOL/USD", "MATIC/USD"],
         "timeframe": "1m",
         "data_seeding": {
             "seed_length": 600,
@@ -61,6 +61,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "retrain_every": 15,
         "ml_weight": 0.6,
         "trapdoor_pct": 0.015,
+        "equity_floor": None,
         "weekly_return_target": 1.0,
         "trading_days_per_week": 5.0,
         "expected_trades_per_day": None,
@@ -260,6 +261,13 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 risk["max_position_value"] = _validate_positive(
                     "risk.max_position_value", risk.get("max_position_value")
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+        if "equity_floor" in risk and risk.get("equity_floor") is not None:
+            try:
+                risk["equity_floor"] = _validate_positive(
+                    "risk.equity_floor", risk.get("equity_floor")
                 )
             except ValueError as exc:
                 errors.append(str(exc))

@@ -25,6 +25,7 @@ class RiskEngine:
         trapdoor_pct: float,
         *,
         max_position_value: float | None = None,
+        equity_floor: float | None = None,
     ) -> None:
         self.daily_dd = daily_dd or 0.0
         self.weekly_dd = weekly_dd or 0.0
@@ -33,6 +34,7 @@ class RiskEngine:
         self.halt_on_dd = halt_on_dd
         self.trapdoor_pct = trapdoor_pct
         self.max_position_value = max_position_value if max_position_value and max_position_value > 0 else None
+        self.equity_floor = equity_floor if equity_floor and equity_floor > 0 else None
 
         self.start_equity: float | None = None
         self.equity_high: float | None = None
@@ -54,11 +56,19 @@ class RiskEngine:
         self.equity_high = max(previous_high, equity)
 
         # Daily/weekly drawdown checks.
+        dd_breached = False
         if self.daily_dd and equity < self.start_equity * (1 - self.daily_dd):
             print("[RISK] Daily drawdown threshold breached – monitoring closely.")
+            dd_breached = True
 
         if self.weekly_dd and equity < self.start_equity * (1 - self.weekly_dd):
             print("[RISK] Weekly drawdown threshold breached – monitoring closely.")
+            dd_breached = True
+
+        if dd_breached and self.halt_on_dd:
+            print("[RISK] Trapdoor activated – drawdown limit reached.")
+            self.halted = True
+            return
 
         # Trap door: once equity makes a new high, raise the floor.
         if self.trapdoor:
@@ -66,10 +76,15 @@ class RiskEngine:
                 new_floor = equity * (1 - self.trapdoor_pct)
                 self.trapdoor = EquityTrapdoor(floor=new_floor, locked_at=time.time())
             elif equity < self.trapdoor.floor:
-                print("[RISK] Trapdoor activated – locking in gains and halting trading.")
+                print("[RISK] Trapdoor activated – trailing floor breached.")
                 self.halted = True
+                return
+        if self.equity_floor and equity < self.equity_floor:
+            print("[RISK] Trapdoor activated – equity floor reached.")
+            self.halted = True
+            return
         if equity <= 0:
-            print("[RISK] Equity at or below zero – halting trading to protect capital.")
+            print("[RISK] Trapdoor activated – equity at or below zero.")
             self.halted = True
 
     def enforce_position_limits(self, open_positions: Iterable) -> bool:

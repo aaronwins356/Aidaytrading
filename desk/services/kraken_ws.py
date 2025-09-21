@@ -135,6 +135,10 @@ class KrakenWSClient:
         order_timeout: float = 10.0,
         public_factory: Optional[Callable[..., Awaitable[WebSocketClientProtocol]]] = None,
         private_factory: Optional[Callable[..., Awaitable[WebSocketClientProtocol]]] = None,
+        rest_fetcher: Optional[
+            Callable[[str, str, int], Iterable[Mapping[str, Any]]]
+        ] = None,
+        rest_candle_limit: int = 3,
     ) -> None:
         if not pairs:
             raise ValueError("At least one Kraken pair must be provided")
@@ -144,7 +148,10 @@ class KrakenWSClient:
         }
         self._store = store
         self._logger = logger
+        self._timeframe_text = str(timeframe)
         self._interval = _kraken_interval_minutes(timeframe)
+        self._rest_fetcher = rest_fetcher
+        self._rest_limit = max(1, int(rest_candle_limit))
         self._token_provider = token_provider
         self._public_factory = public_factory or (
             lambda url: websockets.connect(url, ping_interval=None)
@@ -303,6 +310,7 @@ class KrakenWSClient:
                 return
             except Exception as exc:
                 self._log("WARNING", "ALL", "Kraken public WebSocket disconnected", detail=str(exc))
+                await self._rest_fallback_refresh()
                 delay = self._public_backoff.advance()
                 await asyncio.sleep(delay)
             finally:
@@ -418,6 +426,64 @@ class KrakenWSClient:
         if inserted and end > start:
             self._log("INFO", symbol, "Kraken candle closed", detail=f"ts={timestamp_ms}")
         self._last_ohlc_timestamp[str(pair)] = time.time()
+
+    def _rest_fetch_wrapper(self, symbol: str) -> List[Dict[str, float]]:
+        fetcher = self._rest_fetcher
+        if fetcher is None:
+            return []
+        result: Iterable[Mapping[str, Any]]
+        result = fetcher(symbol, self._timeframe_text, self._rest_limit)
+        candles: List[Dict[str, float]] = []
+        for entry in result or []:
+            if not isinstance(entry, Mapping):
+                continue
+            try:
+                candles.append(
+                    {
+                        "timestamp": float(entry.get("timestamp", 0.0)),
+                        "open": float(entry.get("open", 0.0)),
+                        "high": float(entry.get("high", 0.0)),
+                        "low": float(entry.get("low", 0.0)),
+                        "close": float(entry.get("close", 0.0)),
+                        "volume": float(entry.get("volume", 0.0)),
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+        return candles
+
+    async def _rest_fallback_refresh(self, symbols: Optional[Iterable[str]] = None) -> None:
+        if self._rest_fetcher is None:
+            return
+        target_symbols = list(dict.fromkeys(symbols or self._pairs.values()))
+        if not target_symbols:
+            return
+        loop = asyncio.get_running_loop()
+        tasks = [
+            loop.run_in_executor(None, self._rest_fetch_wrapper, symbol)
+            for symbol in target_symbols
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for symbol, result in zip(target_symbols, results):
+            if isinstance(result, Exception):
+                self._log("WARNING", symbol, "REST fallback failed", detail=str(result))
+                continue
+            if not result:
+                continue
+            try:
+                inserted = self._store.append(symbol, result)
+            except Exception as exc:  # pragma: no cover - defensive store guard
+                self._log("ERROR", symbol, "REST fallback store failure", detail=str(exc))
+                continue
+            if inserted:
+                pair_name = self._symbols_to_pairs.get(symbol, symbol)
+                self._last_ohlc_timestamp[str(pair_name)] = time.time()
+                self._log(
+                    "INFO",
+                    symbol,
+                    "REST fallback appended candles",
+                    detail=str(inserted),
+                )
 
     # ------------------------------------------------------------------
     # Private data handling
@@ -864,6 +930,9 @@ class KrakenWSClient:
                     self._last_ohlc_timestamp.pop(pair, None)
                 await self._send_public_subscriptions(
                     ((("ohlc", tuple()), pair) for pair in stale_pairs)
+                )
+                await self._rest_fallback_refresh(
+                    self._pairs.get(pair, pair) for pair in stale_pairs
                 )
         except asyncio.CancelledError:
             return
