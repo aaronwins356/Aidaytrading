@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 try:  # pragma: no cover - optional dependency guard
     import ccxt  # type: ignore
@@ -301,6 +301,7 @@ class FeedUpdater:
         self._rng = random.Random()
         self._resolved_symbols: Dict[Tuple[str, str], str] = {}
         self._symbol_skip_until: Dict[str, float] = {}
+        self._limit_clamp_log: Set[Tuple[str, str]] = set()
         self._exchange = self._build_exchange()
 
     # ------------------------------------------------------------------
@@ -565,6 +566,71 @@ class FeedUpdater:
             )
             return candidates
         return list(self._timeframe_fallbacks)
+
+    def _normalise_fetch_limit(
+        self, exchange: Optional[object], limit: int, timeframe: str
+    ) -> int:
+        """Clamp OHLCV fetch limits to the maximum supported by an exchange."""
+
+        try:
+            requested = int(limit)
+        except (TypeError, ValueError):
+            requested = 0
+        if requested <= 0:
+            requested = 1
+
+        max_supported: Optional[int] = None
+        if exchange is not None:
+            try:
+                options = getattr(exchange, "options", None)
+                if isinstance(options, dict):
+                    ohlcv_limits = options.get("OHLCVLimit")
+                    if isinstance(ohlcv_limits, dict):
+                        for key in (timeframe, timeframe.lower(), timeframe.upper()):
+                            candidate = ohlcv_limits.get(key)
+                            if candidate is None:
+                                continue
+                            try:
+                                max_supported = int(candidate)
+                                break
+                            except (TypeError, ValueError):
+                                continue
+                    if max_supported is None:
+                        limits_meta = options.get("limits")
+                        if isinstance(limits_meta, dict):
+                            fetch_limits = limits_meta.get("fetchOHLCV")
+                            if isinstance(fetch_limits, dict):
+                                candidate = fetch_limits.get("max") or fetch_limits.get(
+                                    "maximum"
+                                )
+                                if candidate is not None:
+                                    try:
+                                        max_supported = int(float(candidate))
+                                    except (TypeError, ValueError):
+                                        max_supported = None
+            except Exception:  # pragma: no cover - defensive metadata parsing
+                max_supported = None
+
+            if max_supported is None:
+                exchange_id = str(getattr(exchange, "id", ""))
+                if exchange_id.lower() == "kraken":
+                    max_supported = 720
+
+        if max_supported is not None and max_supported > 0 and requested > max_supported:
+            exchange_id = "unknown"
+            if exchange is not None:
+                exchange_id = str(getattr(exchange, "id", "") or "unknown")
+            clamp_key = (exchange_id, timeframe)
+            if clamp_key not in self._limit_clamp_log:
+                self._log(
+                    "INFO",
+                    "ALL",
+                    f"Clamped fetch limit for {exchange_id}",
+                    detail=f"timeframe={timeframe} max={max_supported}",
+                )
+                self._limit_clamp_log.add(clamp_key)
+            return max_supported
+        return requested
 
     def _resample_candles(
         self,
@@ -909,10 +975,11 @@ class FeedUpdater:
             )
             return []
         try:
+            safe_limit = self._normalise_fetch_limit(exchange, limit, self._seed_timeframe)
             raw = exchange.fetch_ohlcv(
                 self._resolve_symbol(exchange, symbol),
                 timeframe=self._seed_timeframe,
-                limit=limit,
+                limit=safe_limit,
             )
         except Exception as exc:  # pragma: no cover - network guard
             self._log(
@@ -1079,10 +1146,13 @@ class FeedUpdater:
                 attempt += 1
                 try:
                     exchange_symbol = self._resolve_symbol(self._exchange, symbol)
+                    safe_limit = self._normalise_fetch_limit(
+                        self._exchange, limit, active_timeframe
+                    )
                     raw = self._exchange.fetch_ohlcv(
                         exchange_symbol,
                         timeframe=active_timeframe,
-                        limit=limit,
+                        limit=safe_limit,
                         since=since,
                     )
                     candles = normalize_ohlcv(raw)
