@@ -4,13 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import threading
 import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (Any, Awaitable, Callable, Dict, Iterable, List, Mapping,
-                    MutableMapping, Optional, Protocol, Sequence)
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 try:  # pragma: no cover - optional dependency guard
     import websockets
@@ -83,7 +97,8 @@ class _BackoffState:
         self.delay = self.base
 
     def advance(self) -> float:
-        now = self.delay
+        jitter = random.uniform(0.0, self.delay * 0.1)
+        now = min(self.delay + jitter, self.maximum)
         self.delay = min(self.delay * 2.0, self.maximum)
         return now
 
@@ -99,7 +114,7 @@ class OrderStatus:
     descr: Optional[str] = None
 
 
-class KrakenWebSocketClient:
+class KrakenWSClient:
     """High-level interface around Kraken's public and private WebSockets."""
 
     PUBLIC_URL = "wss://ws.kraken.com"
@@ -124,6 +139,9 @@ class KrakenWebSocketClient:
         if not pairs:
             raise ValueError("At least one Kraken pair must be provided")
         self._pairs: Dict[str, str] = {str(pair): str(symbol) for pair, symbol in pairs.items()}
+        self._symbols_to_pairs: Dict[str, str] = {
+            symbol: pair for pair, symbol in self._pairs.items()
+        }
         self._store = store
         self._logger = logger
         self._interval = _kraken_interval_minutes(timeframe)
@@ -152,13 +170,18 @@ class KrakenWebSocketClient:
         self._private_ready: Optional[asyncio.Event] = None
         self._pending_orders: Dict[str, asyncio.Future] = {}
         self._pending_cancels: Dict[str, asyncio.Future] = {}
-        self._subscription_payload = json.dumps(
-            {
-                "event": "subscribe",
-                "pair": sorted(self._pairs.keys()),
-                "subscription": {"name": "ohlc", "interval": self._interval},
-            }
-        )
+        self._public_state_lock = threading.Lock()
+        self._private_state_lock = threading.Lock()
+        self._public_subscriptions: Dict[Tuple[str, Tuple[Tuple[str, Any], ...]], Set[str]] = defaultdict(set)
+        self._private_subscriptions: Set[str] = set()
+        self._last_ohlc_timestamp: Dict[str, float] = {}
+        self._stale_threshold = max(60.0, float(self._interval) * 60.0 * 3.0)
+        self._ws_token: Optional[str] = None
+        self._token_lock = threading.Lock()
+        # Default subscription for OHLC candles so strategies keep functioning.
+        self.subscribe_public(list(self._pairs.values()), ["ohlc"])
+        if token_provider is not None:
+            self.subscribe_private(["openOrders", "ownTrades", "accountBalances"])
         if token_provider is not None:
             self.register_private_handler("openOrders", self._handle_open_orders)
             self.register_private_handler("ownTrades", self._handle_trade_update)
@@ -208,6 +231,7 @@ class KrakenWebSocketClient:
         tasks = [asyncio.create_task(self._public_loop())]
         if self._token_provider is not None:
             tasks.append(asyncio.create_task(self._private_loop()))
+        tasks.append(asyncio.create_task(self._watch_public_staleness()))
         await shutdown.wait()
         for task in tasks:
             task.cancel()
@@ -224,9 +248,9 @@ class KrakenWebSocketClient:
     async def _public_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                async with await self._public_factory(self.PUBLIC_URL) as socket:
+                async with self._public_factory(self.PUBLIC_URL) as socket:
                     self._public_socket = socket
-                    await socket.send(self._subscription_payload)
+                    await self._resubscribe_public(socket)
                     self._public_backoff.reset()
                     async for message in socket:
                         if self._stop_event.is_set():
@@ -261,12 +285,25 @@ class KrakenWebSocketClient:
             event = payload.get("event")
             if event == "heartbeat":
                 return
-            if event == "subscriptionStatus" and payload.get("status") == "subscribed":
+            if event == "subscriptionStatus":
+                status = payload.get("status")
                 detail = payload.get("pair") or payload.get("channelName")
-                self._log("INFO", "ALL", "Kraken public subscription active", detail=str(detail))
+                self._log(
+                    "INFO",
+                    "ALL",
+                    f"Kraken public subscription {status}",
+                    detail=str(detail),
+                )
+                if status == "error":
+                    error_msg = str(payload.get("errorMessage") or "unknown error")
+                    if "EGeneral:Invalid arguments" in error_msg:
+                        self._handle_invalid_public_subscription(payload)
+                    self._log("ERROR", "ALL", "Kraken public error", detail=error_msg)
                 return
             if event == "error":
                 detail = payload.get("errorMessage") or payload
+                if isinstance(detail, str) and "EGeneral:Invalid arguments" in detail:
+                    self._handle_invalid_public_subscription(payload)
                 self._log("ERROR", "ALL", "Kraken public error", detail=str(detail))
                 return
             return
@@ -337,6 +374,7 @@ class KrakenWebSocketClient:
         inserted = self._store.append(symbol, [candle])
         if inserted and end > start:
             self._log("INFO", symbol, "Kraken candle closed", detail=f"ts={timestamp_ms}")
+        self._last_ohlc_timestamp[str(pair)] = time.time()
 
     # ------------------------------------------------------------------
     # Private data handling
@@ -356,13 +394,15 @@ class KrakenWebSocketClient:
         while not self._stop_event.is_set():
             try:
                 token = await self._acquire_token()
+                with self._token_lock:
+                    self._ws_token = token
             except Exception as exc:
                 self._log("ERROR", "ALL", "Failed to fetch Kraken WS token", detail=str(exc))
                 delay = self._private_backoff.advance()
                 await asyncio.sleep(delay)
                 continue
             try:
-                async with await self._private_factory(self.PRIVATE_URL) as socket:
+                async with self._private_factory(self.PRIVATE_URL) as socket:
                     self._private_socket = socket
                     await self._subscribe_private(socket, token)
                     ready.set()
@@ -376,6 +416,8 @@ class KrakenWebSocketClient:
             except Exception as exc:
                 self._log("WARNING", "ALL", "Kraken private WebSocket disconnected", detail=str(exc))
                 ready.clear()
+                with self._token_lock:
+                    self._ws_token = None
                 delay = self._private_backoff.advance()
                 await asyncio.sleep(delay)
             finally:
@@ -388,18 +430,30 @@ class KrakenWebSocketClient:
         result = self._token_provider()
         if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
             return await result  # type: ignore[return-value]
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, result)
+        if isinstance(result, str):
+            return result
+        if result is None:
+            raise RuntimeError("Token provider returned None")
+        if callable(result):
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, result)
+        return str(result)
 
     async def _subscribe_private(self, socket: WebSocketClientProtocol, token: str) -> None:
-        subscriptions = [
-            {"name": "openOrders", "token": token},
-            {"name": "ownTrades", "token": token},
-            {"name": "accountBalances", "token": token},
-        ]
-        for subscription in subscriptions:
-            payload = json.dumps({"event": "subscribe", "subscription": subscription})
-            await socket.send(payload)
+        payloads: List[Dict[str, Any]] = []
+        with self._private_state_lock:
+            for channel in sorted(self._private_subscriptions):
+                payloads.append(
+                    {
+                        "event": "subscribe",
+                        "subscription": {"name": channel, "token": token},
+                    }
+                )
+        if not payloads:
+            return
+        for entry in payloads:
+            await socket.send(json.dumps(entry))
+            await asyncio.sleep(0)
 
     async def _handle_private_message(self, message: Any) -> None:
         payload: Any
@@ -434,7 +488,8 @@ class KrakenWebSocketClient:
                 await self._resolve_cancel(payload)
                 return
             if event == "error":
-                self._log("ERROR", "ALL", "Kraken private error", detail=str(payload))
+                detail = str(payload.get("errorMessage") or payload)
+                self._log("ERROR", "ALL", "Kraken private error", detail=detail)
                 return
             return
 
@@ -505,6 +560,253 @@ class KrakenWebSocketClient:
                         continue
 
     # ------------------------------------------------------------------
+    # Subscription helpers
+    # ------------------------------------------------------------------
+
+    def subscribe_public(self, symbols: Iterable[str], channels: Iterable[Any]) -> None:
+        pairs = self._resolve_pairs(symbols)
+        normalized_channels = [
+            self._normalize_public_channel(channel) for channel in channels
+        ]
+        normalized_channels = [entry for entry in normalized_channels if entry is not None]
+        if not pairs or not normalized_channels:
+            return
+        updates: List[Tuple[Tuple[str, Tuple[Tuple[str, Any], ...]], str]] = []
+        with self._public_state_lock:
+            for channel in normalized_channels:
+                for pair in pairs:
+                    if pair not in self._public_subscriptions[channel]:
+                        self._public_subscriptions[channel].add(pair)
+                        updates.append((channel, pair))
+        if not updates:
+            return
+        detail_entries = []
+        for channel, pair in updates:
+            name, extra = channel
+            suffix = ""
+            if extra:
+                suffix = "," + ",".join(f"{key}={value}" for key, value in extra)
+            detail_entries.append(f"{name}{suffix}:{pair}")
+        if detail_entries:
+            self._log(
+                "INFO",
+                "ALL",
+                "Queued Kraken public subscriptions",
+                detail=" | ".join(detail_entries),
+            )
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._send_public_subscriptions(updates), loop
+            )
+
+    def subscribe_private(self, channels: Iterable[str]) -> None:
+        names = [str(channel) for channel in channels if str(channel).strip()]
+        if not names:
+            return
+        changed = False
+        with self._private_state_lock:
+            for channel in names:
+                if channel not in self._private_subscriptions:
+                    self._private_subscriptions.add(channel)
+                    changed = True
+        if not changed:
+            return
+        self._log(
+            "INFO",
+            "ALL",
+            "Queued Kraken private subscriptions",
+            detail=", ".join(sorted(self._private_subscriptions)),
+        )
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._resubscribe_private(), loop)
+
+    def send_order(self, order_data: Mapping[str, Any]) -> OrderStatus:
+        pair = self._normalize_pair(order_data.get("pair") or order_data.get("symbol"))
+        if not pair:
+            raise ValueError("Order data must include a valid Kraken trading pair")
+        side = str(order_data.get("side") or order_data.get("type") or "").lower()
+        order_type = str(order_data.get("ordertype") or order_data.get("order_type") or "")
+        volume_value = order_data.get("volume") or order_data.get("size")
+        if not side or not order_type or volume_value is None:
+            raise ValueError("Order data missing side, ordertype, or volume")
+        price_value = order_data.get("price")
+        client_order_id = order_data.get("clientOrderId") or order_data.get("reqid")
+        validate = bool(order_data.get("validate", False))
+        return self.submit_order(
+            pair,
+            side=side,
+            order_type=order_type,
+            volume=float(volume_value),
+            price=float(price_value) if price_value is not None else None,
+            client_order_id=str(client_order_id) if client_order_id else None,
+            validate=validate,
+        )
+
+    async def _resubscribe_private(self) -> None:
+        socket = self._private_socket
+        if socket is None:
+            return
+        if self._token_provider is None:
+            return
+        with self._token_lock:
+            token = self._ws_token
+        if not token:
+            try:
+                token = await self._acquire_token()
+            except Exception as exc:  # pragma: no cover - network guard
+                self._log("ERROR", "ALL", "Failed to refresh private token", detail=str(exc))
+                return
+            with self._token_lock:
+                self._ws_token = token
+        await self._subscribe_private(socket, token)
+
+    async def _send_public_subscriptions(
+        self, updates: Iterable[Tuple[Tuple[str, Tuple[Tuple[str, Any], ...]], str]]
+    ) -> None:
+        socket = self._public_socket
+        if socket is None:
+            return
+        batched: Dict[Tuple[str, Tuple[Tuple[str, Any], ...]], List[str]] = defaultdict(list)
+        for channel, pair in updates:
+            batched[channel].append(pair)
+        for channel, pairs in batched.items():
+            name, extra = channel
+            payload = {
+                "event": "subscribe",
+                "pair": sorted(pairs),
+                "subscription": {"name": name},
+            }
+            if name == "ohlc":
+                payload["subscription"]["interval"] = self._interval
+            for key, value in extra:
+                payload["subscription"][key] = value
+            await socket.send(json.dumps(payload))
+            await asyncio.sleep(0)
+
+    async def _resubscribe_public(self, socket: WebSocketClientProtocol) -> None:
+        updates: List[Tuple[Tuple[str, Tuple[Tuple[str, Any], ...]], List[str]]] = []
+        with self._public_state_lock:
+            for channel, pairs in self._public_subscriptions.items():
+                if not pairs:
+                    continue
+                updates.append((channel, sorted(pairs)))
+        for channel, pairs in updates:
+            name, extra = channel
+            payload = {
+                "event": "subscribe",
+                "pair": pairs,
+                "subscription": {"name": name},
+            }
+            if name == "ohlc":
+                payload["subscription"]["interval"] = self._interval
+            for key, value in extra:
+                payload["subscription"][key] = value
+            await socket.send(json.dumps(payload))
+            await asyncio.sleep(0)
+
+    def _resolve_pairs(self, symbols: Iterable[str]) -> List[str]:
+        pairs: List[str] = []
+        for symbol in symbols:
+            candidate = self._normalize_pair(symbol)
+            if candidate:
+                pairs.append(candidate)
+        return pairs
+
+    def _normalize_pair(self, symbol_or_pair: Any) -> Optional[str]:
+        if not symbol_or_pair:
+            return None
+        text = str(symbol_or_pair)
+        if text in self._pairs:
+            return text
+        if text in self._symbols_to_pairs:
+            return self._symbols_to_pairs[text]
+        upper = text.upper()
+        if upper in self._symbols_to_pairs:
+            return self._symbols_to_pairs[upper]
+        if upper in self._pairs:
+            return upper
+        return None
+
+    def _normalize_public_channel(
+        self, channel: Any
+    ) -> Optional[Tuple[str, Tuple[Tuple[str, Any], ...]]]:
+        if isinstance(channel, Mapping):
+            name = str(channel.get("name") or "").strip()
+            if not name:
+                return None
+            extras = tuple(
+                sorted(
+                    ((str(key), channel[key]) for key in channel.keys() if key != "name"),
+                    key=lambda item: item[0],
+                )
+            )
+            return (name, extras)
+        if channel is None:
+            return None
+        name = str(channel).strip()
+        if not name:
+            return None
+        return (name, tuple())
+
+    def _handle_invalid_public_subscription(self, payload: Mapping[str, Any]) -> None:
+        subscription = payload.get("subscription")
+        if not isinstance(subscription, Mapping):
+            return
+        name = str(subscription.get("name") or "")
+        pair = payload.get("pair")
+        if isinstance(pair, Sequence) and pair:
+            target_pairs = [str(pair[0])]
+        elif isinstance(pair, str):
+            target_pairs = [pair]
+        else:
+            target_pairs = []
+        with self._public_state_lock:
+            if not name or not target_pairs:
+                return
+            for entry in target_pairs:
+                for key in list(self._public_subscriptions.keys()):
+                    if key[0] != name:
+                        continue
+                    self._public_subscriptions[key].discard(entry)
+        detail = {
+            "channel": name,
+            "pair": target_pairs,
+            "payload": payload,
+        }
+        try:
+            detail_text = json.dumps(detail, default=str)
+        except TypeError:
+            detail_text = str(detail)
+        self._log("ERROR", "ALL", "Removed invalid public subscription", detail=detail_text)
+
+    async def _watch_public_staleness(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                await asyncio.sleep(min(60.0, self._stale_threshold / 2.0))
+                now = time.time()
+                stale_pairs: List[str] = []
+                for pair, ts in list(self._last_ohlc_timestamp.items()):
+                    if now - ts > self._stale_threshold:
+                        stale_pairs.append(pair)
+                if not stale_pairs:
+                    continue
+                self._log(
+                    "WARNING",
+                    "ALL",
+                    "Detected stale Kraken OHLC stream",
+                    detail=", ".join(stale_pairs),
+                )
+                for pair in stale_pairs:
+                    self._last_ohlc_timestamp.pop(pair, None)
+                await self._send_public_subscriptions(
+                    ((("ohlc", tuple()), pair) for pair in stale_pairs)
+                )
+        except asyncio.CancelledError:
+            return
+
+    # ------------------------------------------------------------------
     # Order helpers
     # ------------------------------------------------------------------
     async def _submit_order_async(
@@ -521,7 +823,7 @@ class KrakenWebSocketClient:
         if self._token_provider is None:
             raise RuntimeError("Private trading is disabled")
         if self._private_ready is None:
-            raise RuntimeError("KrakenWebSocketClient not started")
+            raise RuntimeError("KrakenWSClient not started")
         await self._private_ready.wait()
         client_order_id = client_order_id or uuid.uuid4().hex
         payload: Dict[str, Any] = {
@@ -532,6 +834,13 @@ class KrakenWebSocketClient:
             "pair": pair,
             "clientOrderId": client_order_id,
         }
+        with self._token_lock:
+            token = self._ws_token
+        if not token:
+            token = await self._acquire_token()
+            with self._token_lock:
+                self._ws_token = token
+        payload["token"] = token
         if price is not None:
             payload["price"] = str(price)
         if validate:
@@ -565,7 +874,7 @@ class KrakenWebSocketClient:
     ) -> OrderStatus:
         loop = self._loop
         if loop is None:
-            raise RuntimeError("KrakenWebSocketClient not running")
+            raise RuntimeError("KrakenWSClient not running")
         coro = self._submit_order_async(
             pair,
             side=side,
@@ -589,7 +898,7 @@ class KrakenWebSocketClient:
         if self._token_provider is None:
             raise RuntimeError("Private trading is disabled")
         if self._private_ready is None:
-            raise RuntimeError("KrakenWebSocketClient not started")
+            raise RuntimeError("KrakenWSClient not started")
         await self._private_ready.wait()
         request_id = client_order_id or uuid.uuid4().hex
         payload: Dict[str, Any] = {"event": "cancelOrder", "clientOrderId": request_id}
@@ -617,7 +926,7 @@ class KrakenWebSocketClient:
     ) -> Mapping[str, Any]:
         loop = self._loop
         if loop is None:
-            raise RuntimeError("KrakenWebSocketClient not running")
+            raise RuntimeError("KrakenWSClient not running")
         coro = self._cancel_order_async(client_order_id=client_order_id, txid=txid)
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         return future.result(timeout=self._order_timeout + 2.0)
@@ -674,7 +983,10 @@ class KrakenWebSocketClient:
             pass
 
 
+KrakenWebSocketClient = KrakenWSClient
+
 __all__ = [
+    "KrakenWSClient",
     "KrakenWebSocketClient",
     "OrderStatus",
     "_kraken_interval_minutes",
