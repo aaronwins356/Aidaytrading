@@ -23,7 +23,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "exchange": "kraken",
         "api_key": "",
         "api_secret": "",
-        "balance": 500.0,
+        "balance": 200.0,
         "loop_delay": 45,
         "warmup_candles": 20,
         "timeframe": "1m",
@@ -42,7 +42,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "risk": {
-        "fixed_risk_usd": 40.0,
+        "fixed_risk_usd": 20.0,
         "rr_ratio": 2.0,
         "stop_loss_pct": 0.02,
         "max_hold_minutes": 20,
@@ -134,6 +134,18 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
         for part in path[:-1]:
             cursor = cursor.setdefault(part.lower(), {})
         cursor[path[-1].lower()] = _parse_env_value(value)
+
+    # Allow the more memorable Kraken credential aliases to be used in
+    # production deployments.  The explicit DESK_* overrides continue to
+    # take precedence because we only populate the alias when the field
+    # has not already been set by the loop above.
+    api_key = (os.environ.get("KRAKEN_API_KEY") or "").strip()
+    if api_key and not overrides.get("settings", {}).get("api_key"):
+        overrides.setdefault("settings", {})["api_key"] = api_key
+    api_secret = (os.environ.get("KRAKEN_API_SECRET") or "").strip()
+    if api_secret and not overrides.get("settings", {}).get("api_secret"):
+        overrides.setdefault("settings", {})["api_secret"] = api_secret
+
     if overrides:
         config = _deep_merge(config, overrides)
     return config
