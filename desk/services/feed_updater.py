@@ -26,9 +26,9 @@ from desk.data import normalize_ohlcv
 from desk.services.logger import EventLogger
 
 try:  # pragma: no cover - optional runtime dependency
-    from desk.services.kraken_ws import KrakenWebSocketFeed
+    from desk.services.kraken_ws import KrakenWebSocketClient
 except ModuleNotFoundError:  # pragma: no cover - exercised in tests
-    KrakenWebSocketFeed = None  # type: ignore[misc]
+    KrakenWebSocketClient = None  # type: ignore[misc]
 
 
 class ExchangeBlockedError(RuntimeError):
@@ -385,7 +385,7 @@ class FeedUpdater:
         return None
 
     def _kraken_ws_pairs(self) -> Dict[str, str]:
-        if not self._use_websocket or KrakenWebSocketFeed is None:
+        if not self._use_websocket or KrakenWebSocketClient is None:
             return {}
         try:
             exchange = self._ensure_exchange("kraken")
@@ -414,7 +414,7 @@ class FeedUpdater:
     def _maybe_init_websocket_feed(self):
         if not self._use_websocket:
             return None
-        if KrakenWebSocketFeed is None:
+        if KrakenWebSocketClient is None:
             self._log(
                 "WARNING",
                 "ALL",
@@ -426,11 +426,12 @@ class FeedUpdater:
         if not pairs:
             return None
         try:
-            return KrakenWebSocketFeed(
+            return KrakenWebSocketClient(
                 pairs=pairs,
                 timeframe=self.timeframe,
                 store=self.store,
                 logger=self.logger,
+                token_provider=None,
             )
         except Exception as exc:  # pragma: no cover - constructor guard
             self._log(

@@ -121,6 +121,9 @@ class TradingRuntime:
             event_logger=self.logger,
             request_timeout=request_timeout,
             session_config=session_config,
+            symbols=feed_symbols,
+            timeframe=feed_timeframe,
+            candle_store=self.feed_updater.store,
         )
 
         self._services_started = False
