@@ -10,6 +10,7 @@ __all__ = [
     "FeedUpdater",
     "Learner",
     "EventLogger",
+    "DashboardRecorder",
     "PortfolioManager",
     "RiskEngine",
     "TelemetryClient",
@@ -32,6 +33,10 @@ def __getattr__(name: str):  # pragma: no cover - import hook
         from .execution import ExecutionEngine
 
         return ExecutionEngine
+    if name == "DashboardRecorder":
+        from .dashboard_recorder import DashboardRecorder
+
+        return DashboardRecorder
     if name == "PositionStore":
         from .execution import PositionStore
 
