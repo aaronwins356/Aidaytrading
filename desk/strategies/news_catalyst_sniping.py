@@ -74,12 +74,14 @@ class NewsCatalystSnipingStrategy(StrategyBase):
     def check_exit(self, trade: Trade, df: pd.DataFrame):
         price = float(df["close"].iloc[-1])
         target_pct = float(self.params.get("target_pct", 0.007))
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "Catalyst stop"
             if price >= trade.entry_price * (1 + target_pct):
                 return True, "News scalp target"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "Catalyst stop"
             if price <= trade.entry_price * (1 - target_pct):

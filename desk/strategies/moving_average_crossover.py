@@ -66,12 +66,14 @@ class MovingAverageCrossoverStrategy(StrategyBase):
         ema_vals = self._ema_values(df)
         price = float(df["close"].iloc[-1])
         stop_pct = float(self.params.get("stop_pct", 0.01))
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "1% stop"
             if ema_vals["ema_fast"] < ema_vals["ema_slow"]:
                 return True, "Bearish cross"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "1% stop"
             if ema_vals["ema_fast"] > ema_vals["ema_slow"]:

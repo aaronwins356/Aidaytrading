@@ -86,12 +86,14 @@ class LiquidityGrabStrategy(StrategyBase):
         price = float(df["close"].iloc[-1])
         context = getattr(self, "_context", {})
         prior_mid = float(context.get("prior_mid", trade.entry_price))
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "Liquidity sweep extended"
             if price >= prior_mid:
                 return True, "Range mean achieved"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "Liquidity sweep extended"
             if price <= prior_mid:

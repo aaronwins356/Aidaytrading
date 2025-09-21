@@ -23,9 +23,11 @@ class BollingerBandStrategy(StrategyBase):
         price = float(df["close"].iloc[-1])
         if price <= trade.stop_loss or price >= trade.take_profit:
             return True, "SL/TP"
-        if trade.side == "buy" and price >= mid.iloc[-1]:
+        side = self.trade_side(trade)
+
+        if side == "BUY" and price >= mid.iloc[-1]:
             return True, "Mean reversion hit"
-        if trade.side == "sell" and price <= mid.iloc[-1]:
+        if side == "SELL" and price <= mid.iloc[-1]:
             return True, "Mean reversion hit"
         return False, None
 

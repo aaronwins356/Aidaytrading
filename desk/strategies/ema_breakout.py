@@ -21,9 +21,11 @@ class EMABreakoutStrategy(StrategyBase):
         if price <= trade.stop_loss or price >= trade.take_profit:
             return True, "SL/TP"
         ema = self.ema(df["close"], int(self.params.get("length", 34)))
-        if trade.side == "buy" and price < ema.iloc[-1]:
+        side = self.trade_side(trade)
+
+        if side == "BUY" and price < ema.iloc[-1]:
             return True, "Close < EMA"
-        if trade.side == "sell" and price > ema.iloc[-1]:
+        if side == "SELL" and price > ema.iloc[-1]:
             return True, "Close > EMA"
         return False, None
 

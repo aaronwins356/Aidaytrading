@@ -67,14 +67,16 @@ class VWAPReversionStrategy(StrategyBase):
         price = float(df["close"].iloc[-1])
         vwap_value = float(_compute_vwap(df).iloc[-1])
         stop_pct = float(self.params.get("stop_pct", 0.025))
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "Stop beyond 2.5 pct"
             if price >= vwap_value:
                 return True, "VWAP touched"
             if (price - trade.entry_price) / trade.entry_price <= -stop_pct:
                 return True, "Adverse drift"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "Stop beyond 2.5 pct"
             if price <= vwap_value:

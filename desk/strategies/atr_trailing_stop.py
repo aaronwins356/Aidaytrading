@@ -27,11 +27,13 @@ class ATRTrailingStopStrategy(StrategyBase):
         atr = self.atr(df, n)
         c = df["close"].iloc[-1]
         # Dynamic trailing stop based on trade direction
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             trail = c - mult * atr.iloc[-1]
             if c <= trail or c <= trade.stop_loss or c >= trade.take_profit:
                 return True, "ATR trail or SL/TP"
-        else:
+        elif side == "SELL":
             trail = c + mult * atr.iloc[-1]
             if c >= trail or c <= trade.take_profit or c >= trade.stop_loss:
                 return True, "ATR trail or SL/TP"

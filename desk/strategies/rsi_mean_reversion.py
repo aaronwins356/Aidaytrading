@@ -22,9 +22,11 @@ class RSIMeanReversionStrategy(StrategyBase):
             return True, "SL/TP"
         r = self.rsi(df["close"], int(self.params.get("length", 14)))
         mid = float(self.params.get("mid", 50))
-        if trade.side == "buy" and r.iloc[-1] > mid:
+        side = self.trade_side(trade)
+
+        if side == "BUY" and r.iloc[-1] > mid:
             return True, "RSI normalized"
-        if trade.side == "sell" and r.iloc[-1] < mid:
+        if side == "SELL" and r.iloc[-1] < mid:
             return True, "RSI normalized"
         return False, None
 

@@ -24,9 +24,11 @@ class SMACrossoverStrategy(StrategyBase):
             return True, "SL/TP"
         fast = self.sma(df["close"], int(self.params.get("fast_length", 20)))
         slow = self.sma(df["close"], int(self.params.get("slow_length", 50)))
-        if trade.side == "buy" and fast.iloc[-1] < slow.iloc[-1]:
+        side = self.trade_side(trade)
+
+        if side == "BUY" and fast.iloc[-1] < slow.iloc[-1]:
             return True, "Reverse cross"
-        if trade.side == "sell" and fast.iloc[-1] > slow.iloc[-1]:
+        if side == "SELL" and fast.iloc[-1] > slow.iloc[-1]:
             return True, "Reverse cross"
         return False, None
 
