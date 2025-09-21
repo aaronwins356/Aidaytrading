@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import sqlite3
 import time
 from datetime import datetime
@@ -10,6 +12,22 @@ from pathlib import Path
 from threading import Lock
 
 from desk.config import DESK_ROOT
+
+
+class _ColourConsole:
+    RESET = "\033[0m"
+    COLOURS = {
+        "INFO": "\033[36m",
+        "WARNING": "\033[33m",
+        "ERROR": "\033[31m",
+        "TRADE": "\033[32m",
+    }
+
+    def colourise(self, level: str, message: str) -> str:
+        colour = self.COLOURS.get(level.upper())
+        if not colour:
+            return message
+        return f"{colour}{message}{self.RESET}"
 
 class EventLogger:
     """Write-ahead logging to both JSONL and SQLite stores."""
@@ -23,6 +41,22 @@ class EventLogger:
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.lock = Lock()
+        self._console_lock = Lock()
+        self._colour = _ColourConsole()
+        self._rotating_logger = logging.getLogger("desk.rotating")
+        if not self._rotating_logger.handlers:
+            handler = RotatingFileHandler(
+                logdir / "desk.log",
+                maxBytes=5_000_000,
+                backupCount=5,
+                encoding="utf-8",
+            )
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+            )
+            self._rotating_logger.addHandler(handler)
+            self._rotating_logger.propagate = False
+        self._rotating_logger.setLevel(logging.INFO)
         self._init_tables()
 
     # ---------- low-level event file ----------
@@ -91,9 +125,10 @@ class EventLogger:
                 ),
             )
             self.conn.commit()
-        print(
-            f"[LOGGER] Trade logged: {worker_name} {side} {float(qty):.4f} "
-            f"{symbol} @ {float(price):.2f} | PnL {float(pnl):.2f}"
+        self._emit_console(
+            "TRADE",
+            f"Trade logged: {worker_name} {side} {float(qty):.4f} {symbol} @ {float(price):.2f}"
+            f" | PnL {float(pnl):.2f}",
         )
 
     def log_trade_end(self, worker, symbol: str, exit_price, exit_reason: str, pnl: float) -> None:
@@ -115,9 +150,10 @@ class EventLogger:
                 ),
             )
             self.conn.commit()
-        print(
-            f"[LOGGER] Trade closed: {worker_name} {exit_reason} @ "
-            f"{float(exit_price):.2f} | Realized PnL {float(pnl):.2f}"
+        self._emit_console(
+            "TRADE",
+            f"Trade closed: {worker_name} {exit_reason} @ {float(exit_price):.2f}"
+            f" | Realized PnL {float(pnl):.2f}",
         )
 
     # ---------- equity snapshots ----------
@@ -155,6 +191,7 @@ class EventLogger:
                 ),
             )
             self.conn.commit()
+        self._emit_console(str(level).upper(), f"Feed {symbol}: {message}")
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
@@ -164,3 +201,13 @@ class EventLogger:
                 self.conn.close()
             except Exception:
                 pass
+
+    def _emit_console(self, level: str, message: str) -> None:
+        formatted = self._colour.colourise(level, f"[{level}] {message}")
+        with self._console_lock:
+            print(formatted)
+        try:
+            log_level = getattr(logging, level.upper(), logging.INFO)
+            self._rotating_logger.log(log_level, message)
+        except Exception:
+            pass

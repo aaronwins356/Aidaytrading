@@ -12,6 +12,14 @@ try:  # pragma: no cover - import guard
 except ModuleNotFoundError:  # pragma: no cover - exercised in tests
     from desk._yaml_stub import yaml  # type: ignore
 
+try:  # pragma: no cover - optional dependency
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    def load_dotenv(*_args, **_kwargs):
+        return False
+
+load_dotenv()
+
 # Path to the repository root (two levels up from this file)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DESK_ROOT = REPO_ROOT / "desk"
