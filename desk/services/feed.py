@@ -78,9 +78,17 @@ class FeedHandler:
                 local_candles = self._local_store.load(symbol, self.lookback)
             except Exception:
                 local_candles = []
-            if local_candles and not self._is_stale(local_candles):
+            if local_candles:
+                # Persist locally cached candles so the trading loop can serve
+                # them immediately without touching the REST API again.
                 self.cache[symbol] = local_candles
                 return local_candles
+            # No candles are available yet from the WebSocket feed; fall back to
+            # whatever has already been cached in-memory.
+            cached = self.cache.get(symbol, [])
+            if cached:
+                return cached
+            return []
         now = time.time()
         circuit_until = self._circuit_open_until.get(symbol)
         if circuit_until and now < circuit_until:
