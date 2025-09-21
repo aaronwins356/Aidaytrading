@@ -189,9 +189,9 @@ class TradingRuntime:
         if self._services_started:
             return
         try:
-            self.feed_updater.seed_if_needed()
+            self.feed_updater.bootstrap_from_rest(limit=100)
         except Exception as exc:  # pragma: no cover - defensive guard
-            print(f"[RUNTIME] Feed seeding failed: {exc}")
+            print(f"[RUNTIME] Feed bootstrap failed: {exc}")
         self.feed_updater.start()
         self._services_started = True
 

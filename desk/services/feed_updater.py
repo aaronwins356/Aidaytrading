@@ -310,7 +310,10 @@ class FeedUpdater:
         self._limit_clamp_log: Set[Tuple[str, str]] = set()
         self._exchange = self._build_exchange()
         self._use_websocket = bool(use_websocket)
-        self._ws_feed = self._maybe_init_websocket_feed()
+        self._ws_feed = None
+        self._rest_refresh_enabled = False
+        self._rest_bootstrap_complete = False
+        self._invalid_symbols: Set[str] = set()
 
     # ------------------------------------------------------------------
     # Exchange lifecycle helpers
@@ -930,6 +933,16 @@ class FeedUpdater:
             return
         self.logger.log_feed_event(level=level, symbol=symbol, message=message, **payload)
 
+    def _log_invalid_symbol(self, symbol: str) -> None:
+        message = f"Skipping invalid symbol: {symbol}"
+        print(f"[FeedUpdater][ERROR] {message}")
+        if self.logger is None:
+            return
+        try:
+            self.logger.log_feed_event(level="ERROR", symbol=symbol, message=message)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Seeding helpers
     # ------------------------------------------------------------------
@@ -1143,6 +1156,78 @@ class FeedUpdater:
             return True
         return False
 
+    def bootstrap_from_rest(self, *, limit: int = 100) -> None:
+        """Populate the local candle store with a single REST request per symbol."""
+
+        if self._rest_bootstrap_complete:
+            return
+
+        try:
+            safe_limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            safe_limit = 100
+
+        if self._exchange is None:
+            self._exchange = self._build_exchange()
+
+        exchange = self._exchange
+        if exchange is None:
+            self._rest_bootstrap_complete = True
+            return
+
+        markets = getattr(exchange, "markets", {}) or {}
+        valid_symbols: List[str] = []
+        for symbol in list(self.symbols):
+            if symbol in markets:
+                valid_symbols.append(symbol)
+                continue
+            self._invalid_symbols.add(symbol)
+            self._log_invalid_symbol(symbol)
+
+        if valid_symbols != self.symbols:
+            self.symbols = valid_symbols
+
+        if not valid_symbols:
+            self._rest_bootstrap_complete = True
+            return
+
+        for symbol in valid_symbols:
+            try:
+                exchange_symbol = self._resolve_symbol(exchange, symbol)
+                fetch_limit = self._normalise_fetch_limit(
+                    exchange, safe_limit, self.timeframe
+                )
+                raw = exchange.fetch_ohlcv(
+                    exchange_symbol,
+                    timeframe=self.timeframe,
+                    limit=fetch_limit,
+                )
+            except Exception as exc:  # pragma: no cover - network guard
+                self._log(
+                    "WARNING",
+                    symbol,
+                    "REST bootstrap failed",
+                    detail=self._error_message(exc),
+                )
+                continue
+
+            candles = normalize_ohlcv(raw)
+            if not candles:
+                continue
+
+            batch = candles[-safe_limit:]
+            inserted = self.store.append(symbol, batch)
+            if inserted:
+                self._log(
+                    "INFO",
+                    symbol,
+                    f"Bootstrapped {inserted} candles from REST",
+                )
+
+        self._rest_bootstrap_complete = True
+        # Rebuild the WebSocket feed so only valid symbols are subscribed.
+        self._ws_feed = None
+
     def seed_if_needed(self) -> None:
         for symbol in self.symbols:
             try:
@@ -1338,6 +1423,8 @@ class FeedUpdater:
         raise RuntimeError(f"Failed to fetch candles for {symbol}")
 
     def _refresh_symbol(self, symbol: str) -> None:
+        if not self._rest_refresh_enabled:
+            return
         skip_until = self._symbol_skip_until.get(symbol)
         now = time.time()
         if skip_until and skip_until > now:
@@ -1419,6 +1506,9 @@ class FeedUpdater:
     # ------------------------------------------------------------------
     def _run(self) -> None:  # pragma: no cover - threading
         while not self._stop_event.is_set():
+            if not self._rest_refresh_enabled:
+                self._stop_event.wait(self.interval_seconds)
+                continue
             start = time.time()
             for symbol in self.symbols:
                 try:
@@ -1436,13 +1526,26 @@ class FeedUpdater:
                 self._stop_event.wait(remaining)
 
     def start(self) -> None:  # pragma: no cover - threading
-        if self._thread and self._thread.is_alive():
+        self.bootstrap_from_rest(limit=100)
+
+        if self._rest_refresh_enabled:
+            if self._thread and self._thread.is_alive():
+                pass
+            else:
+                self._stop_event.clear()
+                self._thread = threading.Thread(
+                    target=self._run, name="FeedUpdater", daemon=True
+                )
+                self._thread.start()
+        else:
+            self._stop_event.clear()
+            self._thread = None
+
+        if not self._use_websocket:
             return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run, name="FeedUpdater", daemon=True
-        )
-        self._thread.start()
+
+        if self._ws_feed is None:
+            self._ws_feed = self._maybe_init_websocket_feed()
         if self._ws_feed is not None:
             self._ws_feed.start()
 
