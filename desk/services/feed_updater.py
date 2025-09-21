@@ -482,18 +482,35 @@ class FeedUpdater:
             return value / 1000.0
         return value
 
-    def _candles_are_stale(self, candles: List[Dict[str, float]]) -> bool:
+    def _current_time_seconds(self, exchange: Optional[object] = None) -> float:
+        """Return the best available notion of "now" in epoch seconds."""
+
+        source = exchange or self._exchange
+        milliseconds = getattr(source, "milliseconds", None)
+        if callable(milliseconds):  # pragma: no branch - tiny helper
+            try:
+                return float(milliseconds()) / 1000.0
+            except Exception:
+                # Fallback to wall clock time if the exchange clock fails.
+                pass
+        return time.time()
+
+    def _candles_are_stale(
+        self, candles: List[Dict[str, float]], *, exchange: Optional[object] = None
+    ) -> bool:
         if not candles:
             return True
         last_ts = self._normalize_timestamp(float(candles[-1].get("timestamp", 0.0)))
-        age = time.time() - last_ts
+        now = self._current_time_seconds(exchange)
+        age = now - last_ts
         return age > self._stale_threshold
 
     def _symbol_stale(self, latest: Optional[int]) -> bool:
         if latest is None:
             return True
         ts = self._normalize_timestamp(float(latest))
-        return (time.time() - ts) > self._stale_threshold
+        now = self._current_time_seconds()
+        return (now - ts) > self._stale_threshold
 
     def _default_price(self, symbol: str) -> float:
         sym = symbol.upper()
@@ -628,10 +645,11 @@ class FeedUpdater:
             )
             return []
         candles = normalize_ohlcv(raw)
-        if candles and self._candles_are_stale(candles):
-            age = time.time() - self._normalize_timestamp(
-                float(candles[-1].get("timestamp", 0.0))
-            )
+        if candles and self._candles_are_stale(candles, exchange=exchange):
+            last_ts = self._normalize_timestamp(float(candles[-1].get("timestamp", 0.0)))
+            age = self._current_time_seconds(exchange) - last_ts
+            if age < 0:
+                age = 0.0
             self._log(
                 "WARNING",
                 symbol,
@@ -786,10 +804,13 @@ class FeedUpdater:
                     since=since,
                 )
                 candles = normalize_ohlcv(raw)
-                if candles and self._candles_are_stale(candles):
-                    age = time.time() - self._normalize_timestamp(
+                if candles and self._candles_are_stale(candles, exchange=self._exchange):
+                    last_ts = self._normalize_timestamp(
                         float(candles[-1].get("timestamp", 0.0))
                     )
+                    age = self._current_time_seconds() - last_ts
+                    if age < 0:
+                        age = 0.0
                     raise RuntimeError(
                         f"Stale market data for {symbol} (age={age:.2f}s)"
                     )
