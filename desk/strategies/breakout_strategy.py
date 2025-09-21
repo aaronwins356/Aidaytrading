@@ -108,14 +108,16 @@ class BreakoutStrategy(StrategyBase):
         atr_val = float(atr.iloc[-1]) if len(atr.dropna()) else price * 0.01
         target_multiple = float(self.params.get("target_multiple", 1.75))
 
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "Range mid stop"
             if price >= trade.entry_price + atr_val * target_multiple:
                 return True, "ATR target"
             if price < trade.entry_price and price < trade.meta.get("range_high", trade.entry_price):
                 return True, "Failed breakout"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "Range mid stop"
             if price <= trade.entry_price - atr_val * target_multiple:

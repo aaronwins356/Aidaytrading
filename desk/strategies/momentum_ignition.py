@@ -68,12 +68,14 @@ class MomentumIgnitionStrategy(StrategyBase):
     def check_exit(self, trade: Trade, df: pd.DataFrame):
         price = float(df["close"].iloc[-1])
         target_pct = float(self.params.get("target_pct", 0.0075))
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "Broke prior low"
             if price >= trade.entry_price * (1 + target_pct):
                 return True, "Momentum target"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "Broke prior high"
             if price <= trade.entry_price * (1 - target_pct):

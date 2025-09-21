@@ -71,12 +71,14 @@ class MeanReversionBollingerStrategy(StrategyBase):
         mid_val = float(mid.iloc[-1])
         rsi_val = float(rsi_series.iloc[-1])
 
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "Bollinger stop"
             if price >= mid_val or rsi_val >= 50:
                 return True, "Re-entered band"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "Bollinger stop"
             if price <= mid_val or rsi_val <= 50:

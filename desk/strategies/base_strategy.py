@@ -100,6 +100,18 @@ class StrategyBase(ABC):
     def momentum(s: pd.Series, n: int = 10) -> pd.Series:
         return s / s.shift(n) - 1.0
 
+    @staticmethod
+    def trade_side(trade: Trade) -> str:
+        """Return the normalized trade side.
+
+        Strategies may receive ``Trade`` instances with inconsistent casing for
+        the ``side`` attribute depending on the upstream source.  Normalizing
+        here avoids repeating ``upper()`` calls in every strategy and ensures
+        defensive handling of missing values.
+        """
+
+        return str(getattr(trade, "side", "")).upper()
+
     # ---------- risk helpers ----------
     def default_sl_tp(self, price: float) -> Tuple[float, float]:
         sl_pct = float(self.params.get("stop_loss_pct", 0.01))

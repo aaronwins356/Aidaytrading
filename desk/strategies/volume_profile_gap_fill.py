@@ -98,12 +98,14 @@ class VolumeProfileGapFillStrategy(StrategyBase):
         context = getattr(self, "_context", {})
         zone_low = float(context.get("zone_low", trade.stop_loss))
         zone_high = float(context.get("zone_high", trade.take_profit))
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "Gap stop"
             if price >= zone_high:
                 return True, "Gap filled"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "Gap stop"
             if price <= zone_low:

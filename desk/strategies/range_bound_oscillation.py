@@ -78,14 +78,16 @@ class RangeBoundOscillationStrategy(StrategyBase):
         mid = float(context.get("mid", (trade.take_profit + trade.stop_loss) / 2))
         high = float(context.get("high", trade.take_profit))
         low = float(context.get("low", trade.stop_loss))
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "Range floor broken"
             if price >= mid:
                 return True, "Mid-range exit"
             if price >= high:
                 return True, "Breakout abort"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "Range ceiling broken"
             if price <= mid:

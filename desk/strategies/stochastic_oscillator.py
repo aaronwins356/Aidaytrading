@@ -22,9 +22,11 @@ class StochasticOscillatorStrategy(StrategyBase):
         price = float(df["close"].iloc[-1])
         if price <= trade.stop_loss or price >= trade.take_profit:
             return True, "SL/TP"
-        if trade.side == "buy" and k.iloc[-1] > 80 and k.iloc[-1] < d.iloc[-1]:
+        side = self.trade_side(trade)
+
+        if side == "BUY" and k.iloc[-1] > 80 and k.iloc[-1] < d.iloc[-1]:
             return True, "Stoch cross down"
-        if trade.side == "sell" and k.iloc[-1] < 20 and k.iloc[-1] > d.iloc[-1]:
+        if side == "SELL" and k.iloc[-1] < 20 and k.iloc[-1] > d.iloc[-1]:
             return True, "Stoch cross up"
         return False, None
 

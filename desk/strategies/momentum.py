@@ -20,9 +20,11 @@ class MomentumStrategy(StrategyBase):
         if price <= trade.stop_loss or price >= trade.take_profit:
             return True, "SL/TP"
         m = self.momentum(df["close"], int(self.params.get("length", 10)))
-        if trade.side == "buy" and m.iloc[-1] < 0:
+        side = self.trade_side(trade)
+
+        if side == "BUY" and m.iloc[-1] < 0:
             return True, "Momentum faded"
-        if trade.side == "sell" and m.iloc[-1] > 0:
+        if side == "SELL" and m.iloc[-1] > 0:
             return True, "Momentum faded"
         return False, None
 

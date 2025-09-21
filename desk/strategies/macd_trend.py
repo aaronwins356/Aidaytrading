@@ -26,9 +26,11 @@ class MACDTrendStrategy(StrategyBase):
                                  int(self.params.get("fast", 12)),
                                  int(self.params.get("slow", 26)),
                                  int(self.params.get("signal", 9)))
-        if trade.side == "buy" and line.iloc[-1] < sig.iloc[-1]:
+        side = self.trade_side(trade)
+
+        if side == "BUY" and line.iloc[-1] < sig.iloc[-1]:
             return True, "MACD flip"
-        if trade.side == "sell" and line.iloc[-1] > sig.iloc[-1]:
+        if side == "SELL" and line.iloc[-1] > sig.iloc[-1]:
             return True, "MACD flip"
         return False, None
 

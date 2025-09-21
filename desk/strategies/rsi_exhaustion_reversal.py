@@ -72,12 +72,14 @@ class RSIExhaustionReversalStrategy(StrategyBase):
         rsi_series = self.rsi(df["close"], int(self.params.get("rsi_period", 14)))
         rsi_val = float(rsi_series.iloc[-1])
         price = float(df["close"].iloc[-1])
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if price <= trade.stop_loss:
                 return True, "Stop"
             if rsi_val >= 50:
                 return True, "RSI normalized"
-        else:
+        elif side == "SELL":
             if price >= trade.stop_loss:
                 return True, "Stop"
             if rsi_val <= 50:

@@ -81,12 +81,14 @@ class CorrelationDivergenceStrategy(StrategyBase):
         asset_returns = df["close"].pct_change(lookback)
         spread = float(ref_returns.iloc[-1] - asset_returns.iloc[-1])
         threshold = float(self.params.get("threshold", 0.01))
-        if trade.side == "buy":
+        side = self.trade_side(trade)
+
+        if side == "BUY":
             if spread <= threshold * 0.2:
                 return True, "Spread normalized"
             if df["close"].iloc[-1] <= trade.stop_loss:
                 return True, "Stop"
-        else:
+        elif side == "SELL":
             if spread >= -threshold * 0.2:
                 return True, "Spread normalized"
             if df["close"].iloc[-1] >= trade.stop_loss:
