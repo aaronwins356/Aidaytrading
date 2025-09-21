@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import random
 import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:  # pragma: no cover - optional dependency guard
     import ccxt  # type: ignore
@@ -27,6 +28,10 @@ from desk.services.logger import EventLogger
 
 class ExchangeBlockedError(RuntimeError):
     """Raised when an exchange rejects requests due to jurisdiction limits."""
+
+
+class StaleDataError(RuntimeError):
+    """Raised when an exchange keeps returning out-of-date candles."""
 
 
 def _timeframe_to_seconds(timeframe: str) -> float:
@@ -215,7 +220,7 @@ class FeedUpdater:
         self._thread: Optional[threading.Thread] = None
         self._timeframe_seconds = max(1.0, _timeframe_to_seconds(timeframe))
 
-        default_seed = {
+        default_seed: Dict[str, Any] = {
             "warm_candles": 500,
             "synthetic_candles": 200,
             "allow_synthetic": True,
@@ -227,20 +232,41 @@ class FeedUpdater:
             "synthetic_volume_std": 2_500.0,
             "seed_length": 1_000,
             "seed_timeframe": "1m",
+            "fallback_timeframes": [],
         }
         if seed_config:
             for key, value in seed_config.items():
                 if value is None:
                     continue
-                try:
-                    if key in {"warm_candles", "synthetic_candles", "seed_length"}:
+                if key in {"warm_candles", "synthetic_candles", "seed_length"}:
+                    try:
                         default_seed[key] = int(float(value))
-                    elif key in {"allow_synthetic"}:
-                        default_seed[key] = bool(value)
+                    except (TypeError, ValueError):
+                        continue
+                elif key in {"allow_synthetic"}:
+                    default_seed[key] = bool(value)
+                elif key in {"seed_timeframe"}:
+                    default_seed[key] = str(value)
+                elif key == "fallback_timeframes":
+                    if isinstance(value, (list, tuple, set)):
+                        default_seed[key] = [
+                            str(item)
+                            for item in value
+                            if str(item or "").strip()
+                        ]
+                    elif isinstance(value, str):
+                        default_seed[key] = [
+                            part.strip()
+                            for part in value.split(",")
+                            if part.strip()
+                        ]
                     else:
+                        continue
+                else:
+                    try:
                         default_seed[key] = float(value)
-                except (TypeError, ValueError):
-                    continue
+                    except (TypeError, ValueError):
+                        continue
         self.seed_config = default_seed
         try:
             self._seed_length = max(
@@ -271,7 +297,10 @@ class FeedUpdater:
         self._seed_timeframe = str(
             self.seed_config.get("seed_timeframe") or self.timeframe
         )
+        self._timeframe_fallbacks = self._build_timeframe_fallbacks(self.timeframe)
         self._rng = random.Random()
+        self._resolved_symbols: Dict[Tuple[str, str], str] = {}
+        self._symbol_skip_until: Dict[str, float] = {}
         self._exchange = self._build_exchange()
 
     # ------------------------------------------------------------------
@@ -292,6 +321,60 @@ class FeedUpdater:
             seen.add("kraken")
             candidates.append("kraken")
         return candidates
+
+    def _build_timeframe_fallbacks(self, primary: str) -> List[str]:
+        """Return a prioritized list of timeframes to try when fetching candles.
+
+        Smaller intervals are prioritised because they can be aggregated back to
+        the requested timeframe, ensuring we maintain consistent candle widths.
+        User-provided fallbacks are respected ahead of automatic defaults.
+        """
+
+        cleaned_primary = str(primary or "").strip() or "1m"
+        seen = {cleaned_primary}
+        ordered: List[str] = [cleaned_primary]
+
+        # Respect explicit configuration first so operators can tune behaviour
+        # for niche markets or exchanges without relying on code changes.
+        for candidate in self.seed_config.get("fallback_timeframes", []):
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            if text in seen:
+                continue
+            ordered.append(text)
+            seen.add(text)
+
+        # Kraken supports a small set of discrete granularities; ordering these
+        # from highest to lowest resolution lets us degrade gracefully.
+        default_order = [
+            "15s",
+            "30s",
+            "1m",
+            "3m",
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "2h",
+            "4h",
+            "6h",
+            "12h",
+            "1d",
+        ]
+        primary_seconds = _timeframe_to_seconds(cleaned_primary)
+        fallback_defaults = sorted(
+            (
+                tf
+                for tf in default_order
+                if tf not in seen and _timeframe_to_seconds(tf) < primary_seconds
+            ),
+            key=lambda tf: primary_seconds - _timeframe_to_seconds(tf),
+        )
+        for tf in fallback_defaults:
+            ordered.append(tf)
+            seen.add(tf)
+        return ordered
 
     @staticmethod
     def _error_message(exc: Exception) -> str:
@@ -356,6 +439,201 @@ class FeedUpdater:
                     raise ExchangeBlockedError(self._error_message(exc)) from exc
                 raise
         return exchange
+
+    @staticmethod
+    def _currency_aliases(code: str) -> List[str]:
+        """Return a list of exchange-specific aliases for a currency code."""
+
+        normalized = str(code or "").upper()
+        aliases = {normalized}
+        known = {
+            "BTC": {"BTC", "XBT"},
+            "XBT": {"XBT", "BTC"},
+            "ETH": {"ETH", "XETH"},
+            "XETH": {"ETH", "XETH"},
+            "LTC": {"LTC", "XLTC"},
+            "XLTC": {"LTC", "XLTC"},
+            "BCH": {"BCH", "XBCH"},
+            "XBCH": {"BCH", "XBCH"},
+            "XRP": {"XRP", "XXRP"},
+            "XXRP": {"XRP", "XXRP"},
+            "ADA": {"ADA", "XADA"},
+            "XADA": {"ADA", "XADA"},
+            "XLM": {"XLM", "XXLM"},
+            "XXLM": {"XLM", "XXLM"},
+        }
+        aliases.update(known.get(normalized, {normalized}))
+        if normalized.startswith("X") and len(normalized) == 4:
+            aliases.add(normalized[1:])
+        if normalized.startswith("Z") and len(normalized) == 4:
+            aliases.add(normalized[1:])
+        if len(normalized) == 3:
+            aliases.add(f"X{normalized}")
+            aliases.add(f"Z{normalized}")
+        return sorted({alias for alias in aliases if alias})
+
+    def _resolve_symbol(self, exchange: object, symbol: str) -> str:
+        """Translate user symbols into exchange-specific market symbols."""
+
+        if exchange is None:
+            return symbol
+        exchange_id = str(getattr(exchange, "id", "") or self._active_exchange_name or "")
+        cache_key = (exchange_id, symbol)
+        cached = self._resolved_symbols.get(cache_key)
+        if cached:
+            return cached
+
+        markets = getattr(exchange, "markets", None)
+        if not isinstance(markets, dict) or not markets:
+            self._resolved_symbols[cache_key] = symbol
+            return symbol
+
+        # Direct lookups first as they are the most common path once markets are
+        # loaded by ccxt.
+        direct = markets.get(symbol)
+        if isinstance(direct, dict):
+            resolved = str(direct.get("symbol") or symbol)
+            self._resolved_symbols[cache_key] = resolved
+            if resolved != symbol:
+                self._log(
+                    "INFO",
+                    symbol,
+                    f"Resolved exchange symbol to {resolved}",
+                )
+            return resolved
+
+        normalized = symbol.lower()
+        for market_symbol, market in markets.items():
+            canonical = str(market.get("symbol") or market_symbol)
+            aliases = {canonical.lower(), str(market_symbol).lower()}
+            altname = market.get("altname")
+            if altname:
+                aliases.add(str(altname).lower())
+            market_id = market.get("id")
+            if market_id:
+                aliases.add(str(market_id).lower())
+            base = str(market.get("base") or "").upper()
+            quote = str(market.get("quote") or "").upper()
+            if base and quote:
+                for b_alias in self._currency_aliases(base):
+                    for q_alias in self._currency_aliases(quote):
+                        aliases.add(f"{b_alias}/{q_alias}".lower())
+            base_id = str(market.get("baseId") or "").upper()
+            quote_id = str(market.get("quoteId") or "").upper()
+            if base_id and quote_id:
+                aliases.add(f"{base_id}/{quote_id}".lower())
+            if normalized in aliases:
+                self._resolved_symbols[cache_key] = canonical
+                if canonical != symbol:
+                    self._log(
+                        "INFO",
+                        symbol,
+                        f"Resolved exchange symbol to {canonical}",
+                    )
+                return canonical
+
+        # Fall back to ccxt's own safe_symbol helper if available.
+        safe_symbol = getattr(exchange, "safe_symbol", None)
+        if callable(safe_symbol):
+            try:
+                resolved = str(safe_symbol(symbol))
+                if resolved:
+                    self._resolved_symbols[cache_key] = resolved
+                    if resolved != symbol:
+                        self._log(
+                            "INFO",
+                            symbol,
+                            f"Resolved exchange symbol to {resolved}",
+                        )
+                    return resolved
+            except Exception:
+                pass
+
+        self._resolved_symbols[cache_key] = symbol
+        return symbol
+
+    def _candidate_timeframes(self, override: Optional[str] = None) -> List[str]:
+        """Return ordered timeframes to try for a fetch request."""
+
+        if override:
+            cleaned = str(override).strip()
+            if not cleaned:
+                return list(self._timeframe_fallbacks)
+            candidates = [cleaned]
+            candidates.extend(
+                tf for tf in self._timeframe_fallbacks if tf not in {cleaned}
+            )
+            return candidates
+        return list(self._timeframe_fallbacks)
+
+    def _resample_candles(
+        self,
+        candles: List[Dict[str, float]],
+        source_timeframe: str,
+        target_timeframe: str,
+    ) -> List[Dict[str, float]]:
+        """Aggregate higher resolution candles to the requested timeframe."""
+
+        if not candles:
+            return []
+        source_seconds = max(1.0, _timeframe_to_seconds(source_timeframe))
+        target_seconds = max(1.0, _timeframe_to_seconds(target_timeframe))
+        if math.isclose(source_seconds, target_seconds):
+            return candles
+        if source_seconds > target_seconds:
+            # Unable to reconstruct higher resolution candles from lower ones.
+            return []
+
+        buckets: Dict[int, List[Dict[str, float]]] = {}
+        for candle in candles:
+            ts = self._normalize_timestamp(float(candle.get("timestamp", 0.0)))
+            bucket_start = int(ts // target_seconds * target_seconds)
+            buckets.setdefault(bucket_start, []).append(candle)
+
+        expected = max(1, int(round(target_seconds / source_seconds)))
+        aggregated: List[Dict[str, float]] = []
+        for bucket_start in sorted(buckets):
+            bucket = sorted(
+                buckets[bucket_start],
+                key=lambda item: self._normalize_timestamp(
+                    float(item.get("timestamp", 0.0))
+                ),
+            )
+            if len(bucket) < expected:
+                continue
+            open_price = float(bucket[0].get("open", 0.0))
+            high_price = max(float(item.get("high", 0.0)) for item in bucket)
+            low_price = min(float(item.get("low", 0.0)) for item in bucket)
+            close_price = float(bucket[-1].get("close", 0.0))
+            volume = sum(float(item.get("volume", 0.0)) for item in bucket)
+            aggregated.append(
+                {
+                    "timestamp": float(bucket_start * 1000.0),
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": volume,
+                }
+            )
+        return aggregated
+
+    def _mark_symbol_skip(
+        self, symbol: str, *, reason: str, duration: Optional[float] = None
+    ) -> None:
+        """Temporarily pause refreshing a misbehaving market symbol."""
+
+        delay = duration if duration is not None else max(
+            self.interval_seconds, self._timeframe_seconds
+        )
+        retry_at = time.time() + delay
+        self._symbol_skip_until[symbol] = retry_at
+        self._log(
+            "WARNING",
+            symbol,
+            "Temporarily skipping symbol",
+            detail=f"reason={reason} retry_at={retry_at:.0f}",
+        )
 
     def _ensure_exchange(self, name: str, *, rebuild: bool = False):  # pragma: no cover - network heavy
         key = name.lower()
@@ -632,7 +910,7 @@ class FeedUpdater:
             return []
         try:
             raw = exchange.fetch_ohlcv(
-                symbol,
+                self._resolve_symbol(exchange, symbol),
                 timeframe=self._seed_timeframe,
                 limit=limit,
             )
@@ -790,73 +1068,126 @@ class FeedUpdater:
     ) -> List[Dict[str, float]]:
         if self._exchange is None:
             self._exchange = self._build_exchange()
-        attempt = 0
-        backoff = 1.0
+        target_timeframe = timeframe or self.timeframe
         last_exc: Exception | None = None
-        while attempt < self.max_retries:
-            attempt += 1
-            try:
-                active_timeframe = timeframe or self.timeframe
-                raw = self._exchange.fetch_ohlcv(
-                    symbol,
-                    timeframe=active_timeframe,
-                    limit=limit,
-                    since=since,
-                )
-                candles = normalize_ohlcv(raw)
-                if candles and self._candles_are_stale(candles, exchange=self._exchange):
-                    last_ts = self._normalize_timestamp(
-                        float(candles[-1].get("timestamp", 0.0))
+        stale_details: List[str] = []
+
+        for active_timeframe in self._candidate_timeframes(timeframe):
+            attempt = 0
+            backoff = 1.0
+            while attempt < self.max_retries:
+                attempt += 1
+                try:
+                    exchange_symbol = self._resolve_symbol(self._exchange, symbol)
+                    raw = self._exchange.fetch_ohlcv(
+                        exchange_symbol,
+                        timeframe=active_timeframe,
+                        limit=limit,
+                        since=since,
                     )
-                    age = self._current_time_seconds() - last_ts
-                    if age < 0:
-                        age = 0.0
-                    raise RuntimeError(
-                        f"Stale market data for {symbol} (age={age:.2f}s)"
-                    )
-                if candles:
+                    candles = normalize_ohlcv(raw)
+                    if not candles:
+                        break
+                    if self._candles_are_stale(
+                        candles, exchange=self._exchange
+                    ):
+                        last_ts = self._normalize_timestamp(
+                            float(candles[-1].get("timestamp", 0.0))
+                        )
+                        age = self._current_time_seconds() - last_ts
+                        if age < 0:
+                            age = 0.0
+                        stale_details.append(f"{active_timeframe}:{age:.2f}s")
+                        self._log(
+                            "WARNING",
+                            symbol,
+                            "Received stale candles",
+                            detail=f"timeframe={active_timeframe} age={age:.2f}s",
+                        )
+                        break
+                    if active_timeframe != target_timeframe:
+                        candles = self._resample_candles(
+                            candles,
+                            source_timeframe=active_timeframe,
+                            target_timeframe=target_timeframe,
+                        )
+                        if not candles:
+                            break
                     return candles
-            except Exception as exc:  # pragma: no cover - network guard
-                last_exc = exc
-                detail = self._error_message(exc)
-                self._log(
-                    "WARNING",
-                    symbol,
-                    "Exchange fetch failed",
-                    attempt=attempt,
-                    detail=detail,
-                )
-                if self._active_exchange_name and self._is_geo_blocked(exc):
-                    self._mark_exchange_blocked(
-                        self._active_exchange_name,
-                        detail,
-                        symbol=symbol,
+                except Exception as exc:  # pragma: no cover - network guard
+                    last_exc = exc
+                    detail = self._error_message(exc)
+                    self._log(
+                        "WARNING",
+                        symbol,
+                        "Exchange fetch failed",
+                        attempt=attempt,
+                        detail=detail,
                     )
-                    if self._switch_exchange(symbol, detail):
-                        backoff = 1.0
-                        continue
-                elif self._should_failover(exc, attempt):
-                    if self._switch_exchange(symbol, detail):
-                        backoff = 1.0
-                        continue
-                if attempt < self.max_retries:
-                    time.sleep(min(backoff, self.max_backoff))
-                    backoff = min(self.max_backoff, backoff * 2)
+                    if self._active_exchange_name and self._is_geo_blocked(exc):
+                        self._mark_exchange_blocked(
+                            self._active_exchange_name,
+                            detail,
+                            symbol=symbol,
+                        )
+                        if self._switch_exchange(symbol, detail):
+                            break
+                    elif self._should_failover(exc, attempt):
+                        if self._switch_exchange(symbol, detail):
+                            break
+                    if attempt < self.max_retries:
+                        time.sleep(min(backoff, self.max_backoff))
+                        backoff = min(self.max_backoff, backoff * 2)
         fallback = self._fallback_candles(
             symbol, limit, allow_synthetic=allow_synthetic
         )
         if fallback:
             return fallback
+        if stale_details:
+            message = ", ".join(stale_details)
+            raise StaleDataError(
+                f"Exchange returned stale candles for {symbol} ({message})"
+            ) from last_exc
         if last_exc is not None:
             raise RuntimeError(f"Failed to fetch candles for {symbol}") from last_exc
         raise RuntimeError(f"Failed to fetch candles for {symbol}")
 
     def _refresh_symbol(self, symbol: str) -> None:
+        skip_until = self._symbol_skip_until.get(symbol)
+        now = time.time()
+        if skip_until and skip_until > now:
+            self._log(
+                "INFO",
+                symbol,
+                "Skipping refresh due to previous stale data",
+                detail=f"retry_at={skip_until:.0f}",
+            )
+            return
+        if skip_until and skip_until <= now:
+            self._symbol_skip_until.pop(symbol, None)
+
         latest = self.store.latest_timestamp(symbol)
         since = int(latest + 1) if latest is not None else None
         limit = 250 if latest is None else 20
         try:
             candles = self._fetch(symbol, limit=limit, since=since)
+        except StaleDataError as exc:
+            self._log(
+                "WARNING",
+                symbol,
+                "Stale candles detected; pausing symbol",
+                detail=self._error_message(exc),
+            )
+            self._mark_symbol_skip(
+                symbol,
+                reason="stale_data",
+                duration=max(self._timeframe_seconds * 2, self.interval_seconds),
+            )
+            if self.mode.lower() == "paper" and (
+                latest is None or self._symbol_stale(latest)
+            ):
+                self._maybe_seed_symbol(symbol, reason="stale_skip")
+            return
         except Exception as exc:  # pragma: no cover - network guard
             self._log(
                 "ERROR",
