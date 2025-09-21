@@ -171,6 +171,11 @@ class TradingRuntime:
                 if risk_cfg.get("max_position_value")
                 else None
             ),
+            equity_floor=(
+                float(risk_cfg.get("equity_floor"))
+                if risk_cfg.get("equity_floor")
+                else None
+            ),
         )
         self.executor = ExecutionEngine(
             self.broker,
