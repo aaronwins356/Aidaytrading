@@ -14,12 +14,18 @@ class DummyExchange:
         self.balance_payload: Dict[str, Any] = {"total": {"USD": 500.0, "BTC": 0.01}}
         self.orders: list[Dict[str, Any]] = []
         self.token_calls = 0
-        self.markets = {
+        self.markets: Dict[str, Dict[str, Any]] = {
             "BTC/USD": {
-                "info": {"wsname": "XBT/USD"},
+                "symbol": "BTC/USD",
+                "info": {"wsname": "XBT/USD", "altname": "XXBTZUSD"},
                 "base": "BTC",
                 "quote": "USD",
+                "limits": {"amount": {"min": 0.0001}},
+                "precision": {"amount": 4},
             }
+        }
+        self.markets_by_id: Dict[str, Dict[str, Any]] = {
+            "XXBTZUSD": {"symbol": "BTC/USD"}
         }
         self.closed = False
 

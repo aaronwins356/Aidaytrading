@@ -23,6 +23,7 @@ from desk.services import (
     TelemetryClient,
     Worker,
 )
+from desk.services.feed_updater import CandleStore
 
 
 @dataclass
@@ -101,6 +102,24 @@ class TradingRuntime:
         if not feed_symbols:
             feed_symbols = ["BTC/USD"]
 
+        store = CandleStore()
+
+        self.broker = KrakenBroker(
+            api_key=api_key,
+            api_secret=api_secret,
+            telemetry=self.telemetry,
+            event_logger=self.logger,
+            request_timeout=request_timeout,
+            session_config=session_config,
+            symbols=feed_symbols,
+            timeframe=feed_timeframe,
+            candle_store=store,
+        )
+
+        normalized_symbols = self.broker.normalise_symbols(feed_symbols)
+        if normalized_symbols:
+            feed_symbols = normalized_symbols
+
         self.feed_updater = FeedUpdater(
             exchange="kraken",
             symbols=feed_symbols,
@@ -112,18 +131,7 @@ class TradingRuntime:
             logger=self.logger,
             fallback_exchanges=[],
             seed_config=data_seed_cfg,
-        )
-
-        self.broker = KrakenBroker(
-            api_key=api_key,
-            api_secret=api_secret,
-            telemetry=self.telemetry,
-            event_logger=self.logger,
-            request_timeout=request_timeout,
-            session_config=session_config,
-            symbols=feed_symbols,
-            timeframe=feed_timeframe,
-            candle_store=self.feed_updater.store,
+            store=store,
         )
 
         self._services_started = False
@@ -239,6 +247,14 @@ class TradingRuntime:
                 worker_cfg = copy.deepcopy(cfg)
                 if risk_profile and not worker_cfg.get("risk_profile"):
                     worker_cfg["risk_profile"] = copy.deepcopy(risk_profile)
+                symbol = worker_cfg.get("symbol")
+                if symbol:
+                    try:
+                        worker_cfg["symbol"] = self.broker.resolve_symbol(symbol)
+                    except Exception as exc:
+                        print(
+                            f"[RUNTIME] Failed to normalise symbol {symbol}: {exc}"
+                        )
                 worker = Worker(
                     name=worker_cfg["name"],
                     symbol=worker_cfg["symbol"],
@@ -249,6 +265,8 @@ class TradingRuntime:
                     risk_engine=self.risk_engine,
                     ml_weight=self._ml_weight,
                 )
+                minimum, precision = self.broker.minimum_order_config(worker.symbol)
+                worker.set_minimum_order_size(minimum, precision=precision)
                 workers.append(worker)
             except Exception as exc:  # pragma: no cover - defensive bootstrap
                 print(f"[RUNTIME] Failed to load worker {cfg.get('name')}: {exc}")
