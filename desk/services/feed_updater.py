@@ -25,6 +25,11 @@ from desk.config import DESK_ROOT
 from desk.data import normalize_ohlcv
 from desk.services.logger import EventLogger
 
+try:  # pragma: no cover - optional runtime dependency
+    from desk.services.kraken_ws import KrakenWebSocketFeed
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests
+    KrakenWebSocketFeed = None  # type: ignore[misc]
+
 
 class ExchangeBlockedError(RuntimeError):
     """Raised when an exchange rejects requests due to jurisdiction limits."""
@@ -194,6 +199,7 @@ class FeedUpdater:
         max_backoff: float = 30.0,
         fallback_exchanges: Optional[Iterable[str]] = None,
         seed_config: Optional[Dict[str, float]] = None,
+        use_websocket: bool = True,
     ) -> None:
         self.exchange_name = str(exchange)
         self.symbols = [str(symbol) for symbol in symbols]
@@ -303,6 +309,8 @@ class FeedUpdater:
         self._symbol_skip_until: Dict[str, float] = {}
         self._limit_clamp_log: Set[Tuple[str, str]] = set()
         self._exchange = self._build_exchange()
+        self._use_websocket = bool(use_websocket)
+        self._ws_feed = self._maybe_init_websocket_feed()
 
     # ------------------------------------------------------------------
     # Exchange lifecycle helpers
@@ -322,6 +330,113 @@ class FeedUpdater:
             seen.add("kraken")
             candidates.append("kraken")
         return candidates
+
+    def _kraken_ws_symbol(self, exchange: object, symbol: str) -> Optional[str]:
+        markets = getattr(exchange, "markets", {})
+        if not isinstance(markets, dict):
+            return None
+        resolved = self._resolve_symbol(exchange, symbol)
+        candidates = [resolved, symbol]
+        normalised: List[str] = []
+        seen: Set[str] = set()
+        for candidate in candidates:
+            if not candidate:
+                continue
+            for variant in {candidate, candidate.upper(), candidate.lower()}:
+                if variant in seen:
+                    continue
+                seen.add(variant)
+                normalised.append(variant)
+        market: Optional[Dict[str, Any]] = None
+        for candidate in normalised:
+            market = markets.get(candidate)
+            if market is not None:
+                break
+        if market is None:
+            return None
+        info = market.get("info")
+        if isinstance(info, dict):
+            wsname = info.get("wsname") or info.get("wsName")
+            if wsname:
+                return str(wsname)
+            altname = info.get("altname")
+            if altname:
+                return str(altname)
+        for key in ("wsname", "altname"):
+            value = market.get(key)
+            if value:
+                return str(value)
+        base = str(market.get("baseId") or market.get("base") or "").upper()
+        quote = str(market.get("quoteId") or market.get("quote") or "").upper()
+        if base and quote:
+            base_aliases = self._currency_aliases(base)
+            quote_aliases = self._currency_aliases(quote)
+
+            def _prefer(aliases: List[str]) -> str:
+                for entry in aliases:
+                    if entry.startswith(("X", "Z")):
+                        return entry
+                return aliases[0]
+
+            return f"{_prefer(base_aliases)}/{_prefer(quote_aliases)}"
+        return None
+
+    def _kraken_ws_pairs(self) -> Dict[str, str]:
+        if not self._use_websocket or KrakenWebSocketFeed is None:
+            return {}
+        try:
+            exchange = self._ensure_exchange("kraken")
+        except Exception as exc:  # pragma: no cover - network guard
+            self._log(
+                "WARNING",
+                "ALL",
+                "Unable to prepare Kraken WebSocket feed",
+                detail=self._error_message(exc),
+            )
+            return {}
+        pairs: Dict[str, str] = {}
+        for symbol in self.symbols:
+            ws_name = self._kraken_ws_symbol(exchange, symbol)
+            if not ws_name:
+                self._log(
+                    "WARNING",
+                    symbol,
+                    "Skipping Kraken WebSocket subscription",
+                    detail="symbol_unresolved",
+                )
+                continue
+            pairs[ws_name] = symbol
+        return pairs
+
+    def _maybe_init_websocket_feed(self):
+        if not self._use_websocket:
+            return None
+        if KrakenWebSocketFeed is None:
+            self._log(
+                "WARNING",
+                "ALL",
+                "Kraken WebSocket client unavailable",
+                detail="dependency_missing",
+            )
+            return None
+        pairs = self._kraken_ws_pairs()
+        if not pairs:
+            return None
+        try:
+            return KrakenWebSocketFeed(
+                pairs=pairs,
+                timeframe=self.timeframe,
+                store=self.store,
+                logger=self.logger,
+            )
+        except Exception as exc:  # pragma: no cover - constructor guard
+            self._log(
+                "ERROR",
+                "ALL",
+                "Failed to initialise Kraken WebSocket feed",
+                detail=str(exc),
+            )
+            return None
 
     def _build_timeframe_fallbacks(self, primary: str) -> List[str]:
         """Return a prioritized list of timeframes to try when fetching candles.
@@ -1328,15 +1443,24 @@ class FeedUpdater:
             target=self._run, name="FeedUpdater", daemon=True
         )
         self._thread.start()
+        if self._ws_feed is not None:
+            self._ws_feed.start()
 
     def stop(self) -> None:  # pragma: no cover - threading
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=self.interval_seconds + 5)
         self._thread = None
+        if self._ws_feed is not None:
+            self._ws_feed.stop()
 
     def close(self) -> None:
         self.stop()
+        if self._ws_feed is not None:
+            try:
+                self._ws_feed.stop()
+            except Exception:
+                pass
         for exchange in list(self._exchange_pool.values()):
             close = getattr(exchange, "close", None)
             if callable(close):  # pragma: no cover - network cleanup
