@@ -281,7 +281,9 @@ class Learner:
         return float(max(0.0, min(1.0, adjusted)))
 
     # ------------------------------------------------------------------
-    def load_trade_history(self, worker_name: str) -> pd.DataFrame:
+    def load_trade_history(self, worker_name: str) -> Optional[pd.DataFrame]:
+        if pd is None:
+            return None
         path = self._history_path(worker_name)
         if not path.exists():
             return pd.DataFrame()
@@ -293,6 +295,8 @@ class Learner:
             return pd.DataFrame()
 
     def record_result(self, worker_name: str, row: Dict[str, float]) -> None:
+        if pd is None:
+            return
         path = self._history_path(worker_name)
         data = pd.DataFrame([row])
         try:
