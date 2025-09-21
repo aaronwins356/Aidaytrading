@@ -12,7 +12,6 @@ if trades.empty:
     st.info("No trades to display.")
     st.stop()
 
-mode = st.session_state.get("filters", {}).get("mode", "Paper")
 search = st.text_input("Search", "", help="Filter trades by keyword. Case-insensitive.")
 columns = st.multiselect("Columns", trades.columns.tolist(), default=trades.columns.tolist())
 filtered = trades.copy()
@@ -39,11 +38,15 @@ st.metric("Median time in trade", f"{median_minutes:.2f} mins")
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    if st.button("Close all", disabled=mode == "Live"):
-        st.success("Close all request sent to risk engine.")
+    if st.button("Close all"):
+        st.warning(
+            "Dispatch a kill-switch request from Settings to flatten live positions."
+        )
 with col2:
-    if st.button("Close selected", disabled=mode == "Live"):
-        st.success("Selected orders flagged for closure.")
+    if st.button("Close selected"):
+        st.warning(
+            "Manual order management is required for live trades until broker hooks are implemented."
+        )
 with col3:
     st.download_button("Export CSV", data=filtered[columns].to_csv(index=False), file_name="orders_filtered.csv", mime="text/csv")
 

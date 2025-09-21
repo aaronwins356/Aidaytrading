@@ -10,18 +10,12 @@ import streamlit as st
 from sklearn.metrics import auc, precision_recall_curve, roc_auc_score, roc_curve
 
 from components import download_chart_as_png
-from data_io import DB_LIVE, DB_PAPER, load_ml_scores
+from data_io import DB_LIVE, load_ml_scores
 
 st.set_page_config(page_title="ML Intelligence · Aurora Desk", page_icon="🧠")
 
 st.title("ML Intelligence")
-mode = st.session_state.get("filters", {}).get("mode", "Paper")
-dfs = []
-if mode in ("Paper", "Both"):
-    dfs.append(load_ml_scores(DB_PAPER))
-if mode in ("Live", "Both"):
-    dfs.append(load_ml_scores(DB_LIVE))
-ml_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+ml_df = load_ml_scores(DB_LIVE)
 if ml_df.empty:
     st.warning("No ML score logs detected. Ensure ml_scores table is populated or use the seeding utility.")
     st.stop()

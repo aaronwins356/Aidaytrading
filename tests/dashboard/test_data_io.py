@@ -15,7 +15,7 @@ def _dump(model) -> dict:
 def test_load_config_defaults(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config, raw = data_io.load_config(str(config_path))
-    assert config.mode in {"Paper", "Live", "Both"}
+    assert config.mode == "Live"
     assert raw == _dump(config)
 
 
@@ -24,7 +24,7 @@ def test_save_config_validation(tmp_path: Path) -> None:
     invalid = {"mode": "INVALID"}
     success, message = data_io.save_config(invalid, str(config_path))
     assert not success
-    assert "pattern" in message
+    assert "Live" in message
 
     valid = _dump(data_io._default_config())
     success, message = data_io.save_config(valid, str(config_path))

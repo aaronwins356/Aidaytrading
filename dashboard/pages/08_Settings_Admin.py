@@ -71,7 +71,7 @@ if submitted:
         st.error(f"Invalid YAML: {exc}")
 
 st.subheader("Kill switch")
-if st.button("Flatten all positions (paper mode)"):
+if st.button("Flatten all positions (live kill switch)"):
     Path("desk/kill_switch.request").write_text("flatten", encoding="utf-8")
     st.warning("Kill switch request written. Ensure risk engine picks this up.")
 
@@ -93,9 +93,9 @@ with col3:
 st.subheader("Danger zone")
 confirm = st.checkbox("I understand this cannot be undone")
 if st.button("Wipe demo data", disabled=not confirm):
-    for path in ["desk/db/paper_trading.sqlite", "desk/db/live_trading.sqlite"]:
-        if Path(path).exists():
-            Path(path).unlink()
+    live_path = Path("desk/db/live_trading.sqlite")
+    if live_path.exists():
+        live_path.unlink()
     st.warning("Demo databases removed. Restart app to rebuild.")
 
 st.subheader("Backups")
