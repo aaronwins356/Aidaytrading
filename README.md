@@ -56,17 +56,9 @@ requirements.txt         # Python dependencies
 1. **Clone & create a virtual environment**
 
    ```bash
-   # Windows (PowerShell)
    cd "C:\Users\moe\Desktop\AI Trader"
    py -3.11 -m venv .venv
    .\.venv\Scripts\Activate
-
-   # macOS/Linux
-   cd ~/projects/Aidaytrading
-   python3.11 -m venv .venv
-   source .venv/bin/activate
-
-   # install dependencies
    pip install --upgrade pip setuptools wheel
    pip install -r requirements.txt
    ```
