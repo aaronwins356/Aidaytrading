@@ -338,8 +338,27 @@ class ExecutionEngine:
             max_hold_minutes=max_hold_minutes,
             metadata=metadata,
         )
-        placed_order = self.broker.market_order(symbol, side.lower(), qty)
+        placed_order = self.broker.market_order(
+            symbol,
+            side.lower(),
+            qty,
+            order_type="market",
+            client_order_id=trade.trade_id,
+            worker_name=worker.name,
+        )
         if placed_order is None:
+            return None
+        if placed_order.get("status") != "ok":
+            self.logger.write(
+                {
+                    "type": "trade_skipped",
+                    "reason": "order_rejected",
+                    "worker": worker.name,
+                    "symbol": symbol,
+                    "side": side,
+                    "detail": placed_order.get("error"),
+                }
+            )
             return None
 
         fill_qty = qty
@@ -367,14 +386,14 @@ class ExecutionEngine:
 
         self.open_positions.setdefault(symbol, []).append(trade)
         self.position_store.persist(trade)
-        self.logger.log_trade(worker, symbol, side, qty, fill_price, pnl=0.0)
+        self.logger.log_trade(worker, symbol, side, fill_qty, fill_price, pnl=0.0)
         self.logger.write(
             {
                 "type": "trade_opened",
                 "worker": worker.name,
                 "symbol": symbol,
                 "side": side,
-                "qty": qty,
+                "qty": fill_qty,
                 "price": fill_price,
                 "risk_amount": risk_amount,
             }
@@ -402,11 +421,22 @@ class ExecutionEngine:
                     "worker": worker.name,
                     "symbol": symbol,
                     "side": side,
-                    "qty": qty,
+                    "qty": fill_qty,
                     "price": fill_price,
                     "order": placed_order,
                 }
             )
+        self.logger.write(
+            {
+                "type": "order_submitted",
+                "worker": worker.name,
+                "symbol": symbol,
+                "side": side,
+                "qty": fill_qty,
+                "client_order_id": placed_order.get("client_order_id"),
+                "txid": placed_order.get("txid"),
+            }
+        )
         self._last_trade_times[duplicate_key] = now
         return trade
 

@@ -92,6 +92,8 @@ class Worker:
         self.allocation = float(params.get("allocation", params.get("weight", 0.1)))
         self.risk_profile: Dict[str, Any] = dict(params.get("risk_profile", {}))
         self._df_cache: Optional[Tuple[int, float, float, Tuple[Tuple[float, float], ...], "pd.DataFrame"]] = None
+        self._min_qty_override: Optional[float] = None
+        self._qty_precision_override: Optional[int] = None
 
     # ------------------------------------------------------------------
     def _learning_risk_multiplier(self) -> float:
@@ -309,11 +311,30 @@ class Worker:
             )
         else:
             qty = risk_budget / max(price, 1e-9)
-        min_qty = float(params.get("min_qty", 0.0) or 0.0)
-        if min_qty > 0:
-            qty = max(qty, min_qty)
-        precision = int(params.get("qty_precision", 6) or 6)
+        min_param = float(params.get("min_qty", 0.0) or 0.0)
+        minimum = self._min_qty_override if self._min_qty_override is not None else min_param
+        if minimum > 0:
+            qty = max(qty, minimum)
+        precision_param = int(params.get("qty_precision", 6) or 6)
+        precision = (
+            self._qty_precision_override
+            if self._qty_precision_override is not None
+            else precision_param
+        )
         return round(qty, precision)
+
+    def set_minimum_order_size(self, minimum: float, *, precision: Optional[int] = None) -> None:
+        """Configure exchange-enforced sizing constraints for the worker."""
+
+        try:
+            self._min_qty_override = max(float(minimum), 0.0)
+        except (TypeError, ValueError):
+            self._min_qty_override = None
+        if precision is not None:
+            try:
+                self._qty_precision_override = max(int(precision), 0)
+            except (TypeError, ValueError):
+                self._qty_precision_override = None
 
     def build_intent(self, risk_budget: float) -> Optional[Intent]:
         df = self._candles_df()

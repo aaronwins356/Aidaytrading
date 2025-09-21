@@ -6,7 +6,7 @@ import contextlib
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 try:  # pragma: no cover - optional dependency guard
     import ccxt  # type: ignore
@@ -65,10 +65,15 @@ class KrakenBroker:
         self._symbols = [str(symbol) for symbol in (symbols or [])]
         self._candle_store = candle_store
         self._lock = threading.Lock()
+        self._market_cache: Dict[str, Dict[str, Any]] = {}
+        self._markets_by_wsname: Dict[str, str] = {}
+        self._markets_by_altname: Dict[str, str] = {}
         if self.session_config and "timeout" not in self.session_config:
             self.session_config["timeout"] = int(self.request_timeout * 1000)
 
         self.exchange = self._create_exchange()
+        if self._symbols:
+            self._symbols = self.normalise_symbols(self._symbols)
         self.websocket = self._create_websocket(timeframe=timeframe)
         self.websocket.start()
 
@@ -84,6 +89,30 @@ class KrakenBroker:
         load_markets = getattr(exchange, "load_markets", None)
         if callable(load_markets):
             load_markets()
+        markets = getattr(exchange, "markets", {})
+        if isinstance(markets, dict):
+            self._market_cache = {
+                str(symbol): market for symbol, market in markets.items() if isinstance(market, dict)
+            }
+            self._markets_by_wsname = {}
+            self._markets_by_altname = {}
+            markets_by_id = getattr(exchange, "markets_by_id", {})
+            if isinstance(markets_by_id, dict):
+                for market_id, market in markets_by_id.items():
+                    if isinstance(market, dict):
+                        altname = str(market.get("symbol") or market_id or "").upper()
+                        if altname:
+                            self._markets_by_altname.setdefault(altname, str(market.get("symbol") or market_id))
+            for symbol, market in self._market_cache.items():
+                info = market.get("info") if isinstance(market, dict) else {}
+                if not isinstance(info, dict):
+                    info = {}
+                wsname = str(info.get("wsname") or market.get("wsname") or "").upper()
+                if wsname:
+                    self._markets_by_wsname[wsname] = symbol
+                altname = str(info.get("altname") or market.get("altname") or "").upper()
+                if altname:
+                    self._markets_by_altname[altname] = symbol
         return exchange
 
     def _resolve_ws_pairs(self) -> Dict[str, str]:
@@ -91,10 +120,11 @@ class KrakenBroker:
             return {}
         pairs: Dict[str, str] = {}
         for symbol in self._symbols:
+            resolved_symbol = self.resolve_symbol(symbol)
             try:
-                market = self.exchange.market(symbol)
+                market = self.exchange.market(resolved_symbol)
             except Exception:  # pragma: no cover - defensive guard
-                continue
+                market = self._market_cache.get(resolved_symbol, {})
             wsname = None
             info = market.get("info") if isinstance(market, dict) else None
             if isinstance(info, dict):
@@ -102,11 +132,11 @@ class KrakenBroker:
             if not wsname and isinstance(market, dict):
                 wsname = market.get("wsname")
             if wsname:
-                pairs[str(wsname)] = symbol
+                pairs[str(wsname)] = resolved_symbol
                 continue
-            base = str(market.get("baseId") or market.get("base") or symbol.split("/")[0])
-            quote = str(market.get("quoteId") or market.get("quote") or symbol.split("/")[-1])
-            pairs[f"{base}/{quote}"] = symbol
+            base = str(market.get("baseId") or market.get("base") or resolved_symbol.split("/")[0])
+            quote = str(market.get("quoteId") or market.get("quote") or resolved_symbol.split("/")[-1])
+            pairs[f"{base}/{quote}"] = resolved_symbol
         return pairs
 
     def _ws_token(self) -> str:
@@ -122,13 +152,58 @@ class KrakenBroker:
         if isinstance(errors, str) and errors:
             raise RuntimeError(f"Kraken token error: {errors}")
         token = None
-        if "token" in response:
-            token = response.get("token")
-        elif isinstance(response.get("result"), dict):
-            token = response["result"].get("token")
+        candidate = response
+        if isinstance(response.get("result"), dict):
+            candidate = response.get("result", {})
+        if isinstance(candidate, dict):
+            token = candidate.get("token") or candidate.get("data")
+        if not token and isinstance(response.get("data"), dict):
+            token = response.get("data", {}).get("token")
         if not token:
             raise RuntimeError("Unexpected Kraken token response")
         return str(token)
+
+    # ------------------------------------------------------------------
+    def normalise_symbols(self, symbols: Iterable[str]) -> list[str]:
+        cleaned: list[str] = []
+        for symbol in symbols:
+            try:
+                resolved = self.resolve_symbol(symbol)
+            except Exception:
+                resolved = str(symbol)
+            if resolved not in cleaned:
+                cleaned.append(resolved)
+        return cleaned
+
+    def normalize_symbols(self, symbols: Iterable[str]) -> list[str]:
+        """Alias to maintain US spelling compatibility for callers."""
+
+        return self.normalise_symbols(symbols)
+
+    def resolve_symbol(self, symbol: str) -> str:
+        if not symbol:
+            raise ValueError("symbol must be provided")
+        text = str(symbol).strip()
+        normalized = text.upper().replace("-", "/")
+        if "/" not in normalized and len(normalized) > 3:
+            normalized = f"{normalized[:-3]}/{normalized[-3:]}"
+        if normalized in self._market_cache:
+            market = self._market_cache[normalized]
+            return str(market.get("symbol", normalized))
+        alt = normalized.replace("/", "")
+        if alt in self._markets_by_altname:
+            return self._markets_by_altname[alt]
+        ws_candidate = normalized.upper()
+        if ws_candidate in self._markets_by_wsname:
+            return self._markets_by_wsname[ws_candidate]
+        if alt in self._markets_by_wsname:
+            return self._markets_by_wsname[alt]
+        markets_by_id = getattr(self.exchange, "markets_by_id", {})
+        if isinstance(markets_by_id, dict) and alt in markets_by_id:
+            market = markets_by_id[alt]
+            if isinstance(market, dict):
+                return str(market.get("symbol", normalized))
+        return normalized
 
     def _create_websocket(self, timeframe: str) -> KrakenWebSocketClient:
         pairs = self._resolve_ws_pairs()
@@ -234,18 +309,83 @@ class KrakenBroker:
         return total
 
     # ------------------------------------------------------------------
-    def market_order(self, symbol: str, side: str, qty: float) -> Dict[str, float]:
-        pair = self._resolve_order_pair(symbol)
+    def market_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        *,
+        order_type: str = "market",
+        price: float | None = None,
+        client_order_id: str | None = None,
+        worker_name: str | None = None,
+        validate: bool = False,
+    ) -> Dict[str, float]:
+        resolved_symbol = self.resolve_symbol(symbol)
+        minimum, precision = self.minimum_order_config(resolved_symbol)
+        normalized_qty = round(max(float(qty), minimum), precision)
+        if normalized_qty <= 0:
+            raise ValueError("quantity must be positive after normalization")
+        pair = self._resolve_order_pair(resolved_symbol)
+        meta = {
+            "side": side,
+            "qty": normalized_qty,
+            "order_type": order_type,
+            "worker": worker_name,
+        }
+        self._log_event(
+            "INFO",
+            "Submitting order",
+            symbol=resolved_symbol,
+            **{key: value for key, value in meta.items() if value is not None},
+        )
         with self._measure_latency("market_order"):
-            result = self.websocket.submit_order(
-                pair,
-                side=side,
-                order_type="market",
-                volume=qty,
+            try:
+                result = self.websocket.submit_order(
+                    pair,
+                    side=side,
+                    order_type=order_type,
+                    volume=normalized_qty,
+                    price=price,
+                    client_order_id=client_order_id,
+                    validate=validate,
+                )
+            except Exception as exc:
+                self._log_event(
+                    "ERROR",
+                    "Order submission failed",
+                    symbol=resolved_symbol,
+                    worker=worker_name,
+                    error=str(exc),
+                )
+                raise
+        if result.status != "ok":
+            self._log_event(
+                "ERROR",
+                "Order rejected",
+                symbol=resolved_symbol,
+                worker=worker_name,
+                status=result.status,
+                message=result.message,
             )
+            return {
+                "requested_qty": float(normalized_qty),
+                "status": result.status,
+                "error": result.message,
+                "client_order_id": result.client_order_id,
+            }
+        fetched_price = price if price is not None else self.fetch_price(resolved_symbol)
+        self._log_event(
+            "INFO",
+            "Order confirmed",
+            symbol=resolved_symbol,
+            worker=worker_name,
+            txid=result.txid,
+            client_order_id=result.client_order_id,
+        )
         payload = {
-            "requested_qty": float(qty),
-            "price": self.fetch_price(symbol),
+            "requested_qty": float(normalized_qty),
+            "price": float(fetched_price),
             "status": result.status,
             "txid": result.txid,
             "client_order_id": result.client_order_id,
@@ -288,6 +428,32 @@ class KrakenBroker:
             if mapped == symbol:
                 return pair
         return symbol.replace("/", "")
+
+    def minimum_order_config(self, symbol: str) -> tuple[float, int]:
+        resolved = self.resolve_symbol(symbol)
+        market = self._market_cache.get(resolved) or {}
+        min_qty = 0.0
+        precision = 6
+        if isinstance(market, dict):
+            limits = market.get("limits")
+            if isinstance(limits, dict):
+                amount = limits.get("amount")
+                if isinstance(amount, dict):
+                    value = amount.get("min")
+                    if value is not None:
+                        try:
+                            min_qty = float(value)
+                        except (TypeError, ValueError):
+                            min_qty = 0.0
+            precision_data = market.get("precision")
+            if isinstance(precision_data, dict):
+                amount_precision = precision_data.get("amount")
+                if amount_precision is not None:
+                    try:
+                        precision = int(amount_precision)
+                    except (TypeError, ValueError):
+                        precision = precision
+        return max(min_qty, 0.0), max(precision, 0)
 
 
 def _parse_symbol(symbol: str) -> tuple[str, str]:

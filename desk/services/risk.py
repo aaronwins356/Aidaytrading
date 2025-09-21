@@ -55,14 +55,10 @@ class RiskEngine:
 
         # Daily/weekly drawdown checks.
         if self.daily_dd and equity < self.start_equity * (1 - self.daily_dd):
-            print("[RISK] Daily drawdown threshold breached.")
-            if self.halt_on_dd:
-                self.halted = True
+            print("[RISK] Daily drawdown threshold breached – monitoring closely.")
 
         if self.weekly_dd and equity < self.start_equity * (1 - self.weekly_dd):
-            print("[RISK] Weekly drawdown threshold breached.")
-            if self.halt_on_dd:
-                self.halted = True
+            print("[RISK] Weekly drawdown threshold breached – monitoring closely.")
 
         # Trap door: once equity makes a new high, raise the floor.
         if self.trapdoor:
@@ -72,6 +68,9 @@ class RiskEngine:
             elif equity < self.trapdoor.floor:
                 print("[RISK] Trapdoor activated – locking in gains and halting trading.")
                 self.halted = True
+        if equity <= 0:
+            print("[RISK] Equity at or below zero – halting trading to protect capital.")
+            self.halted = True
 
     def enforce_position_limits(self, open_positions: Iterable) -> bool:
         count = sum(1 for _ in open_positions)

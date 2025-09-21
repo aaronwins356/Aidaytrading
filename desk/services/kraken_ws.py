@@ -130,8 +130,8 @@ class KrakenWSClient:
         logger: Optional[EventLogger] = None,
         reconnect_base: float = 5.0,
         reconnect_max: float = 90.0,
-        order_rate_limit: int = 60,
-        order_rate_period: float = 10.0,
+        order_rate_limit: int = 20,
+        order_rate_period: float = 60.0,
         order_timeout: float = 10.0,
         public_factory: Optional[Callable[..., Awaitable[WebSocketClientProtocol]]] = None,
         private_factory: Optional[Callable[..., Awaitable[WebSocketClientProtocol]]] = None,
@@ -146,7 +146,9 @@ class KrakenWSClient:
         self._logger = logger
         self._interval = _kraken_interval_minutes(timeframe)
         self._token_provider = token_provider
-        self._public_factory = public_factory or (lambda url: websockets.connect(url, ping_interval=None))
+        self._public_factory = public_factory or (
+            lambda url: websockets.connect(url, ping_interval=None)
+        )
         self._private_factory = private_factory or (
             lambda url, **kwargs: websockets.connect(url, ping_interval=None, **kwargs)
         )
@@ -238,8 +240,49 @@ class KrakenWSClient:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     # ------------------------------------------------------------------
-    # Public data handling
+    # WebSocket helpers
     # ------------------------------------------------------------------
+    class _SocketContextAdapter:
+        """Wrap sockets returned by factories that are not context managers."""
+
+        def __init__(self, socket_obj: Any) -> None:
+            self._socket_obj = socket_obj
+
+        async def __aenter__(self) -> WebSocketClientProtocol:
+            if asyncio.iscoroutine(self._socket_obj) or isinstance(
+                self._socket_obj, Awaitable
+            ):
+                protocol = await self._socket_obj  # type: ignore[assignment]
+            else:
+                protocol = self._socket_obj
+            self._socket_obj = protocol
+            return protocol
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            protocol = self._socket_obj
+            close = getattr(protocol, "close", None)
+            try:
+                if asyncio.iscoroutinefunction(close):
+                    await close()  # type: ignore[misc]
+                elif callable(close):
+                    result = close()
+                    if asyncio.iscoroutine(result):
+                        await result
+            finally:
+                self._socket_obj = None
+            return False
+
+    def _open_socket(
+        self,
+        factory: Callable[..., Any],
+        url: str,
+        **kwargs: Any,
+    ) -> "KrakenWSClient._SocketContextAdapter | Any":
+        socket_obj = factory(url, **kwargs)
+        if hasattr(socket_obj, "__aenter__") and hasattr(socket_obj, "__aexit__"):
+            return socket_obj
+        return KrakenWSClient._SocketContextAdapter(socket_obj)
+
     def register_public_handler(
         self, channel: str, handler: Callable[[str, Mapping[str, Any]], None]
     ) -> None:
@@ -248,7 +291,7 @@ class KrakenWSClient:
     async def _public_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                async with self._public_factory(self.PUBLIC_URL) as socket:
+                async with self._open_socket(self._public_factory, self.PUBLIC_URL) as socket:
                     self._public_socket = socket
                     await self._resubscribe_public(socket)
                     self._public_backoff.reset()
@@ -402,7 +445,7 @@ class KrakenWSClient:
                 await asyncio.sleep(delay)
                 continue
             try:
-                async with self._private_factory(self.PRIVATE_URL) as socket:
+                async with self._open_socket(self._private_factory, self.PRIVATE_URL) as socket:
                     self._private_socket = socket
                     await self._subscribe_private(socket, token)
                     ready.set()
@@ -522,14 +565,33 @@ class KrakenWSClient:
                     descr=str(descr) if descr else None,
                 )
             )
-        if status != "ok":
-            self._log("WARNING", "ALL", "Order rejected", detail=str(payload))
+        detail = {
+            "status": status,
+            "clientOrderId": client_order_id,
+            "txid": txid,
+            "message": message,
+        }
+        try:
+            detail_text = json.dumps(detail, default=str)
+        except TypeError:
+            detail_text = str(detail)
+        symbol = self._pairs.get(payload.get("pair", ""), "ALL")
+        if status == "ok":
+            self._log("TRADE", symbol, "Order acknowledged", detail=detail_text)
+        else:
+            self._log("WARNING", symbol, "Order rejected", detail=detail_text)
 
     async def _resolve_cancel(self, payload: Mapping[str, Any]) -> None:
         client_order_id = str(payload.get("clientOrderId") or payload.get("reqid") or "")
         future = self._pending_cancels.pop(client_order_id, None)
         if future is not None and not future.done():
             future.set_result(payload)
+        self._log(
+            "INFO",
+            "ALL",
+            "Cancel acknowledgement",
+            detail=str({"clientOrderId": client_order_id, "status": payload.get("status")}),
+        )
 
     def _handle_open_orders(self, payload: Mapping[str, Any]) -> None:
         orders = payload.get("open") or payload.get("orders") or {}
@@ -852,6 +914,13 @@ class KrakenWSClient:
         socket = self._private_socket
         if socket is None:
             raise RuntimeError("Private WebSocket is not available")
+        symbol = self._pairs.get(pair, pair)
+        self._log(
+            "INFO",
+            symbol,
+            f"Submitting {side.upper()} {volume:.10f} {pair} ({order_type})",
+            detail=f"clientOrderId={client_order_id}",
+        )
         await socket.send(json.dumps(payload))
         try:
             result: OrderStatus = await asyncio.wait_for(future, timeout=self._order_timeout)
