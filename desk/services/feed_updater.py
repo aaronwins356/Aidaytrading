@@ -184,7 +184,7 @@ class FeedUpdater:
         exchange: str,
         symbols: Iterable[str],
         timeframe: str,
-        mode: str = "paper",
+        mode: str = "live",
         api_key: str = "",
         api_secret: str = "",
         interval_seconds: float = 60.0,

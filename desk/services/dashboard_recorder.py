@@ -21,11 +21,15 @@ class DashboardRecorder:
         *,
         db_dir: str | Path | None = None,
     ) -> None:
-        self.mode = "Live" if str(mode).lower() == "live" else "Paper"
+        normalised = str(mode).strip().lower()
+        if normalised != "live":
+            raise ValueError(
+                "DashboardRecorder only supports live mode now that paper trading is disabled"
+            )
+        self.mode = "Live"
         base = Path(db_dir or DESK_ROOT / "db")
         base.mkdir(parents=True, exist_ok=True)
-        name = "live_trading.sqlite" if self.mode == "Live" else "paper_trading.sqlite"
-        self.db_path = base / name
+        self.db_path = base / "live_trading.sqlite"
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.lock = Lock()

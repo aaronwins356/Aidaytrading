@@ -161,7 +161,7 @@ class PositionStore:
 
 
 class ExecutionEngine:
-    """Handles paper/live orders, monitors exits, and journals trades."""
+    """Handles live orders, monitors exits, and journals trades."""
 
     def __init__(
         self,

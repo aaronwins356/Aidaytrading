@@ -17,7 +17,7 @@ import sqlite3
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -32,7 +32,6 @@ except ImportError:  # pragma: no cover - pydantic v1 path
 
 __all__ = [
     "CONFIG_PATH",
-    "DB_PAPER",
     "DB_LIVE",
     "LOG_DIR",
     "get_conn",
@@ -54,7 +53,6 @@ __all__ = [
 # --------------------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = str(BASE_DIR / "desk" / "configs" / "config.yaml")
-DB_PAPER = str(BASE_DIR / "desk" / "db" / "paper_trading.sqlite")
 DB_LIVE = str(BASE_DIR / "desk" / "db" / "live_trading.sqlite")
 LOG_DIR = str(BASE_DIR / "desk" / "logs")
 BACKUP_DIR = BASE_DIR / "desk" / "backups"
@@ -199,7 +197,7 @@ def _safe_read_sql(query: str, conn: sqlite3.Connection, parse_dates: Optional[L
 
 
 @_cache_data(show_spinner=False)
-def load_trades(db_path: str, mode: Optional[str] = None) -> pd.DataFrame:
+def load_trades(db_path: str) -> pd.DataFrame:
     """Load trades from the provided SQLite database.
 
     The function never raises – if the table is missing or unreadable an empty
@@ -228,8 +226,6 @@ def load_trades(db_path: str, mode: Optional[str] = None) -> pd.DataFrame:
                 "note",
             ]
         )
-    if mode and mode != "Both" and "status" in trades:
-        trades = trades[trades["status"].astype(str).str.contains(mode, na=False)]
     if "opened_at" in trades:
         trades.sort_values("opened_at", inplace=True, ascending=True)
     return trades.reset_index(drop=True)
@@ -349,7 +345,7 @@ class ReportingConfig(BaseModel):
 
 
 class DeskConfig(BaseModel):
-    mode: str = Field("Paper", pattern=r"^(Paper|Live|Both)$")
+    mode: Literal["Live"] = "Live"
     base_currency: str = "USD"
     symbols: List[str] = Field(default_factory=lambda: SYMBOLS)
     workers: Dict[str, WorkerConfig] = Field(default_factory=dict)
@@ -357,29 +353,6 @@ class DeskConfig(BaseModel):
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
     kraken_api_key: str = ""
     kraken_api_secret: str = ""
-
-    if field_validator:  # pragma: no branch - handled by import guard above
-
-        @field_validator("mode")
-        @classmethod
-        def _validate_mode(cls, value: str) -> str:
-            allowed = {"Paper", "Live", "Both"}
-            if value not in allowed:
-                raise ValueError(
-                    "mode must match pattern ^(Paper|Live|Both)$"
-                )
-            return value
-
-    else:  # pragma: no cover - exercised under pydantic v1
-
-        @validator("mode")
-        def _validate_mode(cls, value: str) -> str:
-            allowed = {"Paper", "Live", "Both"}
-            if value not in allowed:
-                raise ValueError(
-                    "mode must match pattern ^(Paper|Live|Both)$"
-                )
-            return value
 
 
 def _default_config() -> DeskConfig:
@@ -521,7 +494,7 @@ def database_health(db_paths: Iterable[str]) -> List[DataHealth]:
 
 
 def seed_demo_data(
-    db_paths: Iterable[str] = (DB_PAPER, DB_LIVE),
+    db_paths: Iterable[str] = (DB_LIVE,),
     start: Optional[pd.Timestamp] = None,
     days: int = 60,
     seed: int = 7,
@@ -545,7 +518,7 @@ def seed_demo_data(
 
         balances = 100_000 + np.cumsum(rng.normal(0, 250, size=len(date_index)))
         equity_rows = [
-            (ts.to_pydatetime(), float(balance), "Paper" if "paper" in db else "Live")
+            (ts.to_pydatetime(), float(balance), "Live")
             for ts, balance in zip(date_index, balances)
         ]
         cur.executemany(
@@ -568,7 +541,7 @@ def seed_demo_data(
             pnl = (exit_price - entry) * qty * (1 if side == "LONG" else -1)
             fees = abs(pnl) * 0.001
             worker = rng.choice(["alpha", "beta", "gamma"])
-            status = "Paper" if "paper" in db else "Live"
+            status = "Live"
             stop = entry * (1 - rng.uniform(0.005, 0.03))
             target = entry * (1 + rng.uniform(0.005, 0.04))
             rows.append(

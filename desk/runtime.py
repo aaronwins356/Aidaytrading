@@ -12,7 +12,6 @@ from typing import Dict, List, Optional, Tuple
 from desk.config import CONFIG_PATH, load_config
 from desk.services import (
     KrakenBroker,
-    PaperBroker,
     EventLogger,
     ExecutionEngine,
     DashboardRecorder,
@@ -32,7 +31,7 @@ class RuntimeState:
 
 
 class TradingRuntime:
-    """Coordinates services to run the Kraken trading loop in paper or live mode."""
+    """Coordinates services to run the Kraken trading loop in live mode."""
 
     def __init__(self, config_path: Optional[str] = None) -> None:
         self.config_path = config_path or CONFIG_PATH
@@ -50,17 +49,20 @@ class TradingRuntime:
             flush_interval=float(telemetry_cfg.get("flush_interval", 1.0)),
             max_backoff=float(telemetry_cfg.get("max_backoff", 30.0)),
         )
-        self.dashboard = DashboardRecorder(self.mode)
-
         settings = self.config.get("settings", {})
         feed_cfg = self.config.get("feed", {})
         risk_cfg = self.config.get("risk", {})
         portfolio_cfg = self.config.get("portfolio", {})
 
-        mode = str(settings.get("mode", "paper")).strip().lower()
-        if mode not in {"paper", "live"}:
-            raise ValueError("settings.mode must be either 'paper' or 'live'")
-        self.mode = mode
+        mode = str(settings.get("mode", "live")).strip().lower()
+        if mode != "live":
+            raise ValueError(
+                "settings.mode must be 'live' now that paper trading is disabled"
+            )
+        # Persist the canonical casing expected by downstream services.
+        self.mode = "live"
+
+        self.dashboard = DashboardRecorder(self.mode)
 
         feed_workers = settings.get("feed_workers")
         try:
@@ -71,7 +73,7 @@ class TradingRuntime:
         api_key = str(settings.get("api_key", ""))
         api_secret = str(settings.get("api_secret", ""))
 
-        if self.mode == "live" and (not api_key or not api_secret):
+        if not api_key or not api_secret:
             raise ValueError(
                 "Live trading requires non-empty Kraken API credentials."
             )
@@ -112,23 +114,14 @@ class TradingRuntime:
             seed_config=data_seed_cfg,
         )
 
-        if self.mode == "live":
-            self.broker = KrakenBroker(
-                api_key=api_key,
-                api_secret=api_secret,
-                telemetry=self.telemetry,
-                event_logger=self.logger,
-                request_timeout=request_timeout,
-                session_config=session_config,
-            )
-        else:
-            starting_cash = float(settings.get("balance", 1_000.0))
-            self.broker = PaperBroker(
-                store=self.feed_updater.store,
-                logger=self.logger,
-                telemetry=self.telemetry,
-                starting_cash=starting_cash,
-            )
+        self.broker = KrakenBroker(
+            api_key=api_key,
+            api_secret=api_secret,
+            telemetry=self.telemetry,
+            event_logger=self.logger,
+            request_timeout=request_timeout,
+            session_config=session_config,
+        )
 
         self._services_started = False
 

@@ -18,7 +18,7 @@ def _make_trade() -> OpenTrade:
 
 
 def test_dashboard_recorder_writes_sqlite(tmp_path):
-    recorder = DashboardRecorder("paper", db_dir=tmp_path)
+    recorder = DashboardRecorder("live", db_dir=tmp_path)
     trade = _make_trade()
 
     recorder.record_trade_open(trade, fee=1.23, metadata={"foo": "bar"})
