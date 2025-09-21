@@ -17,6 +17,7 @@ from desk.data import candles_to_dataframe
 from desk.services.logger import EventLogger
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from desk.services.dashboard_recorder import DashboardRecorder
     from desk.services.telemetry import TelemetryClient
 
 
@@ -169,12 +170,14 @@ class ExecutionEngine:
         risk_config: Dict[str, float],
         *,
         telemetry: Optional["TelemetryClient"] = None,
+        dashboard_recorder: Optional["DashboardRecorder"] = None,
         position_store: Optional[PositionStore] = None,
     ) -> None:
         self.broker = broker
         self.logger = logger
         self.risk_config = risk_config
         self.telemetry = telemetry
+        self.dashboard = dashboard_recorder
         self.position_store = position_store or PositionStore()
         self.open_positions: Dict[str, List[OpenTrade]] = {}
         self._load_persisted_positions()
@@ -341,10 +344,12 @@ class ExecutionEngine:
 
         fill_qty = qty
         fill_price = reference_price
+        fee = 0.0
         if isinstance(placed_order, dict):
             fill_qty = float(placed_order.get("qty", qty) or qty)
             fill_price = float(placed_order.get("price", reference_price) or reference_price)
             remaining = float(placed_order.get("remaining_qty", 0.0) or 0.0)
+            fee = float(placed_order.get("fee", 0.0) or 0.0)
             trade.metadata.setdefault("execution", {})
             trade.metadata["execution"].update(
                 {
@@ -374,6 +379,22 @@ class ExecutionEngine:
                 "risk_amount": risk_amount,
             }
         )
+        if self.dashboard:
+            features = (metadata or {}).get("features") if metadata else None
+            ml_edge = (metadata or {}).get("ml_edge") if metadata else None
+            probability: Optional[float]
+            try:
+                probability = None if ml_edge is None else float(ml_edge)
+            except (TypeError, ValueError):
+                probability = None
+            self.dashboard.record_trade_open(trade, fee=fee, metadata=metadata)
+            self.dashboard.record_ml_score(
+                worker.name,
+                symbol,
+                probability=probability,
+                features=features,
+                trade_id=trade.trade_id,
+            )
         if self.telemetry:
             self.telemetry.record_trade_open(
                 {
@@ -465,6 +486,22 @@ class ExecutionEngine:
                 )
         except Exception:  # pragma: no cover - best effort logging
             pass
+        if self.dashboard:
+            self.dashboard.record_trade_close(
+                trade,
+                exit_price=exit_price,
+                exit_reason=exit_reason,
+                pnl=pnl,
+            )
+            label: Optional[int]
+            if pnl > 0:
+                label = 1
+            elif pnl < 0:
+                label = 0
+            else:
+                label = None
+            if label is not None:
+                self.dashboard.update_ml_label(trade.trade_id, label)
         return pnl
 
     # ------------------------------------------------------------------

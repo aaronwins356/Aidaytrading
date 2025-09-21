@@ -15,6 +15,7 @@ from desk.services import (
     PaperBroker,
     EventLogger,
     ExecutionEngine,
+    DashboardRecorder,
     FeedHandler,
     FeedUpdater,
     Learner,
@@ -49,6 +50,7 @@ class TradingRuntime:
             flush_interval=float(telemetry_cfg.get("flush_interval", 1.0)),
             max_backoff=float(telemetry_cfg.get("max_backoff", 30.0)),
         )
+        self.dashboard = DashboardRecorder(self.mode)
 
         settings = self.config.get("settings", {})
         feed_cfg = self.config.get("feed", {})
@@ -171,6 +173,7 @@ class TradingRuntime:
             self.logger,
             risk_cfg,
             telemetry=self.telemetry,
+            dashboard_recorder=self.dashboard,
         )
         self.portfolio = PortfolioManager(
             min_weight=float(portfolio_cfg.get("min_weight", 0.01)),
@@ -212,6 +215,10 @@ class TradingRuntime:
             pass
         try:
             self.telemetry.close()
+        except Exception:
+            pass
+        try:
+            self.dashboard.close()
         except Exception:
             pass
         try:
@@ -314,6 +321,7 @@ class TradingRuntime:
                 print(f"[RUNTIME] Failed to fetch account equity: {exc}")
                 equity = 0.0
             self.logger.write_equity(equity)
+            self.dashboard.record_equity(equity)
             self.telemetry.record_equity(equity)
             self.risk_engine.check_account(equity)
             if self.risk_engine.halted:
