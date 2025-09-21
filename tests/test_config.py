@@ -35,6 +35,18 @@ def test_env_overrides_take_precedence(tmp_path: Path, monkeypatch: pytest.Monke
     assert loaded["settings"]["balance"] == 2500
 
 
+def test_kraken_alias_env_vars_populate_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("{}")
+    monkeypatch.setenv("KRAKEN_API_KEY", "alias-key")
+    monkeypatch.setenv("KRAKEN_API_SECRET", "alias-secret")
+    loaded = config.load_config(cfg_path)
+    assert loaded["settings"]["api_key"] == "alias-key"
+    assert loaded["settings"]["api_secret"] == "alias-secret"
+
+
 def test_invalid_config_raises(tmp_path: Path) -> None:
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(

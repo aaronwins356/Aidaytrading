@@ -75,10 +75,23 @@ requirements.txt         # Python dependencies
 2. **Configure credentials and runtime settings**
 
    Edit `desk/configs/config.yaml` to choose the trading `mode` (`paper` for a
-   fully simulated account or `live` for real orders), provide Kraken API
-   credentials when live trading, and tune risk parameters such as slippage,
-   duplicate-trade cooldown, and fixed USD risk. Five example workers with
-   one-minute candles are included as a starting point.【F:desk/configs/config.yaml†L1-L97】
+   fully simulated account or `live` for real orders) and tune risk parameters
+   such as slippage, duplicate-trade cooldown, and fixed USD risk. Five example
+   workers with one-minute candles are included as a starting point.【F:desk/configs/config.yaml†L1-L97】
+
+   > **Security tip:** export your Kraken API credentials via environment
+   > variables instead of committing them to disk:
+   >
+   > ```bash
+   > export KRAKEN_API_KEY="live_key_from_portal"
+   > export KRAKEN_API_SECRET="live_secret_from_portal"
+   > # optional: override any other setting using DESK_* names
+   > export DESK_SETTINGS__MODE=live
+   > ```
+   >
+   > The runtime automatically maps `KRAKEN_API_KEY`/`KRAKEN_API_SECRET` onto the
+   > `settings.api_key` and `settings.api_secret` fields at startup, while keeping
+   > the existing `DESK_SETTINGS__…` overrides available for finer control.【F:desk/config.py†L126-L158】
 
 3. **Run the trading runtime**
 
