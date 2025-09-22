@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Iterator
+from typing import Dict, Iterable, Iterator, List
 
 from .types import TradeIntent
 
@@ -57,9 +57,23 @@ class TradeLog:
                     timestamp TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
-                    price REAL NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
                     features_json TEXT NOT NULL,
                     label REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    equity REAL NOT NULL,
+                    balances_json TEXT NOT NULL
                 )
                 """
             )
@@ -86,6 +100,7 @@ class TradeLog:
                 )
                 """
             )
+            self._ensure_market_feature_columns(conn)
             conn.commit()
 
     @contextmanager
@@ -154,18 +169,28 @@ class TradeLog:
         timeframe = str(payload.get("timeframe", "1m"))
         features = payload.get("features", {})
         label = payload.get("label")
-        price = float(payload.get("price", 0.0))
+        open_price = payload.get("open")
+        high = payload.get("high")
+        low = payload.get("low")
+        close = payload.get("close")
+        volume = payload.get("volume")
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO market_features(timestamp, symbol, timeframe, price, features_json, label)
-                VALUES(?, ?, ?, ?, ?, ?)
+                INSERT INTO market_features(
+                    timestamp, symbol, timeframe, open, high, low, close, volume, features_json, label
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.utcnow().isoformat(),
                     symbol,
                     timeframe,
-                    price,
+                    float(open_price) if open_price is not None else None,
+                    float(high) if high is not None else None,
+                    float(low) if low is not None else None,
+                    float(close) if close is not None else None,
+                    float(volume) if volume is not None else None,
                     json.dumps(features),
                     float(label) if label is not None else None,
                 ),
@@ -176,7 +201,7 @@ class TradeLog:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                SELECT timestamp, symbol, timeframe, price, features_json, label
+                SELECT timestamp, symbol, timeframe, open, high, low, close, volume, features_json, label
                 FROM market_features
                 WHERE symbol = ?
                 ORDER BY timestamp DESC
@@ -185,6 +210,47 @@ class TradeLog:
                 (symbol, limit),
             )
             return cursor.fetchall()
+
+    def record_account_snapshot(self, balances: Dict[str, float], equity: float) -> None:
+        """Persist the broker balances for dashboard consumption."""
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO account_snapshots(timestamp, equity, balances_json)
+                VALUES(?, ?, ?)
+                """,
+                (datetime.utcnow().isoformat(), equity, json.dumps(balances)),
+            )
+            conn.commit()
+
+    def fetch_latest_account_snapshot(self) -> Dict[str, object] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT timestamp, equity, balances_json
+                FROM account_snapshots
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "timestamp": row["timestamp"],
+            "equity": float(row["equity"]),
+            "balances": json.loads(row["balances_json"] or "{}"),
+        }
+
+    def _ensure_market_feature_columns(self, conn: sqlite3.Connection) -> None:
+        """Add legacy columns if the database pre-dates the OHLCV schema."""
+
+        cursor = conn.execute("PRAGMA table_info(market_features)")
+        existing: List[str] = [row[1] for row in cursor.fetchall()]
+        for column in ["open", "high", "low", "close", "volume"]:
+            if column not in existing:
+                conn.execute(f"ALTER TABLE market_features ADD COLUMN {column} REAL")
 
     def record_bot_state(self, worker: str, symbol: str, state: Dict[str, object]) -> None:
         """Store a bot's runtime state for dashboard consumption."""

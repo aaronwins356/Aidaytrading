@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -178,11 +177,11 @@ def set_control_flag(key: str, value: str) -> None:
 @st.cache_data(ttl=5)
 def load_market_features(symbol: str, limit: int = 720) -> pd.DataFrame:
     if not DB_PATH.exists():
-        return pd.DataFrame(columns=["timestamp", "price", "symbol"])
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "features"])
     with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql_query(
             """
-            SELECT timestamp, price, features_json, label
+            SELECT timestamp, open, high, low, close, volume, features_json, label
             FROM market_features
             WHERE symbol = ?
             ORDER BY timestamp DESC
@@ -194,12 +193,41 @@ def load_market_features(symbol: str, limit: int = 720) -> pd.DataFrame:
     if df.empty:
         return df
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    df["price"] = df["price"].astype(float)
+    numeric_cols = [col for col in ["open", "high", "low", "close", "volume"] if col in df.columns]
+    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
     df["features"] = df["features_json"].apply(lambda x: json.loads(x or "{}"))
     return df.sort_values("timestamp")
 
 
-def render_account_overview(config: Dict, equity_df: pd.DataFrame, trades: pd.DataFrame) -> None:
+@st.cache_data(ttl=5)
+def load_account_snapshot() -> Optional[Dict[str, object]]:
+    if not DB_PATH.exists():
+        return None
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT timestamp, equity, balances_json
+            FROM account_snapshots
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "timestamp": pd.to_datetime(row["timestamp"], utc=True),
+        "equity": float(row["equity"]),
+        "balances": json.loads(row["balances_json"] or "{}"),
+    }
+
+
+def render_account_overview(
+    config: Dict,
+    equity_df: pd.DataFrame,
+    trades: pd.DataFrame,
+    account_snapshot: Optional[Dict[str, object]],
+) -> None:
     st.header("Account Overview")
     latest_equity = equity_df["equity"].iloc[-1] if not equity_df.empty else config["trading"].get("paper_starting_equity", 0)
     pnl_percent = equity_df["pnl_percent"].iloc[-1] if not equity_df.empty else 0.0
@@ -212,7 +240,16 @@ def render_account_overview(config: Dict, equity_df: pd.DataFrame, trades: pd.Da
     col3.metric("Starting Equity", f"${starting_equity:,.2f}")
     col4.metric("Recorded Trades", f"{len(trades)}")
 
-    st.caption("Equity values update every trading engine cycle (near real-time).")
+    if account_snapshot:
+        snapshot_time = account_snapshot["timestamp"].strftime("%Y-%m-%d %H:%M:%S UTC")
+        st.caption(f"Equity values update every trading engine cycle | Broker snapshot: {snapshot_time}")
+        balances = account_snapshot.get("balances", {})
+        if balances:
+            cols = st.columns(min(4, len(balances)))
+            for idx, (asset, amount) in enumerate(sorted(balances.items())):
+                cols[idx % len(cols)].metric(asset, f"{amount:,.6f}")
+    else:
+        st.caption("Equity values update every trading engine cycle (near real-time).")
 
 
 def render_equity_curve(equity_df: pd.DataFrame) -> None:
@@ -271,19 +308,14 @@ def render_bot_cards(config: Dict, bot_states: pd.DataFrame) -> None:
 def build_candlestick(df: pd.DataFrame, symbol: str) -> Optional[go.Figure]:
     if df.empty:
         return None
-    candles = df.set_index("timestamp").resample("1min").agg({"price": ["first", "max", "min", "last"]})
-    candles.columns = ["open", "high", "low", "close"]
-    candles = candles.dropna().reset_index()
-    if candles.empty:
-        return None
     fig = go.Figure(
         data=[
             go.Candlestick(
-                x=candles["timestamp"],
-                open=candles["open"],
-                high=candles["high"],
-                low=candles["low"],
-                close=candles["close"],
+                x=df["timestamp"],
+                open=df["open"],
+                high=df["high"],
+                low=df["low"],
+                close=df["close"],
                 name=symbol,
             )
         ]
@@ -326,7 +358,11 @@ def render_market_view(symbol: str, trades: pd.DataFrame) -> None:
     if not feature_df.empty:
         latest = feature_df.iloc[-1]
         st.caption("Latest engineered features")
-        st.json(latest["features"])
+        enriched = dict(latest["features"])
+        for column in ["open", "high", "low", "close", "volume"]:
+            if column in latest:
+                enriched[column] = latest[column]
+        st.json(enriched)
 
 
 def render_trade_logs(trades: pd.DataFrame) -> None:
@@ -505,12 +541,14 @@ def render_sidebar(config: Dict) -> str:
 
 def main() -> None:
     config = load_config()
+    st.title("Quant Operations Terminal")
     symbol = render_sidebar(config)
     bot_states = load_bot_states()
     trades = load_trades()
     equity = load_equity_curve()
+    account_snapshot = load_account_snapshot()
 
-    render_account_overview(config, equity, trades)
+    render_account_overview(config, equity, trades, account_snapshot)
     render_equity_curve(equity)
     render_bot_cards(config, bot_states)
     render_market_view(symbol, trades)

@@ -95,6 +95,7 @@ researcher:
     timeframe: "1m"
     log_every_n_snapshots: 1
     volatility_window: 20
+    ohlc_window: 20
 
 dashboard:
   host: "0.0.0.0"

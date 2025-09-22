@@ -35,6 +35,7 @@ class MarketResearchWorker(BaseWorker):
         self.timeframe: str = cfg.get("timeframe", "1m")
         self.log_every_n = max(1, int(cfg.get("log_every_n_snapshots", 1)))
         self.volatility_window = max(5, int(cfg.get("volatility_window", 20)))
+        self.ohlc_window = max(5, int(cfg.get("ohlc_window", 20)))
         self._snapshot_counter = 0
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
@@ -60,17 +61,24 @@ class MarketResearchWorker(BaseWorker):
             if len(history) < max(max(self.feature_windows), self.warmup_candles) + 5:
                 continue
             features = self._build_features(history)
+            ohlcv = self._build_ohlcv(history)
             label = 1.0 if features.get("return_5", 0.0) < 0 and features.get("return_1", 0.0) < 0 else 0.0
             payload = {
                 "symbol": symbol,
                 "timeframe": self.timeframe,
-                "price": history[-1],
+                "open": ohlcv["open"],
+                "high": ohlcv["high"],
+                "low": ohlcv["low"],
+                "close": ohlcv["close"],
+                "volume": ohlcv["volume"],
                 "features": features,
                 "label": label,
             }
             self._trade_log.record_market_features(payload)
             self._pipeline.train(symbol)
-            self.update_signal_state(symbol, None, {"features": features, "label": label})
+            state_payload = {"features": features, "label": label}
+            state_payload.update({f"ohlcv_{key}": value for key, value in ohlcv.items()})
+            self.update_signal_state(symbol, None, state_payload)
 
     def _build_features(self, history: List[float]) -> Dict[str, float]:
         latest = history[-1]
@@ -79,7 +87,13 @@ class MarketResearchWorker(BaseWorker):
         return_1 = math.log(latest / prev) if prev > 0 else 0.0
         return_5 = math.log(latest / history[-6]) if len(history) > 5 and history[-6] > 0 else return_1
         return_15 = math.log(latest / history[-16]) if len(history) > 15 and history[-16] > 0 else return_5
-        volatility = pstdev(returns[-self.volatility_window :]) if len(returns) >= self.volatility_window else pstdev(returns) if returns else 0.0
+        volatility = (
+            pstdev(returns[-self.volatility_window :])
+            if len(returns) >= self.volatility_window
+            else pstdev(returns)
+            if returns
+            else 0.0
+        )
         ema_fast = self._ema(history, 12)
         ema_slow = self._ema(history, 26)
         macd = ema_fast - ema_slow
@@ -131,3 +145,20 @@ class MarketResearchWorker(BaseWorker):
         rs = avg_gain / avg_loss if avg_loss else 0.0
         rsi = 100 - (100 / (1 + rs))
         return max(0.0, min(100.0, rsi))
+
+    def _build_ohlcv(self, history: List[float]) -> Dict[str, float]:
+        window = history[-self.ohlc_window :]
+        if not window:
+            price = history[-1]
+            return {"open": price, "high": price, "low": price, "close": price, "volume": 0.0}
+        open_price = window[0]
+        high_price = max(window)
+        low_price = min(window)
+        close_price = window[-1]
+        return {
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": 0.0,
+        }

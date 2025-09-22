@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal, ROUND_DOWN
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import ccxt
 
@@ -120,7 +120,9 @@ class KrakenClient:
             avg_price = await self.fetch_price(symbol)
         return float(avg_price), float(filled)
 
-    async def compute_equity(self, prices: Dict[str, float]) -> float:
+    async def compute_equity(self, prices: Dict[str, float]) -> tuple[float, Dict[str, float]]:
+        """Return the total account equity alongside the raw balances."""
+
         balances = await self.fetch_balances()
         equity = balances.get(self._base_currency, 0.0)
         for asset, amount in balances.items():
@@ -133,7 +135,7 @@ class KrakenClient:
                 if price is None:
                     continue
             equity += amount * price
-        return equity
+        return equity, balances
 
     def _adjust_amount(self, symbol: str, amount: float) -> float:
         market = self._markets.get(symbol)
