@@ -217,6 +217,23 @@ class MLService:
     def default_threshold(self) -> float:
         return self._threshold
 
+    def has_feature_history(self, symbols: Optional[Iterable[str]] = None) -> bool:
+        """Return True when at least one engineered feature row exists."""
+
+        query = "SELECT 1 FROM market_features"
+        params: Tuple[str, ...] = ()
+        if symbols:
+            symbol_list = tuple(str(symbol) for symbol in symbols)
+            if not symbol_list:
+                return False
+            placeholders = ", ".join(["?"] * len(symbol_list))
+            query += f" WHERE symbol IN ({placeholders})"
+            params = symbol_list
+        query += " LIMIT 1"
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        return row is not None
+
     def update(
         self,
         symbol: str,
