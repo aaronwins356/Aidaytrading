@@ -141,7 +141,7 @@ class MLService:
     # Model lifecycle management
     # ------------------------------------------------------------------
     def _build_pipeline(self) -> compose.Pipeline:
-        optimizer = optim.SGD(learning_rate=self._learning_rate)
+        optimizer = optim.SGD(lr=self._learning_rate)
         logistic = linear_model.LogisticRegression(optimizer=optimizer, l2=self._regularization)
         return compose.Pipeline(preprocessing.StandardScaler(), logistic)
 
