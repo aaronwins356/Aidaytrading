@@ -676,7 +676,11 @@ def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> No
         results = ml_service.run_backtest(selected_symbol)
         load_ml_metrics.clear()
         st.success(
-            "Backtest complete – precision: {precision:.2f}, recall: {recall:.2f}, win rate: {win_rate:.2f}".format(**results)
+            (
+                "Backtest complete – precision: {precision:.2f}, recall: {recall:.2f}, "
+                "win rate: {win_rate:.2f}, accuracy: {accuracy:.2f}, F1: {f1_score:.2f}, "
+                "trades evaluated: {trades:d}"
+            ).format(**results)
         )
     if not metrics_df.empty:
         filtered = metrics_df[metrics_df["symbol"] == selected_symbol]

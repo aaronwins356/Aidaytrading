@@ -338,8 +338,22 @@ class MLService:
             history.append((datetime.fromisoformat(row["timestamp"]), float(row["confidence"]), row["worker"]))
         return list(reversed(history))
 
-    def run_backtest(self, symbol: str, limit: int = 1500, *, threshold: Optional[float] = None) -> Dict[str, float]:
-        """Replay stored features and return classification metrics."""
+    def run_backtest(
+        self,
+        symbol: str,
+        limit: int = 1500,
+        *,
+        threshold: Optional[float] = None,
+        warmup: int = 25,
+    ) -> Dict[str, float]:
+        """Replay stored features and return expanded classification metrics.
+
+        Args:
+            symbol: Trading symbol whose historical features should be replayed.
+            limit: Maximum number of stored feature rows to inspect.
+            threshold: Optional gating threshold override for the probability output.
+            warmup: Number of initial samples used only to prime the model without scoring.
+        """
 
         with self._connect() as conn:
             rows = conn.execute(
@@ -354,39 +368,73 @@ class MLService:
             ).fetchall()
 
         if not rows:
-            return {"precision": 0.0, "recall": 0.0, "win_rate": 0.0, "support": 0}
+            return {
+                "precision": 0.0,
+                "recall": 0.0,
+                "win_rate": 0.0,
+                "support": 0,
+                "accuracy": 0.0,
+                "f1_score": 0.0,
+                "avg_confidence": 0.0,
+                "threshold": float(threshold if threshold is not None else self._threshold),
+                "trades": 0,
+                "warmup": max(0, warmup),
+            }
 
         test_model = _ModelBundle(pipeline=self._build_pipeline(), forest=self._build_forest() if self._use_ensemble else None)
         gate = threshold if threshold is not None else self._threshold
 
-        true_positive = false_positive = true_negative = false_negative = 0
+        stats = _ClassificationStats()
+        probabilities: list[float] = []
+        warmup_span = max(0, warmup)
 
-        for row in rows:
+        for index, row in enumerate(rows):
             payload = json.loads(row["features_json"])
             features = self._sanitize_features(payload)
             label = int(row["label"])
+            if index < warmup_span:
+                # Warm-up period: let the models adjust to the most recent distribution
+                # before we start evaluating the trading signals.
+                test_model.learn(features, label)
+                continue
+
             proba = test_model.predict_proba(features)
+            probabilities.append(float(proba))
             prediction = int(proba >= gate)
-            if prediction == 1 and label == 1:
-                true_positive += 1
-            elif prediction == 1 and label == 0:
-                false_positive += 1
-            elif prediction == 0 and label == 0:
-                true_negative += 1
-            elif prediction == 0 and label == 1:
-                false_negative += 1
+            stats.update(prediction=prediction, label=label)
             test_model.learn(features, label)
 
-        precision = true_positive / (true_positive + false_positive) if (true_positive + false_positive) else 0.0
-        recall = true_positive / (true_positive + false_negative) if (true_positive + false_negative) else 0.0
-        win_rate = true_positive / (true_positive + false_positive + false_negative + true_negative) if (true_positive + false_positive + false_negative + true_negative) else 0.0
+        precision = stats.precision()
+        recall = stats.recall()
+        win_rate = stats.win_rate()
+        accuracy = stats.accuracy()
+        f1_score = stats.f1_score()
+        avg_confidence = sum(probabilities) / len(probabilities) if probabilities else 0.0
 
         metrics_payload = {
             "precision": precision,
             "recall": recall,
             "win_rate": win_rate,
-            "support": true_positive + false_positive + false_negative + true_negative,
+            "support": int(stats.support),
+            "accuracy": accuracy,
+            "f1_score": f1_score,
+            "avg_confidence": avg_confidence,
+            "threshold": float(gate),
+            "trades": int(stats.trades),
+            "warmup": warmup_span,
         }
+
+        self._logger.info(
+            "Backtest completed for %s – precision=%.3f recall=%.3f win_rate=%.3f accuracy=%.3f f1=%.3f trades=%d warmup=%d",
+            symbol,
+            precision,
+            recall,
+            win_rate,
+            accuracy,
+            f1_score,
+            stats.trades,
+            warmup_span,
+        )
 
         self._record_metrics(symbol, "backtest", metrics_payload)
         return metrics_payload
@@ -448,4 +496,66 @@ class MLService:
                 ),
             )
             conn.commit()
+
+@dataclass(slots=True)
+class _ClassificationStats:
+    """Lightweight container to keep track of classification outcomes."""
+
+    true_positive: int = 0
+    false_positive: int = 0
+    true_negative: int = 0
+    false_negative: int = 0
+
+    def update(self, *, prediction: int, label: int) -> None:
+        """Update the confusion counts based on a single prediction."""
+
+        if prediction == 1 and label == 1:
+            self.true_positive += 1
+        elif prediction == 1 and label == 0:
+            self.false_positive += 1
+        elif prediction == 0 and label == 0:
+            self.true_negative += 1
+        else:
+            self.false_negative += 1
+
+    @property
+    def support(self) -> int:
+        """Return the total number of scored examples."""
+
+        return self.true_positive + self.false_positive + self.true_negative + self.false_negative
+
+    @property
+    def trades(self) -> int:
+        """Return the number of trade signals emitted by the model."""
+
+        return self.true_positive + self.false_positive
+
+    def precision(self) -> float:
+        """Return the ratio of profitable trades to all executed trades."""
+
+        denominator = self.true_positive + self.false_positive
+        return self.true_positive / denominator if denominator else 0.0
+
+    def recall(self) -> float:
+        """Return the hit rate on all opportunities present in the data."""
+
+        denominator = self.true_positive + self.false_negative
+        return self.true_positive / denominator if denominator else 0.0
+
+    def accuracy(self) -> float:
+        """Return the fraction of correct predictions across the sample."""
+
+        return (self.true_positive + self.true_negative) / self.support if self.support else 0.0
+
+    def win_rate(self) -> float:
+        """Return the same notion of win rate used by the dashboard."""
+
+        return self.precision()
+
+    def f1_score(self) -> float:
+        """Return the harmonic mean of precision and recall."""
+
+        precision = self.precision()
+        recall = self.recall()
+        return (2 * precision * recall) / (precision + recall) if (precision + recall) else 0.0
 
