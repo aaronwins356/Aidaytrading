@@ -40,6 +40,9 @@ class MLShortWorker(BaseWorker):
         for symbol in self.symbols:
             feature_payload = self._ml_service.latest_features(symbol)
             if feature_payload is None:
+                self._logger.warning(
+                    "ML Short Alpha waiting for features from researcher for %s", symbol
+                )
                 self.update_signal_state(symbol, None, {"status": "awaiting-features"})
                 continue
             decision, probability = self._ml_service.predict(
@@ -49,6 +52,13 @@ class MLShortWorker(BaseWorker):
                 threshold=self.threshold,
             )
             self._last_probabilities[symbol] = probability
+            self._logger.debug(
+                "Prediction for %s -> probability=%.4f decision=%s (threshold=%.4f)",
+                symbol,
+                probability,
+                decision,
+                self.threshold,
+            )
             signal: Optional[str] = None
             if decision and probability >= self.threshold and self.is_ready(symbol):
                 signal = "sell"

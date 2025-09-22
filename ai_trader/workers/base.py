@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from ai_trader.services.ml import MLService
 
+from ai_trader.services.logging import get_logger
 from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
 
 
@@ -37,7 +38,7 @@ class BaseWorker(ABC):
         self.active: bool = True
         self.config: Dict[str, Any] = config or {}
         self.risk_config: Dict[str, Any] = risk_config or {}
-        self.warmup_candles: int = max(1, int(self.config.get("warmup_candles", 10)))
+        self.warmup_candles: int = max(1, int(self.config.get("warmup_candles", 3)))
         self.position_size_pct: float = float(self.risk_config.get("position_size_pct", 100.0))
         self.leverage: float = float(self.risk_config.get("leverage", 1.0))
         self.stop_loss_pct: float = float(self.risk_config.get("stop_loss_pct", 0.0))
@@ -47,7 +48,20 @@ class BaseWorker(ABC):
         self._state: Dict[str, Dict[str, Any]] = {}
         self._ml_service = ml_service
         self._ml_gate_enabled: bool = True
+        self._logger = get_logger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._ml_threshold_override: Optional[float] = None
+        self._config_ml_threshold: Optional[float] = None
+        threshold_override = self.config.get("ml_threshold")
+        if threshold_override is not None:
+            try:
+                value = float(threshold_override)
+                self._ml_threshold_override = value
+                self._config_ml_threshold = value
+            except (TypeError, ValueError):
+                self._logger.warning(
+                    "Invalid ml_threshold for %s; using service default.", self.name
+                )
+                self._ml_threshold_override = None
 
     def update_history(self, snapshot: MarketSnapshot) -> None:
         for symbol, price in snapshot.prices.items():
@@ -122,7 +136,7 @@ class BaseWorker(ABC):
             except (TypeError, ValueError):
                 self._ml_threshold_override = None
         else:
-            self._ml_threshold_override = None
+            self._ml_threshold_override = self._config_ml_threshold
 
     async def observe(
         self,
@@ -151,6 +165,11 @@ class BaseWorker(ABC):
             return True, 0.0
         feature_payload = features or self._ml_service.latest_features(symbol)
         if feature_payload is None:
+            self._logger.warning(
+                "ML confirmation skipped for %s on %s – no features available yet",
+                self.name,
+                symbol,
+            )
             return False, 0.0
         gate = threshold if threshold is not None else self._ml_threshold_override or self._ml_service.default_threshold
         decision, confidence = self._ml_service.predict(symbol, feature_payload, worker=self.name, threshold=gate)

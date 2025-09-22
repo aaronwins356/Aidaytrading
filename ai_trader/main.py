@@ -32,7 +32,12 @@ def load_config() -> Dict[str, Any]:
         return yaml.safe_load(file)
 
 
-def _validate_startup(engine: TradeEngine, workers: Sequence[object], config: Dict[str, Any]) -> None:
+def _validate_startup(
+    engine: TradeEngine,
+    workers: Sequence[object],
+    config: Dict[str, Any],
+    ml_service: MLService,
+) -> None:
     """Ensure critical services and configuration are ready before trading."""
 
     logger = get_logger(__name__)
@@ -40,8 +45,7 @@ def _validate_startup(engine: TradeEngine, workers: Sequence[object], config: Di
     ml_workers = [
         worker
         for worker in workers
-        if getattr(worker, "_ml_gate_enabled", False)
-        and getattr(worker, "_ml_service", None) is not None
+        if getattr(worker, "_ml_service", None) is not None
     ]
     if ml_workers:
         researchers = list(getattr(engine, "_researchers", []))
@@ -53,6 +57,11 @@ def _validate_startup(engine: TradeEngine, workers: Sequence[object], config: Di
                 len(ml_workers),
             )
             raise SystemExit(1)
+        if not ml_service.has_feature_history():
+            logger.warning(
+                "ML workers detected but no market feature history found. "
+                "Researcher will build the initial dataset before trades execute."
+            )
 
     _ensure_sqlite_schema(logger)
 
@@ -72,6 +81,21 @@ def _validate_startup(engine: TradeEngine, workers: Sequence[object], config: Di
                 "Live trading mode detected but missing Kraken credential(s): %s. "
                 "Populate config.yaml before running with real funds.",
                 ", ".join(missing_keys),
+            )
+
+    if ml_workers:
+        try:
+            with sqlite3.connect(DB_PATH) as connection:
+                cursor = connection.execute(
+                    "SELECT COUNT(1) FROM market_features"
+                )
+                count = cursor.fetchone()[0]
+        except sqlite3.Error as exc:
+            logger.error("Failed to inspect market_features table: %s", exc)
+            raise SystemExit(1) from exc
+        if count == 0:
+            logger.warning(
+                "Market feature store is empty. Allow the researcher to warm up before expecting ML-driven trades."
             )
 
     logger.info("✅ Startup validation passed")
@@ -269,7 +293,7 @@ async def start_bot() -> None:
         refresh_interval=float(worker_cfg.get("refresh_interval_seconds", 30)),
     )
 
-    _validate_startup(engine, workers, config)
+    _validate_startup(engine, workers, config, ml_service)
 
     stop_event = asyncio.Event()
 

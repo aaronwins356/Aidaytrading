@@ -59,7 +59,14 @@ class MarketResearchWorker(BaseWorker):
             return
         for symbol in self.symbols:
             candles = snapshot.candles.get(symbol, [])
-            if len(candles) < max(self.warmup_candles, 12):
+            required_candles = max(self.warmup_candles, 3)
+            if len(candles) < required_candles:
+                self._logger.debug(
+                    "Skipping feature snapshot for %s – need %d candles, have %d",
+                    symbol,
+                    required_candles,
+                    len(candles),
+                )
                 continue
             features = self._build_features(candles)
             ohlcv = dict(candles[-1]) if candles else self._build_ohlcv([])
@@ -81,6 +88,13 @@ class MarketResearchWorker(BaseWorker):
                 features,
                 label=label,
                 timestamp=snapshot.timestamp,
+            )
+            self._logger.info(
+                "Snapshot saved for %s | label=%.0f features=%d confidence=%.4f",
+                symbol,
+                float(label) if label is not None else -1.0,
+                len(features),
+                confidence,
             )
             state_payload = {"features": features, "label": label, "ml_confidence": confidence}
             state_payload.update({f"ohlcv_{key}": value for key, value in ohlcv.items()})
