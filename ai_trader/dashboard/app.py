@@ -511,6 +511,39 @@ def render_market_view(symbol: str, trades: pd.DataFrame, ml_service: MLService)
         st.plotly_chart(bar, use_container_width=True)
 
 
+def render_ml_debug_panel(config: Dict, ml_service: MLService, bot_states: pd.DataFrame) -> None:
+    st.subheader("ML Diagnostics")
+    with st.expander("Inspect live ML inputs", expanded=False):
+        st.caption(
+            "Use this panel to print the latest engineered features and confidence levels feeding each worker."
+        )
+        if st.button("Print ML snapshot", key="ml_debug_snapshot"):
+            symbols = config.get("trading", {}).get("symbols", [])
+            workers: List[str] = []
+            if not bot_states.empty:
+                workers = sorted(bot_states["worker"].unique())
+            if not symbols:
+                st.info("No symbols configured for trading.")
+            for symbol in symbols:
+                features = ml_service.latest_features(symbol) or {}
+                st.markdown(f"**{symbol}**")
+                if features:
+                    st.json({"features": features})
+                else:
+                    st.info("No features observed yet for this symbol.")
+                if workers:
+                    confidence_payload = {
+                        worker: round(
+                            ml_service.latest_confidence(symbol, worker=worker),
+                            4,
+                        )
+                        for worker in workers
+                    }
+                    st.json({"confidence": confidence_payload})
+                else:
+                    st.caption("Workers have not published state yet; confidence history unavailable.")
+
+
 def render_trade_logs(trades: pd.DataFrame) -> None:
     st.subheader("Trade Logs")
     if trades.empty:
@@ -754,6 +787,7 @@ def main() -> None:
     render_equity_curve(equity)
     render_bot_cards(config, bot_states, ml_service)
     render_market_view(symbol, trades, ml_service)
+    render_ml_debug_panel(config, ml_service, bot_states)
     render_trade_logs(trades)
     render_risk_controls(config, ml_service, symbol)
 

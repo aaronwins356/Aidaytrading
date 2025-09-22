@@ -64,7 +64,7 @@ class MLService:
         feature_keys: Iterable[str],
         learning_rate: float = 0.03,
         regularization: float = 0.0005,
-        threshold: float = 0.7,
+        threshold: float = 0.2,
         ensemble: bool = True,
         forest_size: int = 15,
         random_state: int = 7,
@@ -249,21 +249,39 @@ class MLService:
         """
 
         cleaned = self._sanitize_features(features)
+        feature_count = len(cleaned)
+        self._logger.debug(
+            "Received %d engineered features for %s", feature_count, symbol
+        )
         self._latest_features[symbol] = cleaned
         model = self._load_model(symbol)
 
         probability = model.predict_proba(cleaned)
-        if label is not None:
+        if label is None:
+            self._logger.warning(
+                "No label supplied for %s – skipping learning step (confidence=%.4f)",
+                symbol,
+                probability,
+            )
+        else:
             model.learn(cleaned, int(label))
             probability = model.predict_proba(cleaned)
             if persist:
                 self._persist_model(symbol, model)
 
+        decision = int(probability >= self._threshold)
+        self._logger.info(
+            "ML UPDATE | symbol=%s confidence=%.2f decision=%d features=%d",
+            symbol,
+            probability,
+            decision,
+            feature_count,
+        )
         self._record_prediction(
             symbol=symbol,
             worker="researcher",
             probability=probability,
-            decision=int(probability >= self._threshold),
+            decision=decision,
             threshold=self._threshold,
             timestamp=timestamp or datetime.utcnow(),
         )
@@ -282,6 +300,9 @@ class MLService:
         model = self._load_model(symbol)
         feature_payload: Mapping[str, float] | None = features or self._latest_features.get(symbol)
         if feature_payload is None:
+            self._logger.warning(
+                "Prediction skipped for %s – no features available yet", symbol
+            )
             return False, 0.0
 
         cleaned = self._sanitize_features(feature_payload)
@@ -290,6 +311,13 @@ class MLService:
         decision = probability >= gate
         worker_name = worker or "worker"
         self._latest_confidence[(worker_name, symbol)] = probability
+        self._logger.debug(
+            "Probability computed for %s via %s: %.4f (threshold=%.4f)",
+            symbol,
+            worker_name,
+            probability,
+            gate,
+        )
         self._record_prediction(
             symbol=symbol,
             worker=worker_name,
@@ -316,6 +344,8 @@ class MLService:
 
         model = self._load_model(symbol)
         weights = model.feature_importances()
+        if not weights:
+            return {}
         sorted_items = sorted(weights.items(), key=lambda item: abs(item[1]), reverse=True)
         return dict(sorted_items[:top_n])
 
