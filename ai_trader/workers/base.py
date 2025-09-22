@@ -9,9 +9,9 @@ from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
-    from ..services.ml import MLService
+    from ai_trader.services.ml import MLService
 
-from ..services.types import MarketSnapshot, OpenPosition, TradeIntent
+from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
 
 
 class BaseWorker(ABC):

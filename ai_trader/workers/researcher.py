@@ -6,10 +6,10 @@ import math
 from statistics import fmean, pstdev
 from typing import Dict, Iterable, List, Optional
 
-from .base import BaseWorker
-from ..services.ml import MLService
-from ..services.trade_log import TradeLog
-from ..services.types import MarketSnapshot, OpenPosition
+from ai_trader.services.ml import MLService
+from ai_trader.services.trade_log import TradeLog
+from ai_trader.services.types import MarketSnapshot, OpenPosition
+from ai_trader.workers.base import BaseWorker
 
 
 class MarketResearchWorker(BaseWorker):
