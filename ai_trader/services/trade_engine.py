@@ -240,5 +240,18 @@ class TradeEngine:
 
     def _update_control_flags(self) -> None:
         flags = self._trade_log.fetch_control_flags()
-        self._control_flags = flags
-        self._kill_switch = flags.get("kill_switch", "false").lower() == "true"
+        if flags != self._control_flags:
+            self._control_flags = flags
+            kill_flag = flags.get("kill_switch") or flags.get("global::kill_switch")
+            if kill_flag is None:
+                self._kill_switch = False
+            else:
+                self._kill_switch = kill_flag.lower() in {"true", "on", "1"}
+            for worker in self._workers:
+                apply = getattr(worker, "apply_control_flags", None)
+                if callable(apply):
+                    apply(self._control_flags)
+            for researcher in self._researchers:
+                apply = getattr(researcher, "apply_control_flags", None)
+                if callable(apply):
+                    apply(self._control_flags)

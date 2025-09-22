@@ -13,7 +13,7 @@ from .broker.kraken_client import KrakenClient
 from .broker.websocket_manager import KrakenWebsocketManager
 from .services.equity import EquityEngine
 from .services.logging import configure_logging, get_logger
-from .services.ml_pipeline import MLPipeline
+from .services.ml import MLService
 from .services.risk import RiskManager
 from .services.trade_engine import TradeEngine
 from .services.trade_log import TradeLog
@@ -51,25 +51,43 @@ async def start_bot() -> None:
 
     trade_log = TradeLog(DB_PATH)
     ml_cfg = config.get("ml", {})
-    feature_keys = [
-        "return_1",
-        "return_5",
-        "return_15",
-        "volatility",
-        "ema_fast",
-        "ema_slow",
-        "macd",
-        "macd_hist",
-        "rsi",
-        "zscore",
-    ]
-    ml_pipeline = MLPipeline(
+    feature_keys = ml_cfg.get(
+        "feature_keys",
+        [
+            "momentum_1",
+            "momentum_3",
+            "momentum_5",
+            "momentum_10",
+            "rolling_volatility",
+            "atr",
+            "volume_delta",
+            "volume_ratio",
+            "volume_ratio_3",
+            "volume_ratio_10",
+            "body_pct",
+            "upper_wick_pct",
+            "lower_wick_pct",
+            "wick_close_ratio",
+            "range_pct",
+            "ema_fast",
+            "ema_slow",
+            "macd",
+            "macd_hist",
+            "rsi",
+            "zscore",
+            "close_to_high",
+            "close_to_low",
+        ],
+    )
+    ml_service = MLService(
         db_path=DB_PATH,
         feature_keys=feature_keys,
-        learning_rate=float(ml_cfg.get("learning_rate", 0.05)),
-        regularization=float(ml_cfg.get("regularization", 0.001)),
-        batch_size=int(ml_cfg.get("training_batch_size", 250)),
-        max_training_rows=int(ml_cfg.get("max_training_rows", 2000)),
+        learning_rate=float(ml_cfg.get("learning_rate", 0.03)),
+        regularization=float(ml_cfg.get("regularization", 0.0005)),
+        threshold=float(ml_cfg.get("threshold", 0.7)),
+        ensemble=bool(ml_cfg.get("ensemble_enabled", True)),
+        forest_size=int(ml_cfg.get("ensemble_trees", 15)),
+        random_state=int(ml_cfg.get("random_state", 7)),
     )
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
     risk_manager = RiskManager(risk_cfg)
@@ -77,7 +95,7 @@ async def start_bot() -> None:
     symbols = trading_cfg.get("symbols", [])
     websocket_manager = KrakenWebsocketManager(symbols)
     worker_loader = WorkerLoader(worker_cfg, symbols)
-    shared_services = {"pipeline": ml_pipeline, "trade_log": trade_log}
+    shared_services = {"ml_service": ml_service, "trade_log": trade_log}
     workers, researchers = worker_loader.load(shared_services)
 
     engine = TradeEngine(

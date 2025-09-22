@@ -6,6 +6,11 @@ import math
 from statistics import pstdev
 from typing import Dict, Optional
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from ..services.ml import MLService
+
 from .base import BaseWorker
 from ..services.types import MarketSnapshot, OpenPosition, TradeIntent
 
@@ -21,11 +26,12 @@ class ShortMomentumWorker(BaseWorker):
         symbols,
         config: Optional[Dict] = None,
         risk_config: Optional[Dict] = None,
+        ml_service: "MLService" | None = None,
     ) -> None:
         self.fast_window = int((config or {}).get("fast_window", 12))
         self.slow_window = int((config or {}).get("slow_window", 48))
         lookback = max(self.slow_window * 3, int((config or {}).get("lookback", self.slow_window * 3)))
-        super().__init__(symbols=symbols, lookback=lookback, config=config, risk_config=risk_config)
+        super().__init__(symbols=symbols, lookback=lookback, config=config, risk_config=risk_config, ml_service=ml_service)
         self.momentum_threshold = float((config or {}).get("momentum_threshold", 0.004))
         self._position_tracker: Dict[str, Dict[str, float]] = {}
 
@@ -82,6 +88,8 @@ class ShortMomentumWorker(BaseWorker):
                 "price": last_price,
                 "threshold": threshold,
             }
+            if self._ml_service:
+                indicators["ml_confidence"] = self._ml_service.latest_confidence(symbol, self.name)
             self.update_signal_state(symbol, signal, indicators)
             if signal:
                 signals[symbol] = signal
@@ -113,6 +121,10 @@ class ShortMomentumWorker(BaseWorker):
             cash = max(cash, 0.0)
             if cash == 0:
                 return None
+            allowed, ml_confidence = self.ml_confirmation(symbol)
+            if not allowed:
+                self.update_signal_state(symbol, "ml-block", {"ml_confidence": ml_confidence})
+                return None
             tracker["best_price"] = price
             tracker["stop_price"] = price * (1 + self.stop_loss_pct / 100) if self.stop_loss_pct else None
             tracker["target_price"] = price * (1 - self.take_profit_pct / 100) if self.take_profit_pct else None
@@ -124,7 +136,7 @@ class ShortMomentumWorker(BaseWorker):
                 side="sell",
                 cash_spent=cash * self.leverage,
                 entry_price=price,
-                confidence=min(1.0, max(0.0, abs(tracker.get("stop_price", price) - price) / price)),
+                confidence=ml_confidence or min(1.0, max(0.0, abs(tracker.get("stop_price", price) - price) / price)),
             )
 
         # Position management for an open short.

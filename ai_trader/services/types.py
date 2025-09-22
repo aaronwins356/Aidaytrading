@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 TradeAction = Literal["OPEN", "CLOSE"]
 TradeSide = Literal["buy", "sell"]
@@ -54,4 +54,5 @@ class MarketSnapshot:
 
     prices: dict[str, float]
     history: dict[str, list[float]]
+    candles: Dict[str, List[dict[str, float]]] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.utcnow)

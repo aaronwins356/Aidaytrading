@@ -1,4 +1,4 @@
-"""Non-trading researcher bot that feeds the ML pipeline."""
+"""Non-trading researcher bot that feeds the online ML service."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from statistics import fmean, pstdev
 from typing import Dict, Iterable, List, Optional
 
 from .base import BaseWorker
-from ..services.ml_pipeline import MLPipeline
+from ..services.ml import MLService
 from ..services.trade_log import TradeLog
 from ..services.types import MarketSnapshot, OpenPosition
 
@@ -23,19 +23,20 @@ class MarketResearchWorker(BaseWorker):
         self,
         symbols,
         trade_log: TradeLog,
-        pipeline: MLPipeline,
+        ml_service: MLService,
         config: Optional[Dict] = None,
     ) -> None:
         lookback = max(200, int((config or {}).get("lookback", 200)))
         super().__init__(symbols=symbols, lookback=lookback, config=config)
         self._trade_log = trade_log
-        self._pipeline = pipeline
+        self._ml_service = ml_service
         cfg = config or {}
         self.feature_windows: List[int] = list(cfg.get("feature_windows", [5, 14, 30]))
         self.timeframe: str = cfg.get("timeframe", "1m")
         self.log_every_n = max(1, int(cfg.get("log_every_n_snapshots", 1)))
         self.volatility_window = max(5, int(cfg.get("volatility_window", 20)))
         self.ohlc_window = max(5, int(cfg.get("ohlc_window", 20)))
+        self.atr_window = max(5, int(cfg.get("atr_window", 14)))
         self._snapshot_counter = 0
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
@@ -57,12 +58,12 @@ class MarketResearchWorker(BaseWorker):
         if self._snapshot_counter % self.log_every_n != 0:
             return
         for symbol in self.symbols:
-            history = snapshot.history.get(symbol, [])
-            if len(history) < max(max(self.feature_windows), self.warmup_candles) + 5:
+            candles = snapshot.candles.get(symbol, [])
+            if len(candles) < max(self.warmup_candles, 12):
                 continue
-            features = self._build_features(history)
-            ohlcv = self._build_ohlcv(history)
-            label = 1.0 if features.get("return_5", 0.0) < 0 and features.get("return_1", 0.0) < 0 else 0.0
+            features = self._build_features(candles)
+            ohlcv = dict(candles[-1]) if candles else self._build_ohlcv([])
+            label = self._derive_label(candles)
             payload = {
                 "symbol": symbol,
                 "timeframe": self.timeframe,
@@ -75,47 +76,84 @@ class MarketResearchWorker(BaseWorker):
                 "label": label,
             }
             self._trade_log.record_market_features(payload)
-            self._pipeline.train(symbol)
-            state_payload = {"features": features, "label": label}
+            confidence = self._ml_service.update(
+                symbol,
+                features,
+                label=label,
+                timestamp=snapshot.timestamp,
+            )
+            state_payload = {"features": features, "label": label, "ml_confidence": confidence}
             state_payload.update({f"ohlcv_{key}": value for key, value in ohlcv.items()})
             self.update_signal_state(symbol, None, state_payload)
 
-    def _build_features(self, history: List[float]) -> Dict[str, float]:
-        latest = history[-1]
-        prev = history[-2]
-        returns = [math.log(history[idx] / history[idx - 1]) for idx in range(1, len(history)) if history[idx - 1] > 0]
-        return_1 = math.log(latest / prev) if prev > 0 else 0.0
-        return_5 = math.log(latest / history[-6]) if len(history) > 5 and history[-6] > 0 else return_1
-        return_15 = math.log(latest / history[-16]) if len(history) > 15 and history[-16] > 0 else return_5
-        volatility = (
-            pstdev(returns[-self.volatility_window :])
-            if len(returns) >= self.volatility_window
-            else pstdev(returns)
-            if returns
-            else 0.0
-        )
-        ema_fast = self._ema(history, 12)
-        ema_slow = self._ema(history, 26)
-        macd = ema_fast - ema_slow
-        signal = self._ema(history, 9)
-        macd_hist = macd - signal
-        rsi = self._rsi(history, period=14)
-        mean_price = fmean(history[-30:]) if len(history) >= 30 else fmean(history)
-        std_dev = pstdev(history[-30:]) if len(history) >= 30 else pstdev(history) if len(history) > 1 else 0.0
-        zscore = (latest - mean_price) / std_dev if std_dev else 0.0
-        features = {
-            "return_1": return_1,
-            "return_5": return_5,
-            "return_15": return_15,
-            "volatility": volatility,
-            "ema_fast": ema_fast,
-            "ema_slow": ema_slow,
-            "macd": macd,
-            "macd_hist": macd_hist,
-            "rsi": rsi,
-            "zscore": zscore,
-        }
+    def _build_features(self, candles: List[dict[str, float]]) -> Dict[str, float]:
+        closes = [float(candle.get("close", 0.0)) for candle in candles]
+        volumes = [float(candle.get("volume", 0.0)) for candle in candles]
+        latest_close = closes[-1]
+        returns = [
+            math.log(closes[idx] / closes[idx - 1])
+            for idx in range(1, len(closes))
+            if closes[idx - 1] > 0
+        ]
+
+        features: Dict[str, float] = {}
+        for window in (1, 3, 5, 10):
+            if len(closes) > window and closes[-window - 1] > 0:
+                features[f"momentum_{window}"] = math.log(latest_close / closes[-window - 1])
+            else:
+                features[f"momentum_{window}"] = 0.0
+
+        volatility_window = min(self.volatility_window, len(returns))
+        if volatility_window > 1:
+            features["rolling_volatility"] = pstdev(returns[-volatility_window:])
+        else:
+            features["rolling_volatility"] = pstdev(returns) if len(returns) > 1 else 0.0
+
+        features["atr"] = self._atr(candles, self.atr_window)
+
+        volume_delta = volumes[-1] - volumes[-2] if len(volumes) > 1 else 0.0
+        features["volume_delta"] = volume_delta
+        prev_volume = volumes[-2] if len(volumes) > 1 else 1.0
+        features["volume_ratio"] = volumes[-1] / prev_volume if prev_volume else 1.0
+        volume_window = volumes[-4:-1] if len(volumes) > 3 else volumes[:-1]
+        volume_mean = fmean(volume_window) if volume_window else 1.0
+        features["volume_ratio_3"] = volumes[-1] / volume_mean if volume_mean else 1.0
+        longer_window = volumes[-11:-1] if len(volumes) > 10 else volumes[:-1]
+        longer_mean = fmean(longer_window) if longer_window else volume_mean
+        features["volume_ratio_10"] = volumes[-1] / longer_mean if longer_mean else 1.0
+
+        last_candle = candles[-1]
+        body = float(last_candle.get("close", 0.0)) - float(last_candle.get("open", 0.0))
+        high_low_range = max(float(last_candle.get("high", 0.0)) - float(last_candle.get("low", 0.0)), 1e-8)
+        upper_wick = float(last_candle.get("high", 0.0)) - max(float(last_candle.get("open", 0.0)), float(last_candle.get("close", 0.0)))
+        lower_wick = min(float(last_candle.get("open", 0.0)), float(last_candle.get("close", 0.0))) - float(last_candle.get("low", 0.0))
+        features["body_pct"] = abs(body) / high_low_range
+        features["upper_wick_pct"] = max(upper_wick, 0.0) / high_low_range
+        features["lower_wick_pct"] = max(lower_wick, 0.0) / high_low_range
+        close_price = float(last_candle.get("close", 0.0)) or 1e-8
+        features["wick_close_ratio"] = (max(upper_wick, 0.0) + max(lower_wick, 0.0)) / abs(close_price)
+        features["range_pct"] = high_low_range / abs(close_price)
+
+        features["ema_fast"] = self._ema(closes, 12)
+        features["ema_slow"] = self._ema(closes, 26)
+        macd = features["ema_fast"] - features["ema_slow"]
+        signal = self._ema(closes, 9)
+        features["macd"] = macd
+        features["macd_hist"] = macd - signal
+        features["rsi"] = self._rsi(closes, period=14)
+        mean_price = fmean(closes[-30:]) if len(closes) >= 30 else fmean(closes)
+        std_dev = pstdev(closes[-30:]) if len(closes) >= 30 else pstdev(closes) if len(closes) > 1 else 0.0
+        features["zscore"] = (latest_close - mean_price) / std_dev if std_dev else 0.0
+        features["close_to_high"] = (float(last_candle.get("high", 0.0)) - latest_close) / latest_close if latest_close else 0.0
+        features["close_to_low"] = (latest_close - float(last_candle.get("low", 0.0))) / latest_close if latest_close else 0.0
         return features
+
+    def _derive_label(self, candles: List[dict[str, float]]) -> float:
+        if len(candles) < 2:
+            return 0.0
+        prev_close = float(candles[-2].get("close", 0.0))
+        latest_close = float(candles[-1].get("close", 0.0))
+        return 1.0 if latest_close < prev_close else 0.0
 
     @staticmethod
     def _ema(history: Iterable[float], window: int) -> float:
@@ -147,10 +185,9 @@ class MarketResearchWorker(BaseWorker):
         return max(0.0, min(100.0, rsi))
 
     def _build_ohlcv(self, history: List[float]) -> Dict[str, float]:
+        if not history:
+            return {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0, "volume": 0.0}
         window = history[-self.ohlc_window :]
-        if not window:
-            price = history[-1]
-            return {"open": price, "high": price, "low": price, "close": price, "volume": 0.0}
         open_price = window[0]
         high_price = max(window)
         low_price = min(window)
@@ -162,3 +199,23 @@ class MarketResearchWorker(BaseWorker):
             "close": close_price,
             "volume": 0.0,
         }
+
+    def _atr(self, candles: List[dict[str, float]], window: int) -> float:
+        if len(candles) < 2:
+            return 0.0
+        true_ranges: List[float] = []
+        for idx in range(1, len(candles)):
+            current = candles[idx]
+            prev = candles[idx - 1]
+            high = float(current.get("high", 0.0))
+            low = float(current.get("low", 0.0))
+            prev_close = float(prev.get("close", 0.0))
+            tr = max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close),
+            )
+            true_ranges.append(tr)
+        if not true_ranges:
+            return 0.0
+        return fmean(true_ranges[-window:]) if len(true_ranges) >= window else fmean(true_ranges)

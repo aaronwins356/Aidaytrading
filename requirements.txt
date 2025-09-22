@@ -6,3 +6,4 @@ plotly==5.20.0
 streamlit==1.32.0
 colorama==0.4.6
 numpy==1.26.4
+river==0.21.1

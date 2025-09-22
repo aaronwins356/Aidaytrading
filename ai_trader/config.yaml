@@ -22,10 +22,36 @@ risk:
   max_position_duration_minutes: 180
 
 ml:
-  learning_rate: 0.045
-  regularization: 0.001
-  training_batch_size: 250
-  max_training_rows: 2000
+  feature_keys:
+    - momentum_1
+    - momentum_3
+    - momentum_5
+    - momentum_10
+    - rolling_volatility
+    - atr
+    - volume_delta
+    - volume_ratio
+    - volume_ratio_3
+    - volume_ratio_10
+    - body_pct
+    - upper_wick_pct
+    - lower_wick_pct
+    - wick_close_ratio
+    - range_pct
+    - ema_fast
+    - ema_slow
+    - macd
+    - macd_hist
+    - rsi
+    - zscore
+    - close_to_high
+    - close_to_low
+  learning_rate: 0.03
+  regularization: 0.0005
+  threshold: 0.7
+  ensemble_enabled: true
+  ensemble_trees: 15
+  random_state: 7
 
 workers:
   refresh_interval_seconds: 15

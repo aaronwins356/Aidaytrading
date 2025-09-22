@@ -9,8 +9,11 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 import yaml
+
+from ..services.ml import MLService
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = BASE_DIR / "data" / "trades.db"
@@ -83,6 +86,49 @@ def save_config(config: Dict) -> None:
     with CONFIG_PATH.open("w", encoding="utf-8") as file:
         yaml.safe_dump(config, file, sort_keys=False)
     load_config.clear()
+
+
+@st.cache_resource
+def init_ml_service(config: Dict) -> MLService:
+    ml_cfg = config.get("ml", {})
+    feature_keys = ml_cfg.get(
+        "feature_keys",
+        [
+            "momentum_1",
+            "momentum_3",
+            "momentum_5",
+            "momentum_10",
+            "rolling_volatility",
+            "atr",
+            "volume_delta",
+            "volume_ratio",
+            "volume_ratio_3",
+            "volume_ratio_10",
+            "body_pct",
+            "upper_wick_pct",
+            "lower_wick_pct",
+            "wick_close_ratio",
+            "range_pct",
+            "ema_fast",
+            "ema_slow",
+            "macd",
+            "macd_hist",
+            "rsi",
+            "zscore",
+            "close_to_high",
+            "close_to_low",
+        ],
+    )
+    return MLService(
+        db_path=DB_PATH,
+        feature_keys=feature_keys,
+        learning_rate=float(ml_cfg.get("learning_rate", 0.03)),
+        regularization=float(ml_cfg.get("regularization", 0.0005)),
+        threshold=float(ml_cfg.get("threshold", 0.7)),
+        ensemble=bool(ml_cfg.get("ensemble_enabled", True)),
+        forest_size=int(ml_cfg.get("ensemble_trees", 15)),
+        random_state=int(ml_cfg.get("random_state", 7)),
+    )
 
 
 @st.cache_data(ttl=5)
@@ -200,6 +246,47 @@ def load_market_features(symbol: str, limit: int = 720) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=5)
+def load_ml_predictions(symbol: str, limit: int = 720) -> pd.DataFrame:
+    if not DB_PATH.exists():
+        return pd.DataFrame(columns=["timestamp", "worker", "confidence", "decision", "threshold"])
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT timestamp, worker, confidence, decision, threshold
+            FROM ml_predictions
+            WHERE symbol = ? AND worker != 'researcher'
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            conn,
+            params=(symbol, limit),
+        )
+    if df.empty:
+        return df
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    return df.sort_values("timestamp")
+
+
+@st.cache_data(ttl=5)
+def load_ml_metrics() -> pd.DataFrame:
+    if not DB_PATH.exists():
+        return pd.DataFrame(columns=["timestamp", "symbol", "mode", "precision", "recall", "win_rate", "support"])
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT timestamp, symbol, mode, precision, recall, win_rate, support
+            FROM ml_metrics
+            ORDER BY timestamp DESC
+            """,
+            conn,
+        )
+    if df.empty:
+        return df
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    return df
+
+
+@st.cache_data(ttl=5)
 def load_account_snapshot() -> Optional[Dict[str, object]]:
     if not DB_PATH.exists():
         return None
@@ -271,8 +358,9 @@ def render_equity_curve(equity_df: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_bot_cards(config: Dict, bot_states: pd.DataFrame) -> None:
+def render_bot_cards(config: Dict, bot_states: pd.DataFrame, ml_service: MLService) -> None:
     st.subheader("Strategy Stack")
+    _ = ml_service  # clarity: cards already include ML stats via stored indicators
     if bot_states.empty:
         st.info("Workers will appear once the engine publishes their state.")
         return
@@ -297,40 +385,44 @@ def render_bot_cards(config: Dict, bot_states: pd.DataFrame) -> None:
             st.markdown(f"**Status:** `{status}` | **Last Signal:** `{last_signal}`")
             indicators = latest.get("indicators", {}) or {}
             risk = latest.get("risk", {}) or {}
+            ml_confidence = indicators.get("ml_confidence")
             if indicators:
                 pretty = {k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in indicators.items()}
                 st.json({"indicators": pretty})
             if risk:
                 st.json({"risk": risk})
+            if ml_confidence is not None:
+                st.metric("ML Confidence", f"{ml_confidence:.3f}")
             st.markdown(f"_Last update: {latest['updated_at'].strftime('%H:%M:%S UTC')}_")
 
 
-def build_candlestick(df: pd.DataFrame, symbol: str) -> Optional[go.Figure]:
+def build_market_figure(
+    df: pd.DataFrame,
+    symbol: str,
+    trades: pd.DataFrame,
+    confidence_df: pd.DataFrame,
+) -> Optional[go.Figure]:
     if df.empty:
         return None
-    fig = go.Figure(
-        data=[
-            go.Candlestick(
-                x=df["timestamp"],
-                open=df["open"],
-                high=df["high"],
-                low=df["low"],
-                close=df["close"],
-                name=symbol,
-            )
-        ]
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.7, 0.3],
     )
-    fig.update_layout(template="plotly_dark", height=420, margin=dict(l=20, r=20, t=40, b=40))
-    return fig
-
-
-def render_market_view(symbol: str, trades: pd.DataFrame) -> None:
-    st.subheader("Market Intelligence")
-    feature_df = load_market_features(symbol)
-    fig = build_candlestick(feature_df, symbol)
-    if fig is None:
-        st.info("Waiting for market data snapshots from the researcher bot.")
-        return
+    fig.add_trace(
+        go.Candlestick(
+            x=df["timestamp"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name=symbol,
+        ),
+        row=1,
+        col=1,
+    )
     entries = trades[(trades["symbol"] == symbol) & trades["exit_price"].isna()]
     exits = trades[(trades["symbol"] == symbol) & trades["exit_price"].notna()]
     if not entries.empty:
@@ -341,7 +433,9 @@ def render_market_view(symbol: str, trades: pd.DataFrame) -> None:
                 mode="markers",
                 marker=dict(symbol="triangle-down", size=12, color="#ff4d4d"),
                 name="Short entries",
-            )
+            ),
+            row=1,
+            col=1,
         )
     if not exits.empty:
         fig.add_trace(
@@ -351,8 +445,41 @@ def render_market_view(symbol: str, trades: pd.DataFrame) -> None:
                 mode="markers",
                 marker=dict(symbol="triangle-up", size=12, color="#00ffb3"),
                 name="Covers",
-            )
+            ),
+            row=1,
+            col=1,
         )
+    if not confidence_df.empty:
+        for worker, worker_df in confidence_df.groupby("worker"):
+            fig.add_trace(
+                go.Scatter(
+                    x=worker_df["timestamp"],
+                    y=worker_df["confidence"],
+                    mode="lines",
+                    name=f"{worker} confidence",
+                ),
+                row=2,
+                col=1,
+            )
+        fig.update_yaxes(title_text="Confidence", range=[0, 1], row=2, col=1)
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_layout(
+        template="plotly_dark",
+        height=520,
+        margin=dict(l=20, r=20, t=40, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
+
+
+def render_market_view(symbol: str, trades: pd.DataFrame, ml_service: MLService) -> None:
+    st.subheader("Market Intelligence")
+    feature_df = load_market_features(symbol)
+    confidence_df = load_ml_predictions(symbol)
+    fig = build_market_figure(feature_df, symbol, trades, confidence_df)
+    if fig is None:
+        st.info("Waiting for market data snapshots from the researcher bot.")
+        return
     st.plotly_chart(fig, use_container_width=True)
 
     if not feature_df.empty:
@@ -363,6 +490,17 @@ def render_market_view(symbol: str, trades: pd.DataFrame) -> None:
             if column in latest:
                 enriched[column] = latest[column]
         st.json(enriched)
+    top_features = ml_service.feature_importance(symbol)
+    if top_features:
+        st.caption("Top ML feature weights")
+        feat_df = pd.DataFrame(
+            {"feature": list(top_features.keys()), "weight": list(top_features.values())}
+        )
+        bar = go.Figure(
+            data=[go.Bar(x=feat_df["feature"], y=feat_df["weight"], marker_color="#00d4ff")]
+        )
+        bar.update_layout(template="plotly_dark", height=320, margin=dict(l=20, r=20, t=40, b=40))
+        st.plotly_chart(bar, use_container_width=True)
 
 
 def render_trade_logs(trades: pd.DataFrame) -> None:
@@ -376,11 +514,12 @@ def render_trade_logs(trades: pd.DataFrame) -> None:
     st.dataframe(filtered, use_container_width=True)
 
 
-def render_risk_controls(config: Dict) -> None:
+def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> None:
     st.subheader("Risk & Deployment Controls")
     trading_cfg = config.get("trading", {})
     risk_cfg = config.get("risk", {})
     worker_cfg = config.get("workers", {}).get("definitions", {})
+    control_flags = load_control_flags()
 
     with st.form("global_risk_form"):
         st.write("### Global Risk")
@@ -490,6 +629,56 @@ def render_risk_controls(config: Dict) -> None:
                 save_config(config)
                 st.success(f"Updated configuration for {worker_key}.")
 
+    st.write("### ML Gating Overrides")
+    gating_workers = [
+        (worker_key, definition)
+        for worker_key, definition in worker_cfg.items()
+        if not definition.get("module", "").endswith("researcher.MarketResearchWorker")
+    ]
+    if gating_workers:
+        cols = st.columns(min(3, len(gating_workers)))
+        for idx, (worker_key, definition) in enumerate(gating_workers):
+            module_path = definition.get("module", worker_key)
+            worker_label = MODULE_DISPLAY_NAMES.get(module_path, module_path.split(".")[-1])
+            flag_key = f"ml::{worker_label}"
+            enabled = control_flags.get(flag_key, "on").lower() not in {"off", "false", "0", "disabled"}
+            toggle = cols[idx % len(cols)].toggle(
+                f"{worker_label} gating",
+                value=enabled,
+                key=f"ml_gate_{worker_key}",
+            )
+            if toggle != enabled:
+                set_control_flag(flag_key, "on" if toggle else "off")
+                st.success(f"Updated ML gating for {worker_label}.")
+    else:
+        st.info("No trading workers configured for ML gating.")
+
+    st.write("### ML Validation & Backtests")
+    metrics_df = load_ml_metrics()
+    validation_cols = st.columns(3)
+    symbol_options = config.get("trading", {}).get("symbols", [symbol])
+    default_index = symbol_options.index(symbol) if symbol in symbol_options else 0
+    selected_symbol = validation_cols[0].selectbox(
+        "Symbol",
+        options=symbol_options,
+        index=default_index,
+        key="ml_metric_symbol",
+    )
+    if validation_cols[1].button("Run backtest", key="run_ml_backtest"):
+        results = ml_service.run_backtest(selected_symbol)
+        load_ml_metrics.clear()
+        st.success(
+            "Backtest complete – precision: {precision:.2f}, recall: {recall:.2f}, win rate: {win_rate:.2f}".format(**results)
+        )
+    if not metrics_df.empty:
+        filtered = metrics_df[metrics_df["symbol"] == selected_symbol]
+        if filtered.empty:
+            st.info("No metrics recorded yet for this symbol. Run a backtest to populate statistics.")
+        else:
+            st.dataframe(filtered.head(10), use_container_width=True)
+    else:
+        st.info("Metrics will appear once backtests or live evaluations are recorded.")
+
 
 def render_sidebar(config: Dict) -> str:
     st.sidebar.title("Live Controls")
@@ -541,6 +730,7 @@ def render_sidebar(config: Dict) -> str:
 
 def main() -> None:
     config = load_config()
+    ml_service = init_ml_service(config)
     st.title("Quant Operations Terminal")
     symbol = render_sidebar(config)
     bot_states = load_bot_states()
@@ -550,10 +740,10 @@ def main() -> None:
 
     render_account_overview(config, equity, trades, account_snapshot)
     render_equity_curve(equity)
-    render_bot_cards(config, bot_states)
-    render_market_view(symbol, trades)
+    render_bot_cards(config, bot_states, ml_service)
+    render_market_view(symbol, trades, ml_service)
     render_trade_logs(trades)
-    render_risk_controls(config)
+    render_risk_controls(config, ml_service, symbol)
 
 
 if __name__ == "__main__":
