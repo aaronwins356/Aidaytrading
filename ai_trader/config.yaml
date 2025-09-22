@@ -46,7 +46,7 @@ ml:
     - zscore
     - close_to_high
     - close_to_low
-  learning_rate: 0.03
+  lr: 0.03
   regularization: 0.0005
   threshold: 0.7
   ensemble_enabled: true
