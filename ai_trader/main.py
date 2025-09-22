@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import sqlite3
+from logging import Logger
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, List, Sequence, Set
 
 import yaml
 
@@ -94,9 +96,17 @@ async def start_bot() -> None:
 
     symbols = trading_cfg.get("symbols", [])
     websocket_manager = KrakenWebsocketManager(symbols)
-    worker_loader = WorkerLoader(worker_cfg, symbols)
+    worker_loader = WorkerLoader(worker_cfg, symbols, researcher_config=config.get("researcher"))
     shared_services = {"ml_service": ml_service, "trade_log": trade_log}
     workers, researchers = worker_loader.load(shared_services)
+
+    _validate_startup(
+        workers,
+        researchers,
+        ml_service,
+        symbols,
+        logger,
+    )
 
     engine = TradeEngine(
         broker=broker,
@@ -130,8 +140,81 @@ async def start_bot() -> None:
 
 
 def main() -> None:
-    asyncio.run(start_bot())
+    try:
+        asyncio.run(start_bot())
+    except RuntimeError as exc:
+        print(f"Startup validation failed: {exc}")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":
     main()
+
+
+def _validate_startup(
+    workers: Sequence[object],
+    researchers: Sequence[object],
+    ml_service: MLService,
+    symbols: Iterable[str],
+    logger: Logger,
+) -> None:
+    """Ensure critical dependencies are ready before starting the engine."""
+
+    issues: List[str] = []
+
+    if not researchers:
+        issues.append(
+            "No MarketResearchWorker instances were loaded. Configure `workers.researcher` to "
+            "enable ML feature engineering."
+        )
+
+    missing_tables = _missing_tables(DB_PATH, _required_tables())
+    if missing_tables:
+        issues.append(
+            "Missing database tables detected: "
+            + ", ".join(sorted(missing_tables))
+            + ". Recreate the SQLite schema by running the bot once or clearing the database."
+        )
+
+    ml_workers = [worker for worker in workers if getattr(worker, "_ml_service", None)]
+    if ml_workers and not ml_service.has_feature_history(symbols):
+        issues.append(
+            "ML gating is enabled but no engineered features were found in the database. "
+            "Allow the researcher to run first or disable ML gating."
+        )
+
+    if issues:
+        for message in issues:
+            logger.error(message)
+        raise RuntimeError("see log output for details")
+
+    logger.info("Startup validation passed with %d researcher worker(s).", len(researchers))
+
+
+def _required_tables() -> Set[str]:
+    """Return the set of SQLite tables the bot depends on."""
+
+    return {
+        "trades",
+        "equity_curve",
+        "market_features",
+        "account_snapshots",
+        "bot_state",
+        "control_flags",
+        "ml_models_state",
+        "ml_predictions",
+        "ml_metrics",
+        "ml_models",
+    }
+
+
+def _missing_tables(db_path: Path, required: Set[str]) -> Set[str]:
+    """Compare required tables against the SQLite schema."""
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing = {row[0] for row in cursor.fetchall()}
+    except sqlite3.Error as exc:  # pragma: no cover - defensive logging
+        raise RuntimeError(f"Unable to inspect database schema: {exc}") from exc
+    return required - existing

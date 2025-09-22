@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import sys, os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-
 import json
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -16,9 +14,18 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yaml
 
-from ai_trader.services.ml import MLService
-
 BASE_DIR = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = BASE_DIR.parent
+
+try:
+    from ai_trader.services.ml import MLService
+except ModuleNotFoundError:  # pragma: no cover - fallback for direct script execution
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.append(str(PROJECT_ROOT))
+    from ai_trader.services.ml import MLService
+
+st.set_page_config(page_title="AI Trader Control Center", layout="wide", page_icon="🧠")
+
 DB_PATH = BASE_DIR / "data" / "trades.db"
 CONFIG_PATH = BASE_DIR / "config.yaml"
 MODULE_DISPLAY_NAMES = {
@@ -27,8 +34,6 @@ MODULE_DISPLAY_NAMES = {
     "ai_trader.workers.ml_short.MLShortWorker": "ML Short Alpha",
     "ai_trader.workers.researcher.MarketResearchWorker": "Research Sentinel",
 }
-
-st.set_page_config(page_title="AI Trader Control Center", layout="wide", page_icon="🧠")
 
 CUSTOM_CSS = """
 <style>

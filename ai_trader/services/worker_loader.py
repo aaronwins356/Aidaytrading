@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from typing import Any, Dict, Iterable, Iterator, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 from ai_trader.services.logging import get_logger
 
@@ -12,10 +12,20 @@ from ai_trader.services.logging import get_logger
 class WorkerLoader:
     """Load worker classes defined in configuration."""
 
-    def __init__(self, worker_config: Dict[str, Any], symbols: Sequence[str]) -> None:
-        self._worker_config = worker_config
+    def __init__(
+        self,
+        worker_config: Optional[Dict[str, Any]],
+        symbols: Sequence[str],
+        researcher_config: Any | None = None,
+    ) -> None:
+        self._worker_config: Dict[str, Any] = worker_config or {}
         self._symbols = list(symbols)
         self._logger = get_logger(__name__)
+        self._forced_researchers: Set[str] = self._normalize_researchers(researcher_config)
+        if not self._forced_researchers:
+            self._logger.warning(
+                "No market researcher configured; ML feature engineering will remain idle."
+            )
 
     def load(self, shared_services: Dict[str, Any]) -> Tuple[List[object], List[object]]:
         workers: List[object] = []
@@ -67,16 +77,51 @@ class WorkerLoader:
         """
 
         definitions = self._worker_config.get("definitions", {})
-        if isinstance(definitions, dict):
-            for worker_name, definition in definitions.items():
-                yield worker_name, definition, False
-
-        researcher_cfg = self._worker_config.get("researcher")
-        if not researcher_cfg:
+        if not isinstance(definitions, dict):
             return
 
-        for worker_name, definition in self._coerce_researchers(researcher_cfg):
-            yield worker_name, definition, True
+        for worker_name, definition in definitions.items():
+            force_researcher = worker_name in self._forced_researchers
+            yield worker_name, definition, force_researcher
+
+    def _normalize_researchers(self, external_config: Any | None) -> Set[str]:
+        """Normalise legacy researcher config blocks into worker definitions."""
+
+        forced: Set[str] = set()
+        definitions = self._worker_config.setdefault("definitions", {})
+        if not isinstance(definitions, dict):
+            self._logger.warning(
+                "Worker definitions must be a mapping, received %s", type(definitions).__name__
+            )
+            definitions = {}
+            self._worker_config["definitions"] = definitions
+
+        candidate_cfgs: List[Any] = []
+        if external_config is not None:
+            candidate_cfgs.append(external_config)
+        worker_level_cfg = self._worker_config.get("researcher")
+        if worker_level_cfg is not None:
+            candidate_cfgs.append(worker_level_cfg)
+
+        for cfg in candidate_cfgs:
+            for worker_name, definition in self._coerce_researchers(cfg):
+                if not isinstance(definition, dict):
+                    continue
+                normalized = dict(definition)
+                normalized.setdefault(
+                    "module", "ai_trader.workers.researcher.MarketResearchWorker"
+                )
+                normalized.setdefault("enabled", True)
+                existing = definitions.get(worker_name, {})
+                merged = {**normalized, **existing}
+                definitions[worker_name] = merged
+                forced.add(worker_name)
+
+        for worker_name, definition in definitions.items():
+            if self._looks_like_researcher(definition):
+                forced.add(worker_name)
+
+        return forced
 
     @staticmethod
     def _coerce_researchers(
@@ -99,4 +144,13 @@ class WorkerLoader:
             for index, definition in enumerate(researcher_cfg):
                 if isinstance(definition, dict):
                     yield definition.get("name", f"researcher_{index}"), definition
+
+    @staticmethod
+    def _looks_like_researcher(definition: Dict[str, Any]) -> bool:
+        """Return True when the worker definition maps to a researcher class."""
+
+        module = definition.get("module")
+        if isinstance(module, str) and module.endswith("MarketResearchWorker"):
+            return True
+        return bool(definition.get("is_researcher"))
 
