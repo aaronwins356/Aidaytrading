@@ -182,6 +182,8 @@ def test_worker_builds_intent_with_features(monkeypatch):
     assert "signal_return_volatility_short" in intent.features
     assert "signal_volume_delta" in intent.features
     assert intent.features["learning_risk_multiplier"] == 1.0
+    assert "risk_equity_pct" in intent.features
+    assert "proposed_notional" in intent.features
 
 
 def test_compute_quantity_respects_minimum(monkeypatch):
@@ -193,6 +195,7 @@ def test_compute_quantity_respects_minimum(monkeypatch):
 def test_worker_uses_risk_engine_for_sizing(monkeypatch):
     worker = build_worker(monkeypatch)
     worker.risk_engine = RiskEngine(0.05, 0.1, 0.02, 5, False, 0.05)
+    worker.risk_engine.check_account(10_000)
     qty = worker.compute_quantity(
         price=100,
         risk_budget=50,
