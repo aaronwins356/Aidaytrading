@@ -10,6 +10,7 @@ from threading import Lock
 from typing import Any, Dict, Mapping, Optional
 
 from desk.config import DESK_ROOT
+from desk.services.readiness import ReadinessReport
 
 
 class DashboardRecorder:
@@ -95,6 +96,15 @@ class DashboardRecorder:
                     proba_win REAL,
                     features_json TEXT,
                     label INTEGER
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS readiness_reports (
+                    generated_at REAL PRIMARY KEY,
+                    status TEXT,
+                    payload TEXT
                 )
                 """
             )
@@ -249,6 +259,22 @@ class DashboardRecorder:
                     None if probability is None else float(probability),
                     json.dumps(payload),
                     None if label is None else int(label),
+                ),
+            )
+            self.conn.commit()
+
+    def record_readiness(self, report: ReadinessReport) -> None:
+        payload = json.dumps(report.to_dict())
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO readiness_reports (generated_at, status, payload)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    float(report.generated_at),
+                    report.overall_status(),
+                    payload,
                 ),
             )
             self.conn.commit()

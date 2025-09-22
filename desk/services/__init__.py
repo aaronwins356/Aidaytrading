@@ -16,6 +16,7 @@ __all__ = [
     "Intent",
     "VetoResult",
     "Worker",
+    "ReadinessChecker",
 ]
 
 
@@ -80,6 +81,10 @@ def __getattr__(name: str):  # pragma: no cover - import hook
         from .worker import Worker
 
         return Worker
+    if name == "ReadinessChecker":
+        from .readiness import ReadinessChecker
+
+        return ReadinessChecker
     if name == "broker":
         from importlib import import_module
 
