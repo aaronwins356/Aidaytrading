@@ -11,6 +11,7 @@ from sklearn.metrics import auc, precision_recall_curve, roc_auc_score, roc_curv
 
 from components import download_chart_as_png
 from data_io import DB_LIVE, load_ml_scores
+from ._shared import ensure_data_sources
 
 st.set_page_config(page_title="ML Intelligence · Aurora Desk", page_icon="🧠")
 
@@ -73,7 +74,7 @@ with col2:
 st.subheader("Score gating analysis")
 threshold = st.slider("Minimum probability", 0.0, 1.0, 0.5, step=0.05)
 filtered = worker_df[worker_df["proba_win"] >= threshold]
-trades_df = st.session_state.get("data_sources", {}).get("trades", pd.DataFrame())
+trades_df = ensure_data_sources().get("trades", pd.DataFrame())
 if not trades_df.empty:
     merged = worker_df.merge(trades_df, how="left", on=["worker", "symbol"], suffixes=("", "_trade"))
 else:

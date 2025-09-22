@@ -4,10 +4,12 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from ._shared import ensure_data_sources
+
 st.set_page_config(page_title="Orders & Trades · Aurora Desk", page_icon="📜")
 
 st.title("Orders & Trades")
-trades = st.session_state.get("data_sources", {}).get("trades", pd.DataFrame())
+trades = ensure_data_sources().get("trades", pd.DataFrame())
 if trades.empty:
     st.info("No trades to display.")
     st.stop()

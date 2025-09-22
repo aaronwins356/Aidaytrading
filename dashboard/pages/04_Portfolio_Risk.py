@@ -15,11 +15,12 @@ from analytics import (
     simulate_what_if,
 )
 from components import correlation_heatmap
+from ._shared import ensure_data_sources
 
 st.set_page_config(page_title="Portfolio Risk · Aurora Desk", page_icon="🛡")
 
 st.title("Portfolio & Risk")
-data_sources = st.session_state.get("data_sources", {})
+data_sources = ensure_data_sources()
 trades = data_sources.get("trades", pd.DataFrame())
 equity = data_sources.get("equity", pd.DataFrame())
 if trades.empty:

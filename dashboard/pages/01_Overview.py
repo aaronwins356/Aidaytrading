@@ -18,11 +18,12 @@ from components import (
     pnl_histogram,
     rolling_sharpe_chart,
 )
+from ._shared import ensure_data_sources
 
 
 @st.cache_data(show_spinner=False)
 def _get_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    data = st.session_state.get("data_sources", {})
+    data = ensure_data_sources()
     trades = data.get("trades", pd.DataFrame()).copy()
     equity = data.get("equity", pd.DataFrame()).copy()
     return trades, equity
