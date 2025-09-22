@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
+from desk.services.pretty_logger import pretty_logger
+
 try:  # pragma: no cover - optional dependency guard
     from urllib import request
 except Exception:  # pragma: no cover - exercised in tests
@@ -117,7 +119,9 @@ class TelemetryClient:
                     self._publisher(event.payload)
                     self._backoff = self.flush_interval
                 except Exception as exc:  # pragma: no cover - resiliency path
-                    print(f"[Telemetry] Failed to publish {event.event_type}: {exc}")
+                    pretty_logger.warning(
+                        f"[Telemetry] Failed to publish {event.event_type}: {exc}"
+                    )
                     self._queue.put(event)
                     break
 
@@ -142,7 +146,9 @@ class TelemetryClient:
                     self._backoff = self.flush_interval
                 except Exception as exc:  # pragma: no cover - resiliency path
                     # Push back into the queue and sleep with backoff.
-                    print(f"[Telemetry] Failed to publish {event.event_type}: {exc}")
+                    pretty_logger.warning(
+                        f"[Telemetry] Failed to publish {event.event_type}: {exc}"
+                    )
                     time.sleep(self._backoff)
                     self._backoff = min(self._backoff * 2, self.max_backoff)
                     self._queue.put(event)

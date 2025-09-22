@@ -22,6 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in tests
 from desk.data import normalize_ohlcv
 from desk.services.kraken_ws import KrakenWebSocketClient
 from desk.services.logger import EventLogger
+from desk.services.pretty_logger import pretty_logger
 
 try:  # pragma: no cover - typing only
     from typing import TYPE_CHECKING
@@ -252,7 +253,14 @@ class KrakenBroker:
         meta = ""
         if payload:
             meta = " | " + ", ".join(f"{key}={value}" for key, value in payload.items())
-        print(f"[KrakenBroker][{level.upper()}] {symbol}: {message}{meta}")
+        text = f"[Broker] {symbol}: {message}{meta}"
+        level_name = level.upper()
+        if level_name == "ERROR":
+            pretty_logger.error(text)
+        elif level_name == "WARNING":
+            pretty_logger.warning(text)
+        else:
+            pretty_logger.info(text)
         if self.event_logger is not None:
             self.event_logger.log_feed_event(level=level, symbol=symbol, message=message, **payload)
 

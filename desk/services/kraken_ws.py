@@ -40,6 +40,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in tests
     WebSocketClientProtocol = object  # type: ignore[misc, assignment]
 
 from desk.services.logger import EventLogger
+from desk.services.pretty_logger import pretty_logger
 from desk.utils import SlidingWindowRateLimiter
 
 
@@ -470,6 +471,7 @@ class KrakenWSClient:
                 continue
             if not result:
                 continue
+            pretty_logger.rest_fallback_notice()
             try:
                 inserted = self._store.append(symbol, result)
             except Exception as exc:  # pragma: no cover - defensive store guard
@@ -1098,11 +1100,26 @@ class KrakenWSClient:
     ) -> None:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
         meta = f" | {detail}" if detail else ""
-        text = f"[{timestamp}][KrakenWS][{level.upper()}] {symbol}: {message}{meta}"
-        colour = _CONSOLE_COLOURS.get(level.upper())
-        if colour:
-            text = f"{colour}{text}{_CONSOLE_RESET}"
-        print(text)
+        text = f"[KrakenWS] {symbol}: {message}{meta}"
+        level_name = level.upper()
+        lower_message = message.lower()
+        if "rest fallback" in lower_message:
+            pretty_logger.rest_fallback_notice()
+            if level_name in {"ERROR", "WARNING"}:
+                if level_name == "ERROR":
+                    pretty_logger.error(text)
+                else:
+                    pretty_logger.warning(text)
+        else:
+            dedupe_key = None
+            if "subscription" in lower_message:
+                dedupe_key = f"ws_subscription:{symbol}:{message}"
+            if level_name == "ERROR":
+                pretty_logger.error(text, dedupe_key=dedupe_key)
+            elif level_name == "WARNING":
+                pretty_logger.warning(text, dedupe_key=dedupe_key)
+            else:
+                pretty_logger.info(text, dedupe_key=dedupe_key)
         if self._logger is None:
             return
         try:

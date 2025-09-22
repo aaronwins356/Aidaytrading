@@ -16,6 +16,7 @@ from desk.config import DESK_ROOT
 from desk.data import candles_to_dataframe
 from desk.services.logger import EventLogger
 from desk.services.risk import PositionSizingResult, RiskEngine
+from desk.services.pretty_logger import pretty_logger
 
 _FALLBACK_MINIMUM_ORDER_SIZES = {
     "BTC": 0.0001,
@@ -486,20 +487,6 @@ class ExecutionEngine:
                 }
             )
 
-            notional_value = qty * reference_price
-            self.logger.log_feed_event(
-                "INFO",
-                symbol,
-                "Submitting market order.",
-                worker=worker.name,
-                qty=float(qty),
-                usd_value=float(notional_value),
-                equity_pct=float(sizing_result.risk_pct),
-                min_notional_adjustment=bool(sizing_result.min_notional_applied),
-                min_qty_adjustment=bool(sizing_result.min_qty_applied),
-                attempt=attempt,
-            )
-
             metadata_payload: Dict[str, Any] = dict(metadata or {})
             metadata_payload["risk"] = sizing_result.to_dict()
 
@@ -612,11 +599,37 @@ class ExecutionEngine:
                 }
             )
 
+        self.logger.log_feed_event(
+            "INFO",
+            symbol,
+            "Order executed",
+            worker=worker.name,
+            qty=float(fill_qty),
+            usd_value=float(fill_qty * fill_price),
+            equity_pct=float(equity_pct),
+        )
         self.open_positions.setdefault(symbol, []).append(trade)
         self.position_store.persist(trade)
         if self.risk_engine:
             self.risk_engine.register_allocation(trade.trade_id, max(equity_pct, 0.0))
-        self.logger.log_trade(worker, symbol, side, fill_qty, fill_price, pnl=0.0)
+        self.logger.log_trade(
+            worker,
+            symbol,
+            side,
+            fill_qty,
+            fill_price,
+            pnl=0.0,
+            equity_pct=float(equity_pct),
+        )
+        if not isinstance(self.logger, EventLogger):
+            pretty_logger.trade_opened(
+                symbol,
+                side,
+                float(fill_qty),
+                float(fill_qty * fill_price),
+                float(equity_pct),
+                float(fill_price),
+            )
         self.logger.write(
             {
                 "type": "trade_opened",
@@ -633,10 +646,6 @@ class ExecutionEngine:
                 "min_qty_adjustment": bool(sizing_result.min_qty_applied),
                 "sizing": sizing_payload,
             }
-        )
-        print(
-            "TRADE OPENED:"
-            f" {symbol} {side.upper()} {fill_qty:.8f} @ {fill_price:.5f} | {equity_pct * 100:.2f}% equity"
         )
         if self.dashboard:
             features = (metadata or {}).get("features") if metadata else None
@@ -694,6 +703,18 @@ class ExecutionEngine:
             self.risk_engine.release_allocation(trade.trade_id)
         pnl = trade.unrealized_pnl(exit_price)
         self.logger.log_trade_end(trade.worker, trade.symbol, exit_price, exit_reason, pnl)
+        if not isinstance(self.logger, EventLogger):
+            price_delta = 0.0
+            if trade.entry_price:
+                price_delta = (float(exit_price) - trade.entry_price) / trade.entry_price
+            direction = 1.0 if trade.side.upper() in {"BUY", "LONG"} else -1.0
+            pretty_logger.trade_closed(
+                trade.symbol,
+                trade.side,
+                float(exit_price),
+                price_delta * direction,
+                float(pnl),
+            )
         self.logger.write(
             {
                 "type": "trade_closed",
@@ -706,10 +727,6 @@ class ExecutionEngine:
                 "exit_reason": exit_reason,
                 "pnl": pnl,
             }
-        )
-        print(
-            "TRADE CLOSED:"
-            f" {trade.symbol} {trade.side} {trade.qty:.8f} @ {exit_price:.5f} | PnL={pnl:.2f}"
         )
         if self.telemetry:
             self.telemetry.record_trade_close(

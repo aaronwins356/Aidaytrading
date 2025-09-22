@@ -8,6 +8,7 @@ import time
 from typing import Dict, Iterable
 
 from desk.data import normalize_ohlcv
+from desk.services.pretty_logger import pretty_logger
 
 
 class FeedHandler:
@@ -140,6 +141,7 @@ class FeedHandler:
 
         if self.fallback_broker is not None:
             try:
+                pretty_logger.rest_fallback_notice()
                 since = None
                 if self._timeframe_seconds > 0 and self.lookback > 0:
                     window = self.lookback * self._timeframe_seconds
@@ -161,7 +163,9 @@ class FeedHandler:
                 pass
 
         if last_exception is not None:
-            print(f"[FEED] Failed to fetch {symbol} after retries: {last_exception}")
+            pretty_logger.warning(
+                f"[Feed] Failed to fetch {symbol} after retries: {last_exception}"
+            )
         if self._local_store is not None:
             try:
                 cached = self._local_store.load(symbol, self.lookback)
@@ -190,7 +194,7 @@ class FeedHandler:
                 try:
                     snapshot[symbol] = future.result()
                 except Exception as exc:  # pragma: no cover - defensive network guard
-                    print(f"[FEED] Failed to fetch {symbol}: {exc}")
+                    pretty_logger.warning(f"[Feed] Failed to fetch {symbol}: {exc}")
                     if symbol in self.cache:
                         snapshot[symbol] = self.cache[symbol]
         return snapshot
