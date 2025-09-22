@@ -19,9 +19,9 @@ from desk.services.logger import EventLogger
 _FALLBACK_MINIMUM_ORDER_SIZES = {
     "BTC": 0.0001,
     "XBT": 0.0001,
-    "ETH": 0.01,
-    "SOL": 1.0,
-    "MATIC": 5.0,
+    "ETH": 0.001,
+    "SOL": 0.01,
+    "MATIC": 1.0,
 }
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
@@ -262,7 +262,7 @@ class ExecutionEngine:
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         max_hold_minutes: Optional[float] = None,
-        metadata: Optional[Dict[str, float]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> OpenTrade:
         side = side.upper()
         sl_pct = float(self.risk_config.get("stop_loss_pct", 0.02))
@@ -304,6 +304,8 @@ class ExecutionEngine:
         take_profit: Optional[float] = None,
         max_hold_minutes: Optional[float] = None,
         metadata: Optional[Dict[str, float]] = None,
+        *,
+        sizing_info: Optional[Dict[str, Any]] = None,
     ) -> Optional[OpenTrade]:
         if qty <= 0:
             return None
@@ -379,6 +381,35 @@ class ExecutionEngine:
             )
             return None
 
+        notional_value = qty * reference_price
+        sizing_payload = dict(sizing_info or {})
+        sizing_payload.update(
+            {
+                "worker": worker.name,
+                "symbol": symbol,
+                "side": side.upper(),
+                "qty": float(qty),
+                "notional": float(notional_value),
+                "risk_amount": float(risk_amount),
+                "risk_pct": float(sizing_info.get("risk_pct", 0.0) if sizing_info else 0.0),
+            }
+        )
+        if sizing_info and sizing_info.get("min_notional_applied"):
+            sizing_payload["min_notional_adjustment"] = True
+        if sizing_info and sizing_info.get("min_qty_applied"):
+            sizing_payload["min_qty_adjustment"] = True
+        self.logger.log_feed_event(
+            "INFO",
+            symbol,
+            "Submitting market order.",
+            worker=worker.name,
+            qty=float(qty),
+            usd_value=float(notional_value),
+            equity_pct=float(sizing_payload.get("risk_pct", 0.0)),
+            min_notional_adjustment=bool(sizing_payload.get("min_notional_adjustment", False)),
+            min_qty_adjustment=bool(sizing_payload.get("min_qty_adjustment", False)),
+        )
+
         trade = self._build_trade(
             worker.name,
             symbol,
@@ -448,6 +479,12 @@ class ExecutionEngine:
                 "qty": fill_qty,
                 "price": fill_price,
                 "risk_amount": risk_amount,
+                "notional": float(fill_qty * fill_price),
+                "risk_pct": float(sizing_payload.get("risk_pct", 0.0)),
+                "min_notional_adjustment": bool(
+                    sizing_payload.get("min_notional_adjustment", False)
+                ),
+                "min_qty_adjustment": bool(sizing_payload.get("min_qty_adjustment", False)),
             }
         )
         if self.dashboard:

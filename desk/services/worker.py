@@ -45,6 +45,7 @@ class Intent:
     vetoes: List[VetoResult]
     features: Dict[str, float]
     ml_score: float
+    risk_budget: float
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     max_hold_minutes: Optional[float] = None
@@ -265,10 +266,12 @@ class Worker:
         # Spread/volatility gating – placeholder using candle body vs ATR.
         atr = df["high"].rolling(14).max() - df["low"].rolling(14).min()
         body = abs(latest["close"] - latest["open"])
+        # Relaxed to 2.5x ATR to allow more trades in higher-volatility regimes while
+        # still avoiding obvious outliers.
         vetoes.append(
             VetoResult(
                 name="volatility_window",
-                passed=body <= atr.iloc[-1] * 1.5 if not atr.isna().iloc[-1] else True,
+                passed=body <= atr.iloc[-1] * 2.5 if not atr.isna().iloc[-1] else True,
                 details={"body": float(body)},
             )
         )
@@ -283,10 +286,11 @@ class Worker:
 
         # Momentum sanity – ensure price not vertical.
         mom = df["close"].pct_change().tail(5).abs().mean()
+        # Permit up to 8% average candle-to-candle swings before flagging as a spike.
         vetoes.append(
             VetoResult(
                 name="momentum_spike",
-                passed=mom < 0.05,
+                passed=mom < 0.08,
                 details={"avg_pct_change": float(mom)},
             )
         )
@@ -300,20 +304,30 @@ class Worker:
         *,
         stop_loss: Optional[float] = None,
         side: str = "BUY",
+        allocation: Optional[float] = None,
     ) -> float:
         params = self.params.get("params", {})
+        minimum = self._min_qty_override if self._min_qty_override is not None else float(params.get("min_qty", 0.0) or 0.0)
         if self.risk_engine is not None:
-            qty = self.risk_engine.position_size(
+            sizing = self.risk_engine.size_position(
                 price,
-                risk_budget,
                 stop_loss=stop_loss,
                 side=side,
+                allocation=float(allocation) if allocation is not None else 1.0,
+                risk_budget=risk_budget,
+                minimum_qty=minimum,
+                precision=self.quantity_precision,
             )
+            qty = sizing.quantity
+            self.state["last_sizing"] = sizing.to_dict()
         else:
             qty = risk_budget / max(price, 1e-9)
+            if minimum > 0:
+                qty = max(qty, minimum)
+            self.state.pop("last_sizing", None)
         min_param = float(params.get("min_qty", 0.0) or 0.0)
         minimum = self._min_qty_override if self._min_qty_override is not None else min_param
-        if minimum > 0:
+        if self.risk_engine is None and minimum > 0:
             qty = max(qty, minimum)
         precision_param = int(params.get("qty_precision", 6) or 6)
         precision = (
@@ -335,6 +349,22 @@ class Worker:
                 self._qty_precision_override = max(int(precision), 0)
             except (TypeError, ValueError):
                 self._qty_precision_override = None
+
+    @property
+    def minimum_order_size(self) -> float:
+        params = self.params.get("params", {})
+        default_min = float(params.get("min_qty", 0.0) or 0.0)
+        if self._min_qty_override is not None:
+            return max(self._min_qty_override, 0.0)
+        return max(default_min, 0.0)
+
+    @property
+    def quantity_precision(self) -> int:
+        params = self.params.get("params", {})
+        default_precision = int(params.get("qty_precision", 6) or 6)
+        if self._qty_precision_override is not None:
+            return max(self._qty_precision_override, 0)
+        return max(default_precision, 0)
 
     def build_intent(self, risk_budget: float) -> Optional[Intent]:
         df = self._candles_df()
@@ -363,11 +393,13 @@ class Worker:
         adaptive_risk_budget = risk_budget * risk_multiplier
         scaled_plan = self._apply_learning_risk(side, price, trade_plan, risk_multiplier)
 
+        allocation_factor = self.allocation * risk_multiplier
         qty = self.compute_quantity(
             price,
             adaptive_risk_budget,
             stop_loss=scaled_plan.get("stop_loss"),
             side=side,
+            allocation=allocation_factor,
         )
 
         plan_metadata = scaled_plan.get("metadata")
@@ -383,6 +415,12 @@ class Worker:
         enriched_features["proposed_qty"] = qty
         enriched_features["risk_budget"] = adaptive_risk_budget
         enriched_features["learning_risk_multiplier"] = risk_multiplier
+        last_sizing = self.state.get("last_sizing", {})
+        if isinstance(last_sizing, dict):
+            risk_pct = float(last_sizing.get("risk_pct", 0.0) or 0.0)
+            notional = float(last_sizing.get("notional", 0.0) or 0.0)
+            enriched_features["risk_equity_pct"] = risk_pct
+            enriched_features["proposed_notional"] = notional
         enriched_features["ml_weight"] = self.ml_weight
         enriched_features["side"] = 1.0 if side == "BUY" else -1.0
         if "stop_loss" in scaled_plan:
@@ -404,6 +442,7 @@ class Worker:
             vetoes=vetoes,
             features=enriched_features,
             ml_score=ml_score,
+            risk_budget=adaptive_risk_budget,
             stop_loss=scaled_plan.get("stop_loss"),
             take_profit=scaled_plan.get("take_profit"),
             max_hold_minutes=scaled_plan.get("max_hold_minutes"),

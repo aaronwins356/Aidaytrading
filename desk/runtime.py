@@ -23,6 +23,7 @@ from desk.services import (
     TelemetryClient,
     Worker,
 )
+from desk.services.risk import PositionSizingResult
 from desk.services.feed_updater import CandleStore
 
 
@@ -163,7 +164,7 @@ class TradingRuntime:
             default_stop_pct=float(
                 risk_cfg.get("stop_loss_pct", risk_cfg.get("trade_stop_loss", 0.02))
             ),
-            max_concurrent=int(risk_cfg.get("max_concurrent", 8)),
+            max_concurrent=int(risk_cfg.get("max_concurrent", 5)),
             halt_on_dd=bool(risk_cfg.get("halt_on_dd", True)),
             trapdoor_pct=float(risk_cfg.get("trapdoor_pct", 0.02)),
             max_position_value=(
@@ -176,6 +177,15 @@ class TradingRuntime:
                 if risk_cfg.get("equity_floor")
                 else None
             ),
+            risk_per_trade_pct=float(
+                risk_cfg.get("risk_per_trade_pct", risk_cfg.get("per_trade_risk_pct", 0.03))
+            ),
+            max_risk_per_trade_pct=(
+                float(risk_cfg.get("max_risk_per_trade_pct"))
+                if risk_cfg.get("max_risk_per_trade_pct")
+                else 0.04
+            ),
+            min_notional=float(risk_cfg.get("min_trade_notional", 10.0)),
         )
         self.executor = ExecutionEngine(
             self.broker,
@@ -300,24 +310,10 @@ class TradingRuntime:
     def _compute_base_risk(self, equity: float) -> float:
         """Derive the per-trade risk budget from account equity."""
 
-        if equity <= 0:
-            return max(self._fixed_risk_usd, 0.0)
-
-        weekly_target = max(self._weekly_return_target, 0.0)
-        if weekly_target <= 0:
-            return max(self._fixed_risk_usd, 0.0)
-
-        trading_days = max(self._trading_days_per_week, 1.0)
-        expected_trades = max(self._resolve_expected_trades_per_day(), 1.0)
-
-        daily_target = (1.0 + weekly_target) ** (1.0 / trading_days) - 1.0
-        if daily_target <= 0:
-            return max(self._fixed_risk_usd, 0.0)
-
-        base_risk = equity * (daily_target / expected_trades)
-        if base_risk <= 0:
-            return max(self._fixed_risk_usd, 0.0)
-        return base_risk
+        budget = self.risk_engine.risk_budget(allocation=1.0)
+        if budget > 0:
+            return budget
+        return max(self._fixed_risk_usd, 0.0)
 
     def run(self) -> None:
         if not self.workers:
@@ -398,21 +394,28 @@ class TradingRuntime:
                 ]
 
                 for intent in eligible_intents:
-                    risk_budget = (
-                        base_risk
-                        * intent.worker.allocation
-                        * allocations.get(intent.worker.name, 0.0)
-                    )
-                    if risk_budget <= 0:
+                    allocation_share = allocations.get(intent.worker.name, 0.0)
+                    if allocation_share <= 0:
+                        continue
+                    final_risk_budget = intent.risk_budget * allocation_share
+                    if final_risk_budget <= 0:
                         continue
                     if not self.risk_engine.enforce_position_limits(all_positions):
                         break
-                    qty = intent.worker.compute_quantity(
+                    allocation_factor = allocation_share
+                    if base_risk > 0:
+                        allocation_factor = final_risk_budget / base_risk
+                    minimum_qty = intent.worker.minimum_order_size
+                    sizing: PositionSizingResult = self.risk_engine.size_position(
                         intent.price,
-                        risk_budget,
                         stop_loss=intent.stop_loss,
                         side=intent.side,
+                        allocation=allocation_factor,
+                        risk_budget=final_risk_budget,
+                        minimum_qty=minimum_qty,
+                        precision=intent.worker.quantity_precision,
                     )
+                    qty = sizing.quantity
                     if qty <= 0:
                         continue
                     plan_metadata = intent.plan_metadata or {}
@@ -423,7 +426,7 @@ class TradingRuntime:
                         intent.side,
                         qty,
                         intent.price,
-                        risk_budget,
+                        sizing.risk_amount,
                         stop_loss=intent.stop_loss,
                         take_profit=intent.take_profit,
                         max_hold_minutes=intent.max_hold_minutes,
@@ -432,7 +435,9 @@ class TradingRuntime:
                             "score": intent.score,
                             "ml_edge": intent.ml_score,
                             "plan": plan_metadata,
+                            "risk": sizing.to_dict(),
                         },
+                        sizing_info=sizing.to_dict(),
                     )
                     if trade:
                         self.portfolio.mark_routed(intent.worker.name)
