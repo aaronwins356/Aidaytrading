@@ -1,21 +1,29 @@
-"""Streamlit dashboard for the AI trading bot."""
+"""Streamlit dashboard for the AI trading platform."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 import yaml
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = BASE_DIR / "data" / "trades.db"
 CONFIG_PATH = BASE_DIR / "config.yaml"
+MODULE_DISPLAY_NAMES = {
+    "ai_trader.workers.short_momentum.ShortMomentumWorker": "Velocity Short",
+    "ai_trader.workers.short_mean_reversion.ShortMeanReversionWorker": "Reversion Raider",
+    "ai_trader.workers.ml_short.MLShortWorker": "ML Short Alpha",
+    "ai_trader.workers.researcher.MarketResearchWorker": "Research Sentinel",
+}
 
-st.set_page_config(page_title="AI Trader", layout="wide", page_icon="🪙")
+st.set_page_config(page_title="AI Trader Control Center", layout="wide", page_icon="🧠")
 
 CUSTOM_CSS = """
 <style>
@@ -42,14 +50,12 @@ section.main > div {
     padding: 0.6rem 1.4rem;
     border: none;
 }
-.stTabs [data-baseweb="tab"] {
-    background: rgba(15, 25, 46, 0.6);
-    border-radius: 12px 12px 0 0;
-    border: 1px solid rgba(0, 255, 170, 0.2);
-    color: #d1e0ff;
-}
-.stTabs [data-baseweb="tab"]:hover {
-    color: #00d4ff;
+.metric-card {
+    padding: 1rem;
+    border-radius: 1rem;
+    border: 1px solid rgba(0, 255, 170, 0.25);
+    background: rgba(11, 16, 33, 0.8);
+    margin-bottom: 1rem;
 }
 </style>
 """
@@ -57,13 +63,30 @@ section.main > div {
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=30)
+def _auto_refresh_script(interval_seconds: int) -> None:
+    st.markdown(
+        f"""
+        <script>
+        setTimeout(function() {{ window.location.reload(); }}, {interval_seconds * 1000});
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+@st.cache_data(ttl=5)
 def load_config() -> Dict:
     with CONFIG_PATH.open("r", encoding="utf-8") as file:
         return yaml.safe_load(file)
 
 
-@st.cache_data(ttl=15)
+def save_config(config: Dict) -> None:
+    with CONFIG_PATH.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(config, file, sort_keys=False)
+    load_config.clear()
+
+
+@st.cache_data(ttl=5)
 def load_trades() -> pd.DataFrame:
     if not DB_PATH.exists():
         return pd.DataFrame(
@@ -81,140 +104,419 @@ def load_trades() -> pd.DataFrame:
             ]
         )
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query("SELECT * FROM trades ORDER BY timestamp DESC", conn)
+        df = pd.read_sql_query(
+            "SELECT timestamp, worker, symbol, side, cash_spent, entry_price, exit_price, pnl_percent, pnl_usd, win_loss FROM trades ORDER BY timestamp DESC",
+            conn,
+        )
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=5)
 def load_equity_curve() -> pd.DataFrame:
     if not DB_PATH.exists():
         return pd.DataFrame(columns=["timestamp", "equity", "pnl_percent", "pnl_usd"])
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query("SELECT timestamp, equity, pnl_percent, pnl_usd FROM equity_curve ORDER BY timestamp ASC", conn)
+        df = pd.read_sql_query(
+            "SELECT timestamp, equity, pnl_percent, pnl_usd FROM equity_curve ORDER BY timestamp ASC",
+            conn,
+        )
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df
 
 
-def render_overview(config: Dict, trades: pd.DataFrame, equity_curve: pd.DataFrame) -> None:
-    st.header("Overview")
-    latest_equity = equity_curve["equity"].iloc[-1] if not equity_curve.empty else config["trading"].get("paper_starting_equity", 0)
-    pnl_percent = equity_curve["pnl_percent"].iloc[-1] if not equity_curve.empty else 0
-    pnl_usd = equity_curve["pnl_usd"].iloc[-1] if not equity_curve.empty else 0
-    col1, col2, col3 = st.columns(3)
+@st.cache_data(ttl=5)
+def load_bot_states() -> pd.DataFrame:
+    if not DB_PATH.exists():
+        return pd.DataFrame(columns=["worker", "symbol", "status", "last_signal", "indicators", "risk", "updated_at"])
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT worker, symbol, status, last_signal, indicators_json, risk_json, updated_at FROM bot_state"
+        ).fetchall()
+    records: List[Dict[str, object]] = []
+    for row in rows:
+        indicators = json.loads(row["indicators_json"] or "{}")
+        risk = json.loads(row["risk_json"] or "{}")
+        records.append(
+            {
+                "worker": row["worker"],
+                "symbol": row["symbol"],
+                "status": row["status"],
+                "last_signal": row["last_signal"],
+                "indicators": indicators,
+                "risk": risk,
+                "updated_at": pd.to_datetime(row["updated_at"], utc=True),
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def load_control_flags() -> Dict[str, str]:
+    if not DB_PATH.exists():
+        return {}
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT key, value FROM control_flags").fetchall()
+    return {row["key"]: row["value"] for row in rows}
+
+
+def set_control_flag(key: str, value: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO control_flags(key, value, updated_at)
+            VALUES(?, ?, datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value),
+        )
+        conn.commit()
+    load_bot_states.clear()
+
+
+@st.cache_data(ttl=5)
+def load_market_features(symbol: str, limit: int = 720) -> pd.DataFrame:
+    if not DB_PATH.exists():
+        return pd.DataFrame(columns=["timestamp", "price", "symbol"])
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT timestamp, price, features_json, label
+            FROM market_features
+            WHERE symbol = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            conn,
+            params=(symbol, limit),
+        )
+    if df.empty:
+        return df
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df["price"] = df["price"].astype(float)
+    df["features"] = df["features_json"].apply(lambda x: json.loads(x or "{}"))
+    return df.sort_values("timestamp")
+
+
+def render_account_overview(config: Dict, equity_df: pd.DataFrame, trades: pd.DataFrame) -> None:
+    st.header("Account Overview")
+    latest_equity = equity_df["equity"].iloc[-1] if not equity_df.empty else config["trading"].get("paper_starting_equity", 0)
+    pnl_percent = equity_df["pnl_percent"].iloc[-1] if not equity_df.empty else 0.0
+    pnl_usd = equity_df["pnl_usd"].iloc[-1] if not equity_df.empty else 0.0
+    starting_equity = config["trading"].get("paper_starting_equity", 0.0)
+
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Live Equity", f"${latest_equity:,.2f}", f"{pnl_percent:.2f}%")
     col2.metric("Total P/L", f"${pnl_usd:,.2f}")
-    col3.metric("Trades Logged", f"{len(trades)}")
+    col3.metric("Starting Equity", f"${starting_equity:,.2f}")
+    col4.metric("Recorded Trades", f"{len(trades)}")
 
-    st.subheader("Open Positions Snapshot")
-    if trades.empty:
-        st.info("No trades have been recorded yet. Workers will populate this once live.")
-    else:
-        open_trades = trades[trades["exit_price"].isna()].copy()
-        if open_trades.empty:
-            st.success("All positions closed.")
-        else:
-            st.dataframe(open_trades[["timestamp", "worker", "symbol", "side", "cash_spent", "entry_price"]])
+    st.caption("Equity values update every trading engine cycle (near real-time).")
 
 
-def render_equity_curve(equity_curve: pd.DataFrame) -> None:
-    st.header("Equity Curve")
-    if equity_curve.empty:
-        st.info("Equity data will appear once the bot starts trading.")
+def render_equity_curve(equity_df: pd.DataFrame) -> None:
+    st.subheader("Equity Curve")
+    if equity_df.empty:
+        st.info("Equity data will populate as trades are logged.")
         return
-    fig = px.line(
-        equity_curve,
-        x="timestamp",
-        y="equity",
-        title="Equity over Time",
-        markers=True,
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=equity_df["timestamp"],
+            y=equity_df["equity"],
+            mode="lines+markers",
+            name="Equity",
+            line=dict(color="#00d4ff", width=2),
+        )
     )
-    fig.update_layout(template="plotly_dark", height=400)
+    fig.update_layout(template="plotly_dark", height=320, margin=dict(l=20, r=20, t=40, b=40))
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_trade_log(trades: pd.DataFrame) -> None:
-    st.header("Trade Log")
+def render_bot_cards(config: Dict, bot_states: pd.DataFrame) -> None:
+    st.subheader("Strategy Stack")
+    if bot_states.empty:
+        st.info("Workers will appear once the engine publishes their state.")
+        return
+
+    descriptions = {
+        "Velocity Short": "Momentum-driven short seller that fades breakdown accelerations.",
+        "Reversion Raider": "Contrarian short scalper targeting mean reversions after euphoric spikes.",
+        "ML Short Alpha": "Machine learning assisted signal combiner focusing on asymmetric short setups.",
+        "Research Sentinel": "Market researcher that constantly engineers features for models and traders.",
+    }
+
+    grouped = bot_states.groupby("worker")
+    cols = st.columns(2)
+    for idx, (worker, df) in enumerate(grouped):
+        card_placeholder = cols[idx % 2].container()
+        with card_placeholder:
+            st.markdown(f"### {worker}")
+            st.caption(descriptions.get(worker, ""))
+            latest = df.sort_values("updated_at", ascending=False).iloc[0]
+            status = latest.get("status", "unknown")
+            last_signal = latest.get("last_signal") or "–"
+            st.markdown(f"**Status:** `{status}` | **Last Signal:** `{last_signal}`")
+            indicators = latest.get("indicators", {}) or {}
+            risk = latest.get("risk", {}) or {}
+            if indicators:
+                pretty = {k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in indicators.items()}
+                st.json({"indicators": pretty})
+            if risk:
+                st.json({"risk": risk})
+            st.markdown(f"_Last update: {latest['updated_at'].strftime('%H:%M:%S UTC')}_")
+
+
+def build_candlestick(df: pd.DataFrame, symbol: str) -> Optional[go.Figure]:
+    if df.empty:
+        return None
+    candles = df.set_index("timestamp").resample("1min").agg({"price": ["first", "max", "min", "last"]})
+    candles.columns = ["open", "high", "low", "close"]
+    candles = candles.dropna().reset_index()
+    if candles.empty:
+        return None
+    fig = go.Figure(
+        data=[
+            go.Candlestick(
+                x=candles["timestamp"],
+                open=candles["open"],
+                high=candles["high"],
+                low=candles["low"],
+                close=candles["close"],
+                name=symbol,
+            )
+        ]
+    )
+    fig.update_layout(template="plotly_dark", height=420, margin=dict(l=20, r=20, t=40, b=40))
+    return fig
+
+
+def render_market_view(symbol: str, trades: pd.DataFrame) -> None:
+    st.subheader("Market Intelligence")
+    feature_df = load_market_features(symbol)
+    fig = build_candlestick(feature_df, symbol)
+    if fig is None:
+        st.info("Waiting for market data snapshots from the researcher bot.")
+        return
+    entries = trades[(trades["symbol"] == symbol) & trades["exit_price"].isna()]
+    exits = trades[(trades["symbol"] == symbol) & trades["exit_price"].notna()]
+    if not entries.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=entries["timestamp"],
+                y=entries["entry_price"],
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=12, color="#ff4d4d"),
+                name="Short entries",
+            )
+        )
+    if not exits.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=exits["timestamp"],
+                y=exits["exit_price"],
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=12, color="#00ffb3"),
+                name="Covers",
+            )
+        )
+    st.plotly_chart(fig, use_container_width=True)
+
+    if not feature_df.empty:
+        latest = feature_df.iloc[-1]
+        st.caption("Latest engineered features")
+        st.json(latest["features"])
+
+
+def render_trade_logs(trades: pd.DataFrame) -> None:
+    st.subheader("Trade Logs")
     if trades.empty:
-        st.info("No trades to display yet.")
+        st.info("Trades will appear once execution begins.")
         return
     workers = ["All"] + sorted(trades["worker"].unique())
-    selected_worker = st.selectbox("Filter by worker", workers)
+    selected_worker = st.selectbox("Filter by strategy", workers)
     filtered = trades if selected_worker == "All" else trades[trades["worker"] == selected_worker]
     st.dataframe(filtered, use_container_width=True)
 
 
-def render_workers(config: Dict, trades: pd.DataFrame) -> None:
-    st.header("Workers")
-    worker_modules: List[str] = config.get("workers", {}).get("modules", [])
-    worker_descriptions = {
-        "ai_trader.workers.momentum.MomentumWorker": (
-            "Momentum Rider",
-            "⚡ Momentum Rider — rides fast/slow EMA momentum swings to capture breakout moves.",
-        ),
-        "ai_trader.workers.mean_reversion.MeanReversionWorker": (
-            "Mean Reverter",
-            "🔄 Mean Reverter — fades extreme moves back toward the average price band.",
-        ),
-    }
-    cols = st.columns(2)
-    for idx, module in enumerate(worker_modules):
-        name, description = worker_descriptions.get(module, (module.split(".")[-1], module))
-        with cols[idx % 2]:
-            st.markdown(
-                "<div style='padding:1rem;border-radius:1rem;border:1px solid rgba(0,255,170,0.25);background:rgba(11,16,33,0.8);'>"
-                f"<strong>{description}</strong><br/>Status: <span style='color:#00ffb3;'>Active</span>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-            worker_trades = trades[trades["worker"] == name] if not trades.empty else pd.DataFrame()
-            chart_data = worker_trades[["timestamp", "pnl_usd"]] if not worker_trades.empty else pd.DataFrame({"timestamp": [], "pnl_usd": []})
-            if not chart_data.empty:
-                fig = px.bar(chart_data, x="timestamp", y="pnl_usd", title="Recent PnL")
-                fig.update_layout(template="plotly_dark", height=250)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.caption("PnL chart will appear once this worker records trades.")
-
-
 def render_risk_controls(config: Dict) -> None:
-    st.header("Risk Controls")
+    st.subheader("Risk & Deployment Controls")
     trading_cfg = config.get("trading", {})
-    equity_pct = st.slider(
-        "Equity % per trade",
-        min_value=1.0,
-        max_value=20.0,
-        value=float(trading_cfg.get("equity_allocation_percent", 5.0)),
-        step=0.5,
+    risk_cfg = config.get("risk", {})
+    worker_cfg = config.get("workers", {}).get("definitions", {})
+
+    with st.form("global_risk_form"):
+        st.write("### Global Risk")
+        max_drawdown = st.slider(
+            "Max drawdown %",
+            min_value=5.0,
+            max_value=50.0,
+            step=0.5,
+            value=float(risk_cfg.get("max_drawdown_percent", 25.0)),
+        )
+        daily_limit = st.slider(
+            "Daily loss limit %",
+            min_value=1.0,
+            max_value=20.0,
+            step=0.5,
+            value=float(risk_cfg.get("daily_loss_limit_percent", 5.0)),
+        )
+        allocation = st.slider(
+            "Equity allocation per trade %",
+            min_value=1.0,
+            max_value=25.0,
+            step=0.5,
+            value=float(trading_cfg.get("equity_allocation_percent", 6.0)),
+        )
+        max_positions = st.slider(
+            "Maximum concurrent positions",
+            min_value=1,
+            max_value=12,
+            value=int(trading_cfg.get("max_open_positions", 4)),
+        )
+        submitted = st.form_submit_button("Update global risk")
+        if submitted:
+            config["risk"]["max_drawdown_percent"] = max_drawdown
+            config["risk"]["daily_loss_limit_percent"] = daily_limit
+            config["trading"]["equity_allocation_percent"] = allocation
+            config["trading"]["max_open_positions"] = max_positions
+            save_config(config)
+            st.success("Global risk settings saved. Restart engine to apply immediately.")
+
+    st.write("### Per-strategy tuning")
+    for worker_key, definition in worker_cfg.items():
+        with st.expander(definition.get("module", worker_key), expanded=False):
+            symbols = definition.get("symbols", [])
+            risk = definition.get("risk", {})
+            params = definition.get("parameters", {})
+            new_symbols = st.multiselect(
+                "Symbols",
+                options=config["trading"].get("symbols", symbols),
+                default=symbols,
+                key=f"symbols_{worker_key}",
+            )
+            position_size = st.slider(
+                "Position size % of allocation",
+                min_value=10.0,
+                max_value=200.0,
+                step=5.0,
+                value=float(risk.get("position_size_pct", 100.0)),
+                key=f"pos_{worker_key}",
+            )
+            leverage = st.slider(
+                "Leverage",
+                min_value=1.0,
+                max_value=5.0,
+                step=0.1,
+                value=float(risk.get("leverage", 1.0)),
+                key=f"lev_{worker_key}",
+            )
+            stop_loss = st.slider(
+                "Stop loss %",
+                min_value=0.5,
+                max_value=5.0,
+                step=0.1,
+                value=float(risk.get("stop_loss_pct", 1.0)),
+                key=f"sl_{worker_key}",
+            )
+            take_profit = st.slider(
+                "Take profit %",
+                min_value=0.5,
+                max_value=6.0,
+                step=0.1,
+                value=float(risk.get("take_profit_pct", 2.0)),
+                key=f"tp_{worker_key}",
+            )
+            trailing = st.slider(
+                "Trailing stop %",
+                min_value=0.0,
+                max_value=5.0,
+                step=0.1,
+                value=float(risk.get("trailing_stop_pct", 0.0)),
+                key=f"trail_{worker_key}",
+            )
+            if st.button("Save", key=f"save_{worker_key}"):
+                definition["symbols"] = new_symbols
+                definition.setdefault("risk", {})
+                definition["risk"].update(
+                    {
+                        "position_size_pct": position_size,
+                        "leverage": leverage,
+                        "stop_loss_pct": stop_loss,
+                        "take_profit_pct": take_profit,
+                        "trailing_stop_pct": trailing,
+                    }
+                )
+                definition.setdefault("parameters", {})
+                definition["parameters"].update(params)
+                config["workers"]["definitions"][worker_key] = definition
+                save_config(config)
+                st.success(f"Updated configuration for {worker_key}.")
+
+
+def render_sidebar(config: Dict) -> str:
+    st.sidebar.title("Live Controls")
+    refresh_interval = int(config.get("dashboard", {}).get("refresh_interval_seconds", 5))
+    _auto_refresh_script(refresh_interval)
+
+    control_flags = load_control_flags()
+
+    trading_mode = st.sidebar.radio(
+        "Trading Mode",
+        options=["paper", "live"],
+        index=0 if config["trading"].get("mode", "paper") == "paper" else 1,
     )
-    max_positions = st.slider(
-        "Max open positions",
-        min_value=1,
-        max_value=10,
-        value=int(trading_cfg.get("max_open_positions", 3)),
+    if trading_mode != config["trading"].get("mode"):
+        config["trading"]["mode"] = trading_mode
+        config["trading"]["paper_trading"] = trading_mode == "paper"
+        save_config(config)
+        st.sidebar.success("Trading mode updated. Restart engine to take effect.")
+
+    kill_switch = control_flags.get("kill_switch", "false") == "true"
+    kill_toggle = st.sidebar.toggle("Global Kill Switch", value=kill_switch)
+    if kill_toggle != kill_switch:
+        set_control_flag("kill_switch", "true" if kill_toggle else "false")
+        st.sidebar.success("Kill switch state updated.")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Per-Bot Overrides")
+    definitions = config.get("workers", {}).get("definitions", {})
+    for worker_key, definition in definitions.items():
+        module_path = definition.get("module", worker_key)
+        if module_path.endswith("researcher.MarketResearchWorker"):
+            continue
+        worker_label = MODULE_DISPLAY_NAMES.get(module_path, module_path.split(".")[-1])
+        flag_key = f"bot::{worker_label}"
+        paused = control_flags.get(flag_key, "active") in {"paused", "disabled"}
+        toggle = st.sidebar.toggle(f"{worker_label}", value=not paused)
+        if toggle == paused:
+            set_control_flag(flag_key, "active" if toggle else "paused")
+            st.sidebar.success(f"Updated {worker_label} control flag.")
+
+    st.sidebar.markdown("---")
+    symbol = st.sidebar.selectbox(
+        "Symbol",
+        options=config["trading"].get("symbols", ["BTC/USD"]),
+        index=0,
     )
-    if st.button("Apply Risk Settings"):
-        st.success("Risk preferences updated. Restart the bot to apply changes.")
-    st.caption("Adjust settings then update config.yaml for live trading.")
+    return symbol
 
 
-config = load_config()
-trades_df = load_trades()
-equity_df = load_equity_curve()
+def main() -> None:
+    config = load_config()
+    symbol = render_sidebar(config)
+    bot_states = load_bot_states()
+    trades = load_trades()
+    equity = load_equity_curve()
 
-overview_tab, equity_tab, trades_tab, workers_tab, risk_tab = st.tabs(
-    ["Overview", "Equity Curve", "Trade Log", "Workers", "Risk Controls"]
-)
-
-with overview_tab:
-    render_overview(config, trades_df, equity_df)
-
-with equity_tab:
-    render_equity_curve(equity_df)
-
-with trades_tab:
-    render_trade_log(trades_df)
-
-with workers_tab:
-    render_workers(config, trades_df)
-
-with risk_tab:
+    render_account_overview(config, equity, trades)
+    render_equity_curve(equity)
+    render_bot_cards(config, bot_states)
+    render_market_view(symbol, trades)
+    render_trade_logs(trades)
     render_risk_controls(config)
+
+
+if __name__ == "__main__":
+    main()
