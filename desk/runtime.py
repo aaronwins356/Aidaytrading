@@ -24,6 +24,7 @@ from desk.services import (
     Worker,
 )
 from desk.services.feed_updater import CandleStore
+from desk.services.pretty_logger import pretty_logger
 
 
 @dataclass
@@ -219,7 +220,7 @@ class TradingRuntime:
         try:
             self.feed_updater.bootstrap_from_rest(limit=100)
         except Exception as exc:  # pragma: no cover - defensive guard
-            print(f"[RUNTIME] Feed bootstrap failed: {exc}")
+            pretty_logger.warning(f"Feed bootstrap failed: {exc}")
         self.feed_updater.start()
         self._services_started = True
 
@@ -269,8 +270,8 @@ class TradingRuntime:
                     try:
                         worker_cfg["symbol"] = self.broker.resolve_symbol(symbol)
                     except Exception as exc:
-                        print(
-                            f"[RUNTIME] Failed to normalise symbol {symbol}: {exc}"
+                        pretty_logger.warning(
+                            f"Failed to normalise symbol {symbol}: {exc}"
                         )
                 worker = Worker(
                     name=worker_cfg["name"],
@@ -286,12 +287,14 @@ class TradingRuntime:
                 worker.set_minimum_order_size(minimum, precision=precision)
                 workers.append(worker)
             except Exception as exc:  # pragma: no cover - defensive bootstrap
-                print(f"[RUNTIME] Failed to load worker {cfg.get('name')}: {exc}")
+                pretty_logger.error(
+                    f"Failed to load worker {cfg.get('name')}: {exc}"
+                )
         return workers
 
     # ------------------------------------------------------------------
     def _handle_signal(self, signum, frame) -> None:  # pragma: no cover - OS signal
-        print(f"[RUNTIME] Received signal {signum}. Shutting down...")
+        pretty_logger.warning(f"Received signal {signum}. Shutting down...")
         self.state.running = False
 
     @staticmethod
@@ -319,7 +322,7 @@ class TradingRuntime:
 
     def run(self) -> None:
         if not self.workers:
-            print("[RUNTIME] No workers configured. Exiting.")
+            pretty_logger.warning("No workers configured. Exiting.")
             self._shutdown()
             return
 
@@ -329,20 +332,20 @@ class TradingRuntime:
         self.start_services()
 
         symbols = {worker.symbol for worker in self.workers}
-        print(f"[RUNTIME] Starting loop with {len(self.workers)} workers")
+        pretty_logger.info(f"Starting loop with {len(self.workers)} workers")
 
         while self.state.running:
             try:
                 equity = float(self.broker.account_equity())
             except Exception as exc:
-                print(f"[RUNTIME] Failed to fetch account equity: {exc}")
+                pretty_logger.warning(f"Failed to fetch account equity: {exc}")
                 equity = 0.0
             self.logger.write_equity(equity)
             self.dashboard.record_equity(equity)
             self.telemetry.record_equity(equity)
             self.risk_engine.check_account(equity)
             if self.risk_engine.halted:
-                print("[RUNTIME] Risk engine halted trading. Exiting loop.")
+                pretty_logger.error("Risk engine halted trading. Exiting loop.")
                 self.state.running = False
                 break
 
@@ -359,13 +362,16 @@ class TradingRuntime:
                 if len(candles) < self.warmup:
                     progress = self._warm_progress.get(worker.name)
                     if progress != len(candles):
-                        print(
-                            f"[Worker] {worker.name} warming: ({len(candles)}/{self.warmup} candles)"
+                        pretty_logger.warmup_progress(
+                            worker.symbol,
+                            len(candles),
+                            self.warmup,
                         )
                         self._warm_progress[worker.name] = len(candles)
                     return None
                 if worker.name in self._warm_progress:
                     self._warm_progress.pop(worker.name, None)
+                    pretty_logger.worker_live(worker.name)
                 intent = worker.build_intent(base_risk * worker.allocation)
                 if not intent or not intent.approved:
                     return None
@@ -381,7 +387,9 @@ class TradingRuntime:
                         try:
                             intent = future.result()
                         except Exception as exc:
-                            print(f"[RUNTIME] Worker {worker.name} evaluation failed: {exc}")
+                            pretty_logger.error(
+                                f"Worker {worker.name} evaluation failed: {exc}"
+                            )
                             continue
                         if intent:
                             intents.append(intent)
@@ -477,15 +485,15 @@ class TradingRuntime:
                                 try:
                                     self.learner.retrain_worker(worker, history)
                                 except Exception as exc:
-                                    print(
-                                        f"[RUNTIME] Retrain failed for {worker.name}: {exc}"
+                                    pretty_logger.warning(
+                                        f"Retrain failed for {worker.name}: {exc}"
                                     )
 
                             self._retrain_executor.submit(_do_retrain)
 
             time.sleep(self.loop_delay)
 
-        print("[RUNTIME] Shutdown complete.")
+        pretty_logger.info("Shutdown complete.")
         self._shutdown()
 
     def _allocate_eligible_intents(

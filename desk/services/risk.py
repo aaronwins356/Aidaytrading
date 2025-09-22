@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass, replace
 from typing import Dict, Iterable, Optional
 
+from desk.services.pretty_logger import pretty_logger
+
 
 def _quantize(value: float, precision: Optional[int], *, round_down: bool = False) -> float:
     """Round a float to the provided decimal precision."""
@@ -146,15 +148,15 @@ class RiskEngine:
         dd_breached = False
         relaxation = 1.1
         if self.daily_dd and equity < self.start_equity * (1 - self.daily_dd * relaxation):
-            print("[RISK] Daily drawdown threshold breached – monitoring closely.")
+            pretty_logger.warning("Daily drawdown threshold breached – monitoring closely.")
             dd_breached = True
 
         if self.weekly_dd and equity < self.start_equity * (1 - self.weekly_dd * relaxation):
-            print("[RISK] Weekly drawdown threshold breached – monitoring closely.")
+            pretty_logger.warning("Weekly drawdown threshold breached – monitoring closely.")
             dd_breached = True
 
         if dd_breached and self.halt_on_dd:
-            print("[RISK] Trapdoor activated – drawdown limit reached.")
+            pretty_logger.error("Trapdoor activated – drawdown limit reached.")
             self.halted = True
             return
 
@@ -164,21 +166,21 @@ class RiskEngine:
                 new_floor = equity * (1 - self.trapdoor_pct)
                 self.trapdoor = EquityTrapdoor(floor=new_floor, locked_at=time.time())
             elif equity < self.trapdoor.floor:
-                print("[RISK] Trapdoor activated – trailing floor breached.")
+                pretty_logger.error("Trapdoor activated – trailing floor breached.")
                 self.halted = True
                 return
         if self.equity_floor and equity < self.equity_floor * 0.97:
-            print("[RISK] Trapdoor activated – equity floor reached.")
+            pretty_logger.error("Trapdoor activated – equity floor reached.")
             self.halted = True
             return
         if equity <= 0:
-            print("[RISK] Trapdoor activated – equity at or below zero.")
+            pretty_logger.error("Trapdoor activated – equity at or below zero.")
             self.halted = True
 
     def enforce_position_limits(self, open_positions: Iterable) -> bool:
         count = sum(1 for _ in open_positions)
         if count >= self.max_concurrent:
-            print("[RISK] Max concurrent positions reached.")
+            pretty_logger.warning("Max concurrent positions reached.")
             return False
         return True
 

@@ -44,6 +44,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in tests
             )
 
 from desk.config import DESK_ROOT
+from desk.services.pretty_logger import pretty_logger
 
 class Learner:
     """Lightweight model registry + inference helper."""
@@ -71,11 +72,15 @@ class Learner:
         """
         history = trade_history if trade_history is not None else self.load_trade_history(worker.name)
         if history is None or history.empty:
-            print(f"[LEARNER] No history available for {worker.name}, skipping retrain.")
+            pretty_logger.info(
+                f"[Learner] No history available for {worker.name}, skipping retrain."
+            )
             return
 
         if "pnl" not in history.columns:
-            print(f"[LEARNER] History for {worker.name} missing pnl column; skipping retrain.")
+            pretty_logger.warning(
+                f"[Learner] History for {worker.name} missing pnl column; skipping retrain."
+            )
             return
 
         feature_cols = [
@@ -86,7 +91,9 @@ class Learner:
             or col in {"ml_edge", "combined_score", "proposed_qty", "risk_budget", "side"}
         ]
         if not feature_cols:
-            print(f"[LEARNER] No usable features for {worker.name}, skipping retrain.")
+            pretty_logger.warning(
+                f"[Learner] No usable features for {worker.name}, skipping retrain."
+            )
             return
 
         features = history[feature_cols]
@@ -95,14 +102,14 @@ class Learner:
         labels = (history["pnl"] > 0).astype(int)
 
         if len(features) < self.min_samples:
-            print(
-                f"[LEARNER] Not enough data for {worker.name}, skipping retrain."
+            pretty_logger.info(
+                f"[Learner] Not enough data for {worker.name}, skipping retrain."
             )
             return
 
         if np is None:
-            print(
-                f"[LEARNER] numpy unavailable, cannot retrain {worker.name} right now."
+            pretty_logger.warning(
+                f"[Learner] numpy unavailable, cannot retrain {worker.name} right now."
             )
             return
 
@@ -123,14 +130,16 @@ class Learner:
         if threshold is not None:
             self._threshold_cache[worker.name] = threshold
             self._write_threshold(worker.name, threshold)
-            print(
-                f"[LEARNER] Calibrated {worker.name} threshold to {threshold:.4f}"
+            pretty_logger.info(
+                f"[Learner] Calibrated {worker.name} threshold to {threshold:.4f}"
             )
         else:
             self._threshold_cache.pop(worker.name, None)
             self._write_threshold(worker.name, None)
 
-        print(f"[LEARNER] Retrained model for {worker.name}, saved to {path}")
+        pretty_logger.info(
+            f"[Learner] Retrained model for {worker.name}, saved to {path}"
+        )
 
     def observe(self, trade: Dict[str, object]) -> None:
         """Persist basic trade information for future ML retraining."""
@@ -178,7 +187,7 @@ class Learner:
                 header=not path.exists(),
             )
         except Exception as exc:  # pragma: no cover - best effort logging
-            print(f"[LEARNER] Failed to persist observation: {exc}")
+            pretty_logger.warning(f"[Learner] Failed to persist observation: {exc}")
 
 
     def _threshold_path(self, worker_name: str) -> Path:
@@ -291,7 +300,9 @@ class Learner:
             df = pd.read_csv(path)
             return df.apply(pd.to_numeric, errors="ignore")
         except Exception as exc:  # pragma: no cover - defensive I/O guard
-            print(f"[LEARNER] Failed to load history for {worker_name}: {exc}")
+            pretty_logger.warning(
+                f"[Learner] Failed to load history for {worker_name}: {exc}"
+            )
             return pd.DataFrame()
 
     def record_result(self, worker_name: str, row: Dict[str, float]) -> None:
@@ -307,7 +318,9 @@ class Learner:
                 updated = data
             updated.to_csv(path, index=False)
         except Exception as exc:  # pragma: no cover - best effort logging
-            print(f"[LEARNER] Failed to persist history for {worker_name}: {exc}")
+            pretty_logger.warning(
+                f"[Learner] Failed to persist history for {worker_name}: {exc}"
+            )
 
     def _history_path(self, worker_name: str) -> Path:
         if worker_name not in self._history_cache:

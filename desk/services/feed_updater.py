@@ -24,6 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in tests
 from desk.config import DESK_ROOT
 from desk.data import normalize_ohlcv
 from desk.services.logger import EventLogger
+from desk.services.pretty_logger import pretty_logger
 
 try:  # pragma: no cover - optional runtime dependency
     from desk.services.kraken_ws import KrakenWebSocketClient
@@ -925,24 +926,35 @@ class FeedUpdater:
     def _log(self, level: str, symbol: str, message: str, **metadata) -> None:
         payload = {"attempt": metadata.get("attempt"), "detail": metadata.get("detail")}
         payload = {k: v for k, v in payload.items() if v is not None}
-        meta_str = ""
+        extras = ""
         if payload:
-            detail_parts = [f"{key}={value}" for key, value in payload.items()]
-            meta_str = " | " + ", ".join(detail_parts)
-        print(f"[FeedUpdater][{level.upper()}] {symbol}: {message}{meta_str}")
-        if self.logger is None:
+            extras = ", ".join(f"{key}={value}" for key, value in payload.items())
+        display_message = message if not extras else f"{message} [{extras}]"
+        if self.logger is not None:
+            self.logger.log_feed_event(
+                level=level, symbol=symbol, message=display_message, **payload
+            )
             return
-        self.logger.log_feed_event(level=level, symbol=symbol, message=message, **payload)
+        text = f"[FeedUpdater] {symbol}: {display_message}"
+        level_name = level.upper()
+        if level_name == "ERROR":
+            pretty_logger.error(text)
+        elif level_name == "WARNING":
+            pretty_logger.warning(text)
+        else:
+            pretty_logger.info(text)
 
     def _log_invalid_symbol(self, symbol: str) -> None:
         message = f"Skipping invalid symbol: {symbol}"
-        print(f"[FeedUpdater][ERROR] {message}")
-        if self.logger is None:
+        if self.logger is not None:
+            try:
+                self.logger.log_feed_event(
+                    level="ERROR", symbol=symbol, message=message
+                )
+            except Exception:
+                pass
             return
-        try:
-            self.logger.log_feed_event(level="ERROR", symbol=symbol, message=message)
-        except Exception:
-            pass
+        pretty_logger.error(f"[FeedUpdater] {message}")
 
     # ------------------------------------------------------------------
     # Seeding helpers
@@ -1224,6 +1236,7 @@ class FeedUpdater:
                     symbol,
                     f"Bootstrapped {inserted} candles from REST",
                 )
+                pretty_logger.feed_bootstrap(symbol, inserted)
 
         self._rest_bootstrap_complete = True
         # Rebuild the WebSocket feed so only valid symbols are subscribed.

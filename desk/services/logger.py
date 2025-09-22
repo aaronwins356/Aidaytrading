@@ -9,26 +9,11 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from threading import Lock, RLock
+from threading import RLock
 from typing import Iterable, Optional, Sequence, Tuple
 
 from desk.config import DESK_ROOT
-
-
-class _ColourConsole:
-    RESET = "\033[0m"
-    COLOURS = {
-        "INFO": "\033[36m",
-        "WARNING": "\033[33m",
-        "ERROR": "\033[31m",
-        "TRADE": "\033[32m",
-    }
-
-    def colourise(self, level: str, message: str) -> str:
-        colour = self.COLOURS.get(level.upper())
-        if not colour:
-            return message
-        return f"{colour}{message}{self.RESET}"
+from desk.services.pretty_logger import pretty_logger
 
 class EventLogger:
     """Write-ahead logging to both JSONL and SQLite stores."""
@@ -42,8 +27,6 @@ class EventLogger:
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.lock = RLock()
-        self._console_lock = Lock()
-        self._colour = _ColourConsole()
         self._rotating_logger = logging.getLogger("desk.rotating")
         if not self._rotating_logger.handlers:
             handler = RotatingFileHandler(
@@ -168,6 +151,8 @@ class EventLogger:
         qty,
         price,
         pnl: float = 0.0,
+        *,
+        equity_pct: float | None = None,
     ) -> None:
         worker_name = getattr(worker, "name", str(worker)) if worker is not None else "Unknown"
         timestamp = float(time.time())
@@ -203,19 +188,21 @@ class EventLogger:
             commit=True,
         )
         if cursor and cursor.rowcount > 0:
-            self._emit_console(
-                "TRADE",
-                (
-                    "TRADE OPENED: "
-                    f"{worker_name} {str(side).upper()} {float(qty):.4f} {symbol} @ {float(price):.2f}"
-                ),
+            usd_value = float(qty) * float(price)
+            pretty_logger.trade_opened(
+                symbol,
+                side,
+                float(qty),
+                usd_value,
+                float(equity_pct or 0.0),
+                float(price),
             )
 
     def log_trade_end(self, worker, symbol: str, exit_price, exit_reason: str, pnl: float) -> None:
         worker_name = getattr(worker, "name", str(worker)) if worker is not None else "Unknown"
         selector = self.safe_execute(
             """
-            SELECT id FROM trades
+            SELECT id, side, qty, entry_price FROM trades
             WHERE worker=? AND symbol=? AND status='OPEN'
             ORDER BY created_at DESC
             LIMIT 1
@@ -236,6 +223,9 @@ class EventLogger:
             self._emit_console("WARNING", message)
             return
         trade_id = int(row[0])
+        side = str(row[1])
+        qty = float(row[2] or 0.0)
+        entry_price = float(row[3] or 0.0)
         updater = self.safe_execute(
             """
             UPDATE trades
@@ -251,13 +241,17 @@ class EventLogger:
             commit=True,
         )
         if updater and updater.rowcount > 0:
-            self._emit_console(
-                "TRADE",
-                (
-                    "TRADE CLOSED: "
-                    f"{worker_name} {exit_reason} @ {float(exit_price):.2f}"
-                    f" | Realized PnL {float(pnl):.2f}"
-                ),
+            price_delta = 0.0
+            if entry_price > 0:
+                price_delta = (float(exit_price) - entry_price) / entry_price
+            direction = 1.0 if side.upper() in {"BUY", "LONG"} else -1.0
+            pnl_pct = price_delta * direction
+            pretty_logger.trade_closed(
+                symbol,
+                side,
+                float(exit_price),
+                pnl_pct,
+                float(pnl),
             )
 
     # ---------- equity snapshots ----------
@@ -294,7 +288,15 @@ class EventLogger:
             commit=True,
         )
         if cursor:
-            self._emit_console(str(level).upper(), f"Feed {symbol}: {message}")
+            text = f"[Feed] {symbol}: {message}"
+            dedupe_key = f"feed:{symbol}:{message}"
+            level_name = str(level).upper()
+            if level_name == "ERROR":
+                pretty_logger.error(text, dedupe_key=dedupe_key)
+            elif level_name == "WARNING":
+                pretty_logger.warning(text, dedupe_key=dedupe_key)
+            else:
+                pretty_logger.info(text, dedupe_key=dedupe_key)
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
@@ -306,9 +308,15 @@ class EventLogger:
                 pass
 
     def _emit_console(self, level: str, message: str) -> None:
-        formatted = self._colour.colourise(level, f"[{level}] {message}")
-        with self._console_lock:
-            print(formatted)
+        level_name = level.upper()
+        if level_name == "ERROR":
+            pretty_logger.error(message)
+        elif level_name == "WARNING":
+            pretty_logger.warning(message)
+        elif level_name == "TRADE":
+            pretty_logger.trade_message(message)
+        else:
+            pretty_logger.info(message)
         try:
             log_level = getattr(logging, level.upper(), logging.INFO)
             self._rotating_logger.log(log_level, message)
