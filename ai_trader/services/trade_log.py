@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List
 
-from .types import TradeIntent
+from ai_trader.services.types import TradeIntent
 
 
 class TradeLog:

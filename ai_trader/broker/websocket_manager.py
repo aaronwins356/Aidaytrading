@@ -10,8 +10,8 @@ from typing import Deque, Dict, List
 
 import websockets
 
-from ..services.logging import get_logger
-from ..services.types import MarketSnapshot
+from ai_trader.services.logging import get_logger
+from ai_trader.services.types import MarketSnapshot
 
 
 class KrakenWebsocketManager:

@@ -13,7 +13,7 @@ from typing import Dict, Iterable, Iterator, Mapping, Optional, Tuple
 
 from river import compose, ensemble, linear_model, optim, preprocessing
 
-from .logging import get_logger
+from ai_trader.services.logging import get_logger
 
 
 FeatureMapping = Mapping[str, float]

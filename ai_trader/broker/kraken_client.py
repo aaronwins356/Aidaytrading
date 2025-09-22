@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 import ccxt
 
-from ..services.logging import get_logger
+from ai_trader.services.logging import get_logger
 
 
 class KrakenClient:

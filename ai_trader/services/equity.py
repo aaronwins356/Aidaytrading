@@ -6,7 +6,7 @@ from collections import deque
 from datetime import datetime
 from typing import Deque, Dict, Iterable, Tuple
 
-from .trade_log import TradeLog
+from ai_trader.services.trade_log import TradeLog
 
 
 class EquityEngine:

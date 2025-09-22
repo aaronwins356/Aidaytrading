@@ -6,13 +6,13 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Tuple
 
-from ..broker.kraken_client import KrakenClient
-from ..broker.websocket_manager import KrakenWebsocketManager
-from ..services.logging import get_logger
-from ..services.risk import RiskManager
-from ..services.trade_log import TradeLog
-from ..services.types import MarketSnapshot, OpenPosition, TradeIntent
-from .equity import EquityEngine
+from ai_trader.broker.kraken_client import KrakenClient
+from ai_trader.broker.websocket_manager import KrakenWebsocketManager
+from ai_trader.services.equity import EquityEngine
+from ai_trader.services.logging import get_logger
+from ai_trader.services.risk import RiskManager
+from ai_trader.services.trade_log import TradeLog
+from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
 
 
 class TradeEngine:

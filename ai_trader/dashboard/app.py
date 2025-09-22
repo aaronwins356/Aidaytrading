@@ -13,7 +13,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yaml
 
-from ..services.ml import MLService
+from ai_trader.services.ml import MLService
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = BASE_DIR / "data" / "trades.db"

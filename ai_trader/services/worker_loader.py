@@ -6,7 +6,7 @@ import importlib
 import inspect
 from typing import Any, Dict, Iterable, Iterator, List, Sequence, Tuple
 
-from ..services.logging import get_logger
+from ai_trader.services.logging import get_logger
 
 
 class WorkerLoader:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict
 
-from .types import TradeIntent
+from ai_trader.services.types import TradeIntent
 
 
 class RiskManager:
