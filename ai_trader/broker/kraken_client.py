@@ -22,12 +22,14 @@ class KrakenClient:
         rest_rate_limit: float,
         paper_trading: bool = False,
         paper_starting_equity: float = 10000.0,
+        allow_shorting: bool = False,
     ) -> None:
         self._logger = get_logger(__name__)
         self._paper_trading = paper_trading
         self._base_currency = base_currency
         self._rest_rate_limit = rest_rate_limit
         self._paper_balances: Dict[str, float] = {base_currency: paper_starting_equity}
+        self._allow_shorting = allow_shorting
         self._exchange = ccxt.kraken({
             "apiKey": api_key,
             "secret": api_secret,
@@ -160,7 +162,7 @@ class KrakenClient:
             balances[quote] -= cost
             balances[base] += amount
         else:
-            if balances[base] < amount:
+            if balances[base] < amount and not self._allow_shorting:
                 raise RuntimeError("Insufficient asset for paper sell")
             balances[base] -= amount
             balances[quote] += cost

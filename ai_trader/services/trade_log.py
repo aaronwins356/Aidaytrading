@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Dict, Iterable, Iterator
 
 from .types import TradeIntent
 
@@ -49,11 +50,48 @@ class TradeLog:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_features (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    features_json TEXT NOT NULL,
+                    label REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    worker TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    status TEXT,
+                    last_signal TEXT,
+                    indicators_json TEXT,
+                    risk_json TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(worker, symbol)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS control_flags (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
         try:
             yield conn
         finally:
@@ -108,3 +146,101 @@ class TradeLog:
                 "SELECT timestamp, equity, pnl_percent, pnl_usd FROM equity_curve ORDER BY timestamp ASC"
             )
             return cursor.fetchall()
+
+    def record_market_features(self, payload: Dict[str, object]) -> None:
+        """Persist engineered market features for research and ML."""
+
+        symbol = str(payload.get("symbol"))
+        timeframe = str(payload.get("timeframe", "1m"))
+        features = payload.get("features", {})
+        label = payload.get("label")
+        price = float(payload.get("price", 0.0))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO market_features(timestamp, symbol, timeframe, price, features_json, label)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.utcnow().isoformat(),
+                    symbol,
+                    timeframe,
+                    price,
+                    json.dumps(features),
+                    float(label) if label is not None else None,
+                ),
+            )
+            conn.commit()
+
+    def fetch_market_features(self, symbol: str, limit: int = 500) -> Iterable[sqlite3.Row]:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT timestamp, symbol, timeframe, price, features_json, label
+                FROM market_features
+                WHERE symbol = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (symbol, limit),
+            )
+            return cursor.fetchall()
+
+    def record_bot_state(self, worker: str, symbol: str, state: Dict[str, object]) -> None:
+        """Store a bot's runtime state for dashboard consumption."""
+
+        indicators = state.get("indicators", {})
+        risk_profile = {
+            key: state.get(key)
+            for key in ("position_size_pct", "leverage", "stop_loss_pct", "take_profit_pct", "trailing_stop_pct")
+            if state.get(key) is not None
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO bot_state(worker, symbol, status, last_signal, indicators_json, risk_json, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(worker, symbol) DO UPDATE SET
+                    status = excluded.status,
+                    last_signal = excluded.last_signal,
+                    indicators_json = excluded.indicators_json,
+                    risk_json = excluded.risk_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    worker,
+                    symbol,
+                    state.get("status"),
+                    state.get("last_signal"),
+                    json.dumps(indicators),
+                    json.dumps(risk_profile),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def fetch_bot_states(self) -> Iterable[sqlite3.Row]:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT worker, symbol, status, last_signal, indicators_json, risk_json, updated_at FROM bot_state"
+            )
+            return cursor.fetchall()
+
+    def set_control_flag(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO control_flags(key, value, updated_at)
+                VALUES(?, ?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value),
+            )
+            conn.commit()
+
+    def fetch_control_flags(self) -> Dict[str, str]:
+        with self._connect() as conn:
+            cursor = conn.execute("SELECT key, value FROM control_flags")
+            return {row["key"]: row["value"] for row in cursor.fetchall()}

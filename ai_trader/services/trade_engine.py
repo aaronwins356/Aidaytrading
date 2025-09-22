@@ -23,6 +23,7 @@ class TradeEngine:
         broker: KrakenClient,
         websocket_manager: KrakenWebsocketManager,
         workers: Iterable,
+        researchers: Iterable,
         equity_engine: EquityEngine,
         risk_manager: RiskManager,
         trade_log: TradeLog,
@@ -33,6 +34,7 @@ class TradeEngine:
         self._broker = broker
         self._websocket_manager = websocket_manager
         self._workers = list(workers)
+        self._researchers = list(researchers)
         self._equity_engine = equity_engine
         self._risk_manager = risk_manager
         self._trade_log = trade_log
@@ -42,11 +44,17 @@ class TradeEngine:
         self._open_positions: Dict[Tuple[str, str], OpenPosition] = {}
         self._logger = get_logger(__name__)
         self._stop_event = asyncio.Event()
+        self._control_flags: Dict[str, str] = {}
+        self._kill_switch = False
 
     async def start(self) -> None:
         await self._broker.load_markets()
         await self._websocket_manager.start()
-        self._logger.info("Trade engine started with %d workers", len(self._workers))
+        self._logger.info(
+            "Trade engine started with %d workers and %d researcher(s)",
+            len(self._workers),
+            len(self._researchers),
+        )
         await self._run()
 
     async def stop(self) -> None:
@@ -64,9 +72,15 @@ class TradeEngine:
             self._equity_engine.update(equity)
             equity_metrics = self._equity_engine.get_latest_metrics()
             equity_per_trade = equity * (self._equity_allocation_percent / 100)
+            await self._run_researchers(snapshot, equity_metrics)
+            self._update_control_flags()
 
             for worker in self._workers:
                 if not getattr(worker, "active", True):
+                    continue
+                status_flag = self._control_flags.get(f"bot::{worker.name}")
+                if status_flag in {"paused", "disabled"}:
+                    self._logger.debug("Worker %s paused via control flag", worker.name)
                     continue
                 try:
                     signals = await worker.evaluate_signal(snapshot)
@@ -77,6 +91,19 @@ class TradeEngine:
                     signal = signals.get(symbol)
                     key = (worker.name, symbol)
                     open_position = self._open_positions.get(key)
+                    state = worker.get_state_snapshot(symbol)
+                    if open_position:
+                        state.setdefault("indicators", {}).update(
+                            {
+                                "position": {
+                                    "side": open_position.side,
+                                    "entry": open_position.entry_price,
+                                    "quantity": open_position.quantity,
+                                    "cash": open_position.cash_spent,
+                                }
+                            }
+                        )
+                    self._trade_log.record_bot_state(worker.name, symbol, state)
                     try:
                         intent = await worker.generate_trade(
                             symbol,
@@ -90,6 +117,9 @@ class TradeEngine:
                         continue
                     if intent is None:
                         continue
+                    if self._kill_switch and intent.action == "OPEN":
+                        self._logger.warning("Kill switch active. Blocking %s intent for %s", worker.name, symbol)
+                        continue
                     if not self._risk_manager.check_trade(
                         intent,
                         equity_metrics,
@@ -102,6 +132,22 @@ class TradeEngine:
 
             await self._enforce_position_duration(snapshot)
             await asyncio.sleep(self._refresh_interval)
+
+    async def _run_researchers(
+        self,
+        snapshot: MarketSnapshot,
+        equity_metrics: Dict[str, float],
+    ) -> None:
+        if not self._researchers:
+            return
+        open_positions = list(self._open_positions.values())
+        for researcher in self._researchers:
+            try:
+                await researcher.observe(snapshot, equity_metrics, open_positions)
+                for symbol, state in researcher.get_all_state_snapshots().items():
+                    self._trade_log.record_bot_state(researcher.name, symbol, state)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error("Researcher %s failed: %s", researcher.name, exc)
 
     async def _execute_intent(
         self,
@@ -190,3 +236,8 @@ class TradeEngine:
                     win_loss="win" if pnl > 0 else "loss",
                 )
                 await self._close_trade(intent, key, position)
+
+    def _update_control_flags(self) -> None:
+        flags = self._trade_log.fetch_control_flags()
+        self._control_flags = flags
+        self._kill_switch = flags.get("kill_switch", "false").lower() == "true"

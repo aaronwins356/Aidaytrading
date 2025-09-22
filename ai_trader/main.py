@@ -13,6 +13,7 @@ from .broker.kraken_client import KrakenClient
 from .broker.websocket_manager import KrakenWebsocketManager
 from .services.equity import EquityEngine
 from .services.logging import configure_logging, get_logger
+from .services.ml_pipeline import MLPipeline
 from .services.risk import RiskManager
 from .services.trade_engine import TradeEngine
 from .services.trade_log import TradeLog
@@ -45,21 +46,45 @@ async def start_bot() -> None:
         rest_rate_limit=float(config.get("kraken", {}).get("rest_rate_limit", 0.5)),
         paper_trading=bool(trading_cfg.get("paper_trading", True)),
         paper_starting_equity=float(trading_cfg.get("paper_starting_equity", 10000.0)),
+        allow_shorting=bool(trading_cfg.get("allow_shorting", False)),
     )
 
     trade_log = TradeLog(DB_PATH)
+    ml_cfg = config.get("ml", {})
+    feature_keys = [
+        "return_1",
+        "return_5",
+        "return_15",
+        "volatility",
+        "ema_fast",
+        "ema_slow",
+        "macd",
+        "macd_hist",
+        "rsi",
+        "zscore",
+    ]
+    ml_pipeline = MLPipeline(
+        db_path=DB_PATH,
+        feature_keys=feature_keys,
+        learning_rate=float(ml_cfg.get("learning_rate", 0.05)),
+        regularization=float(ml_cfg.get("regularization", 0.001)),
+        batch_size=int(ml_cfg.get("training_batch_size", 250)),
+        max_training_rows=int(ml_cfg.get("max_training_rows", 2000)),
+    )
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
     risk_manager = RiskManager(risk_cfg)
 
     symbols = trading_cfg.get("symbols", [])
     websocket_manager = KrakenWebsocketManager(symbols)
-    worker_loader = WorkerLoader(worker_cfg.get("modules", []), symbols)
-    workers = worker_loader.load()
+    worker_loader = WorkerLoader(worker_cfg, symbols)
+    shared_services = {"pipeline": ml_pipeline, "trade_log": trade_log}
+    workers, researchers = worker_loader.load(shared_services)
 
     engine = TradeEngine(
         broker=broker,
         websocket_manager=websocket_manager,
         workers=workers,
+        researchers=researchers,
         equity_engine=equity_engine,
         risk_manager=risk_manager,
         trade_log=trade_log,
