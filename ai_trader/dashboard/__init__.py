@@ -1,1 +1,1 @@
-"""Streamlit dashboard for the AI Trader bot."""
+"""Dashboard package marker."""
