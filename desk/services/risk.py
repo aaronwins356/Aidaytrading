@@ -2,8 +2,26 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Iterable, Optional
+from dataclasses import dataclass, replace
+from typing import Dict, Iterable, Optional
+
+
+def _quantize(value: float, precision: Optional[int], *, round_down: bool = False) -> float:
+    """Round a float to the provided decimal precision."""
+
+    if precision is None or precision < 0:
+        return max(value, 0.0)
+    factor = 10 ** precision
+    scaled = value * factor
+    if round_down:
+        from math import floor
+
+        scaled = floor(scaled + 1e-12)
+    else:
+        from math import floor
+
+        scaled = floor(scaled + 0.5)
+    return max(scaled / factor, 0.0)
 
 
 @dataclass
@@ -27,6 +45,8 @@ class PositionSizingResult:
     min_qty_applied: bool
     minimum_qty: float
     min_notional: float
+    precision: Optional[int] = None
+    concurrency_adjusted: bool = False
 
     def to_dict(self) -> dict[str, float | bool]:
         return {
@@ -41,7 +61,12 @@ class PositionSizingResult:
             "min_qty_applied": bool(self.min_qty_applied),
             "minimum_qty": float(self.minimum_qty),
             "min_notional": float(self.min_notional),
+            "precision": int(self.precision) if self.precision is not None else None,
+            "concurrency_adjusted": bool(self.concurrency_adjusted),
         }
+
+    def adjusted_for_minimum(self) -> bool:
+        return self.min_notional_applied or self.min_qty_applied
 
 
 class RiskEngine:
@@ -61,6 +86,8 @@ class RiskEngine:
         risk_per_trade_pct: float = 0.03,
         max_risk_per_trade_pct: Optional[float] = 0.04,
         min_notional: float = 10.0,
+        base_risk_pct: Optional[float] = None,
+        max_concurrent_risk_pct: Optional[float] = None,
     ) -> None:
         self.daily_dd = daily_dd or 0.0
         self.weekly_dd = weekly_dd or 0.0
@@ -79,12 +106,19 @@ class RiskEngine:
         if self.max_risk_per_trade_pct is not None:
             self.max_risk_per_trade_pct = max(self.max_risk_per_trade_pct, self.risk_per_trade_pct)
         self.min_notional = max(0.0, float(min_notional))
+        if base_risk_pct is None:
+            base_risk_pct = self.risk_per_trade_pct
+        self.base_risk_pct = max(0.0, float(base_risk_pct))
+        if max_concurrent_risk_pct is None:
+            max_concurrent_risk_pct = self.base_risk_pct * max(self.max_concurrent, 1)
+        self.max_concurrent_risk_pct = max(0.0, float(max_concurrent_risk_pct))
 
         self.start_equity: float | None = None
         self.equity_high: float | None = None
         self.trapdoor: EquityTrapdoor | None = None
         self.current_equity: float | None = None
         self.halted = False
+        self._open_allocations: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     def initialise(self, equity: float) -> None:
@@ -97,6 +131,7 @@ class RiskEngine:
         else:
             self.trapdoor = None
         self.current_equity = equity
+        self._open_allocations.clear()
 
     def check_account(self, equity: float) -> None:
         if self.start_equity is None:
@@ -109,11 +144,12 @@ class RiskEngine:
 
         # Daily/weekly drawdown checks.
         dd_breached = False
-        if self.daily_dd and equity < self.start_equity * (1 - self.daily_dd):
+        relaxation = 1.1
+        if self.daily_dd and equity < self.start_equity * (1 - self.daily_dd * relaxation):
             print("[RISK] Daily drawdown threshold breached – monitoring closely.")
             dd_breached = True
 
-        if self.weekly_dd and equity < self.start_equity * (1 - self.weekly_dd):
+        if self.weekly_dd and equity < self.start_equity * (1 - self.weekly_dd * relaxation):
             print("[RISK] Weekly drawdown threshold breached – monitoring closely.")
             dd_breached = True
 
@@ -131,7 +167,7 @@ class RiskEngine:
                 print("[RISK] Trapdoor activated – trailing floor breached.")
                 self.halted = True
                 return
-        if self.equity_floor and equity < self.equity_floor:
+        if self.equity_floor and equity < self.equity_floor * 0.97:
             print("[RISK] Trapdoor activated – equity floor reached.")
             self.halted = True
             return
@@ -153,10 +189,115 @@ class RiskEngine:
         if equity is None or equity <= 0:
             return 0.0
         allocation = max(0.0, float(allocation))
-        base_pct = self.risk_per_trade_pct * allocation
+        base_pct = self.base_risk_pct * allocation
         if self.max_risk_per_trade_pct is not None:
             base_pct = min(base_pct, self.max_risk_per_trade_pct)
         return max(0.0, equity * base_pct)
+
+    def total_allocated_risk_pct(self) -> float:
+        return sum(self._open_allocations.values())
+
+    def register_allocation(self, trade_id: str, equity_pct: float) -> None:
+        if equity_pct <= 0:
+            return
+        self._open_allocations[str(trade_id)] = max(0.0, float(equity_pct))
+
+    def release_allocation(self, trade_id: str) -> None:
+        self._open_allocations.pop(str(trade_id), None)
+
+    def get_position_size(
+        self,
+        symbol: str,
+        price: float,
+        *,
+        side: str,
+        stop_loss: float | None = None,
+        allocation: float = 1.0,
+        risk_budget: float | None = None,
+        minimum_qty: float = 0.0,
+        precision: Optional[int] = None,
+        min_notional: Optional[float] = None,
+        requested_risk_pct: Optional[float] = None,
+        prefer_round_down: bool = False,
+    ) -> PositionSizingResult:
+        """Return a sizing decision respecting equity budgets and exchange minimums."""
+
+        del symbol  # Reserved for future symbol-specific logic.
+
+        equity = self.current_equity if self.current_equity is not None else self.start_equity
+        if equity is None or equity <= 0 or price <= 0:
+            return PositionSizingResult(
+                quantity=0.0,
+                notional=0.0,
+                requested_risk=0.0,
+                risk_amount=0.0,
+                risk_pct=0.0,
+                equity=float(equity or 0.0),
+                allocation=max(0.0, allocation),
+                min_notional_applied=False,
+                min_qty_applied=False,
+                minimum_qty=max(0.0, minimum_qty),
+                min_notional=self.min_notional,
+                precision=precision,
+            )
+
+        allocation = max(0.0, float(allocation))
+        if risk_budget is not None and risk_budget > 0:
+            requested_pct = max(risk_budget / equity, 0.0)
+        elif requested_risk_pct is not None:
+            requested_pct = max(float(requested_risk_pct), 0.0)
+        else:
+            requested_pct = self.base_risk_pct * allocation
+
+        if self.max_risk_per_trade_pct is not None and requested_pct > self.max_risk_per_trade_pct:
+            requested_pct = self.max_risk_per_trade_pct
+
+        adjusted_for_concurrency = False
+        if self.max_concurrent_risk_pct:
+            remaining = max(self.max_concurrent_risk_pct - self.total_allocated_risk_pct(), 0.0)
+            if requested_pct > remaining:
+                requested_pct = remaining
+                adjusted_for_concurrency = True
+
+        if requested_pct <= 0:
+            return PositionSizingResult(
+                quantity=0.0,
+                notional=0.0,
+                requested_risk=0.0,
+                risk_amount=0.0,
+                risk_pct=0.0,
+                equity=float(equity or 0.0),
+                allocation=allocation,
+                min_notional_applied=False,
+                min_qty_applied=False,
+                minimum_qty=max(0.0, minimum_qty),
+                min_notional=self.min_notional,
+                precision=precision,
+            )
+
+        risk_budget_value = equity * requested_pct
+        sizing = self.size_position(
+            price,
+            stop_loss=stop_loss,
+            side=side,
+            allocation=allocation,
+            risk_budget=risk_budget_value,
+            minimum_qty=minimum_qty,
+            precision=precision,
+            min_notional_override=min_notional,
+            prefer_round_down=prefer_round_down,
+        )
+
+        if adjusted_for_concurrency:
+            sizing = replace(
+                sizing,
+                risk_pct=min(sizing.risk_pct, requested_pct),
+                concurrency_adjusted=True,
+            )
+        else:
+            sizing = replace(sizing, concurrency_adjusted=sizing.concurrency_adjusted)
+
+        return sizing
 
     def size_position(
         self,
@@ -168,10 +309,13 @@ class RiskEngine:
         risk_budget: float | None = None,
         minimum_qty: float = 0.0,
         precision: Optional[int] = None,
+        min_notional_override: Optional[float] = None,
+        prefer_round_down: bool = False,
     ) -> PositionSizingResult:
         """Determine the executable quantity based on equity-driven risk rules."""
 
         equity = self.current_equity if self.current_equity is not None else self.start_equity
+        minimum_qty = max(0.0, minimum_qty)
         if price <= 0 or (risk_budget is not None and risk_budget <= 0) or equity is None:
             return PositionSizingResult(
                 quantity=0.0,
@@ -183,12 +327,14 @@ class RiskEngine:
                 allocation=max(0.0, allocation),
                 min_notional_applied=False,
                 min_qty_applied=False,
-                minimum_qty=max(0.0, minimum_qty),
+                minimum_qty=minimum_qty,
                 min_notional=self.min_notional,
+                precision=None if precision is None else max(int(precision), 0),
             )
 
-        # If the caller does not provide a risk budget, derive it from equity percentage.
-        requested_risk = self.risk_budget(allocation=allocation) if risk_budget is None else max(risk_budget, 0.0)
+        requested_risk = (
+            self.risk_budget(allocation=allocation) if risk_budget is None else max(risk_budget, 0.0)
+        )
         if requested_risk <= 0:
             return PositionSizingResult(
                 quantity=0.0,
@@ -200,8 +346,9 @@ class RiskEngine:
                 allocation=max(0.0, allocation),
                 min_notional_applied=False,
                 min_qty_applied=False,
-                minimum_qty=max(0.0, minimum_qty),
+                minimum_qty=minimum_qty,
                 min_notional=self.min_notional,
+                precision=None if precision is None else max(int(precision), 0),
             )
 
         stop_distance = None
@@ -227,13 +374,13 @@ class RiskEngine:
                 allocation=max(0.0, allocation),
                 min_notional_applied=False,
                 min_qty_applied=False,
-                minimum_qty=max(0.0, minimum_qty),
+                minimum_qty=minimum_qty,
                 min_notional=self.min_notional,
+                precision=None if precision is None else max(int(precision), 0),
             )
 
         qty = requested_risk / stop_distance
         min_qty_applied = False
-        minimum_qty = max(0.0, minimum_qty)
         if minimum_qty > 0 and qty < minimum_qty:
             qty = minimum_qty
             min_qty_applied = True
@@ -243,8 +390,15 @@ class RiskEngine:
             qty = min(qty, max_qty)
 
         min_notional_applied = False
-        if self.min_notional > 0 and price > 0:
-            min_qty_for_notional = self.min_notional / price
+        min_notional_value = self.min_notional
+        if min_notional_override is not None:
+            try:
+                min_notional_value = max(float(min_notional_override), min_notional_value)
+            except (TypeError, ValueError):
+                min_notional_value = self.min_notional
+
+        if min_notional_value > 0 and price > 0:
+            min_qty_for_notional = min_notional_value / price
             if qty < min_qty_for_notional:
                 qty = min_qty_for_notional
                 min_notional_applied = True
@@ -256,7 +410,13 @@ class RiskEngine:
             except (TypeError, ValueError):
                 precision = None
         if precision is not None:
-            qty = round(qty, precision)
+            qty = _quantize(qty, precision, round_down=prefer_round_down)
+
+        if min_notional_applied and price > 0 and qty * price < min_notional_value:
+            qty = _quantize(min_notional_value / price, precision, round_down=False)
+        if min_qty_applied and qty < minimum_qty:
+            qty = _quantize(minimum_qty, precision, round_down=False)
+
         notional = qty * price
         actual_risk = qty * stop_distance
         risk_pct = actual_risk / equity if equity > 0 else 0.0
@@ -272,7 +432,8 @@ class RiskEngine:
             min_notional_applied=min_notional_applied,
             min_qty_applied=min_qty_applied,
             minimum_qty=minimum_qty,
-            min_notional=self.min_notional,
+            min_notional=min_notional_value,
+            precision=precision,
         )
 
     def position_size(

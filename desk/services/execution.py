@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 from desk.config import DESK_ROOT
 from desk.data import candles_to_dataframe
 from desk.services.logger import EventLogger
+from desk.services.risk import PositionSizingResult, RiskEngine
 
 _FALLBACK_MINIMUM_ORDER_SIZES = {
     "BTC": 0.0001,
@@ -177,6 +178,7 @@ class ExecutionEngine:
         logger: EventLogger,
         risk_config: Dict[str, float],
         *,
+        risk_engine: Optional[RiskEngine] = None,
         telemetry: Optional["TelemetryClient"] = None,
         dashboard_recorder: Optional["DashboardRecorder"] = None,
         position_store: Optional[PositionStore] = None,
@@ -184,6 +186,7 @@ class ExecutionEngine:
         self.broker = broker
         self.logger = logger
         self.risk_config = risk_config
+        self.risk_engine = risk_engine
         self.telemetry = telemetry
         self.dashboard = dashboard_recorder
         self.position_store = position_store or PositionStore()
@@ -203,6 +206,16 @@ class ExecutionEngine:
     def _load_persisted_positions(self) -> None:
         for trade in self.position_store.load():
             self.open_positions.setdefault(trade.symbol, []).append(trade)
+            if self.risk_engine:
+                metadata = trade.metadata or {}
+                risk_meta = metadata.get("risk") if isinstance(metadata, dict) else None
+                equity_pct = 0.0
+                if isinstance(risk_meta, dict):
+                    try:
+                        equity_pct = float(risk_meta.get("risk_pct", risk_meta.get("equity_pct", 0.0)) or 0.0)
+                    except (TypeError, ValueError):
+                        equity_pct = 0.0
+                self.risk_engine.register_allocation(trade.trade_id, max(equity_pct, 0.0))
 
     def _ensure_journal(self) -> None:
         self._journal_path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,16 +251,31 @@ class ExecutionEngine:
         aliases = {"XBT": "BTC"}
         return aliases.get(base, base)
 
-    def _minimum_order_size(self, symbol: str) -> float:
+    def _minimum_order_constraints(self, symbol: str) -> Tuple[float, Optional[int]]:
         broker_min = 0.0
+        precision: Optional[int] = None
         minimum_config = getattr(self.broker, "minimum_order_config", None)
         if callable(minimum_config):
             try:
-                broker_min, _precision = minimum_config(symbol)
+                broker_min, precision = minimum_config(symbol)
             except Exception:
                 broker_min = 0.0
+                precision = None
         fallback = _FALLBACK_MINIMUM_ORDER_SIZES.get(self._normalize_asset(symbol), 0.0)
-        return max(float(broker_min or 0.0), float(fallback or 0.0))
+        minimum = max(float(broker_min or 0.0), float(fallback or 0.0))
+        if precision is not None:
+            try:
+                precision = max(int(precision), 0)
+            except (TypeError, ValueError):
+                precision = None
+        return minimum, precision
+
+    @staticmethod
+    def _is_sizing_error(message: Optional[str]) -> bool:
+        if not message:
+            return False
+        lowered = str(message).lower()
+        return any(keyword in lowered for keyword in ("size", "minimum", "precision", "lot"))
 
     # ------------------------------------------------------------------
     # Trade lifecycle helpers
@@ -297,19 +325,18 @@ class ExecutionEngine:
         worker,
         symbol: str,
         side: str,
-        qty: float,
         price: float,
-        risk_amount: float,
+        *,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         max_hold_minutes: Optional[float] = None,
         metadata: Optional[Dict[str, float]] = None,
-        *,
-        sizing_info: Optional[Dict[str, Any]] = None,
+        sizing_hint: Optional[Dict[str, Any]] = None,
+        allocation: float = 1.0,
+        risk_budget: Optional[float] = None,
+        minimum_qty: Optional[float] = None,
+        precision: Optional[int] = None,
     ) -> Optional[OpenTrade]:
-        if qty <= 0:
-            return None
-
         duplicate_key = (worker.name, symbol, side.upper())
         now = time.time()
         last_trade = self._last_trade_times.get(duplicate_key)
@@ -328,134 +355,207 @@ class ExecutionEngine:
         slippage = max(self.slippage_bps / 10_000.0, 0.0)
         reference_price = price * (1 + slippage if side.upper() == "BUY" else 1 - slippage)
 
-        can_execute = True
-        balance_check_error: Optional[str] = None
-        balance_guard = getattr(self.broker, "can_execute_market_order", None)
-        if callable(balance_guard):
-            try:
-                can_execute = bool(
-                    balance_guard(
-                        symbol,
-                        side,
-                        qty,
-                        price=reference_price,
-                        slippage=slippage + self.balance_buffer_pct,
-                    )
+        min_qty_config, broker_precision = self._minimum_order_constraints(symbol)
+        effective_min_qty = max(min_qty_config, float(minimum_qty or 0.0))
+        precision_value = precision if precision is not None else broker_precision
+
+        attempt = 0
+        sizing_result: Optional[PositionSizingResult] = None
+
+        while attempt < 2:
+            attempt += 1
+            if self.risk_engine:
+                sizing_result = self.risk_engine.get_position_size(
+                    symbol,
+                    price,
+                    side=side,
+                    stop_loss=stop_loss,
+                    allocation=allocation,
+                    risk_budget=risk_budget,
+                    minimum_qty=effective_min_qty,
+                    precision=precision_value,
+                    min_notional=self.risk_engine.min_notional,
+                    requested_risk_pct=(
+                        float(sizing_hint.get("risk_pct", 0.0)) if sizing_hint else None
+                    ),
+                    prefer_round_down=attempt > 1,
                 )
-            except Exception as exc:  # pragma: no cover - defensive broker guard
-                balance_check_error = str(exc)
-                can_execute = False
-        if not can_execute:
+            else:
+                fallback_qty = max(
+                    (risk_budget or 0.0) / max(price, 1e-9),
+                    effective_min_qty,
+                )
+                if precision_value is not None:
+                    fallback_qty = round(fallback_qty, precision_value)
+                fallback_notional = fallback_qty * price
+                stop_pct = float(self.risk_config.get("stop_loss_pct", 0.02))
+                fallback_risk = fallback_notional * stop_pct
+                equity = float(getattr(self.broker, "equity", 0.0) or 0.0)
+                sizing_result = PositionSizingResult(
+                    quantity=fallback_qty,
+                    notional=fallback_notional,
+                    requested_risk=float(risk_budget or fallback_risk),
+                    risk_amount=fallback_risk,
+                    risk_pct=fallback_risk / equity if equity > 0 else 0.0,
+                    equity=equity,
+                    allocation=max(0.0, allocation),
+                    min_notional_applied=False,
+                    min_qty_applied=fallback_qty <= effective_min_qty and effective_min_qty > 0,
+                    minimum_qty=effective_min_qty,
+                    min_notional=float(self.risk_config.get("min_trade_notional", 0.0) or 0.0),
+                    precision=precision_value,
+                    concurrency_adjusted=False,
+                )
+
+            qty = float(sizing_result.quantity if sizing_result else 0.0)
+            if qty <= 0:
+                self.logger.write(
+                    {
+                        "type": "trade_skipped",
+                        "reason": "no_size",
+                        "worker": worker.name,
+                        "symbol": symbol,
+                        "side": side,
+                    }
+                )
+                return None
+
+            can_execute = True
+            balance_check_error: Optional[str] = None
+            balance_guard = getattr(self.broker, "can_execute_market_order", None)
+            if callable(balance_guard):
+                try:
+                    can_execute = bool(
+                        balance_guard(
+                            symbol,
+                            side,
+                            qty,
+                            price=reference_price,
+                            slippage=slippage + self.balance_buffer_pct,
+                        )
+                    )
+                except Exception as exc:  # pragma: no cover - defensive broker guard
+                    balance_check_error = str(exc)
+                    can_execute = False
+            if not can_execute:
+                self.logger.write(
+                    {
+                        "type": "trade_skipped",
+                        "reason": "insufficient_balance",
+                        "worker": worker.name,
+                        "symbol": symbol,
+                        "side": side,
+                        "detail": balance_check_error,
+                    }
+                )
+                return None
+
+            sizing_payload = sizing_result.to_dict()
+            sizing_payload.update(
+                {
+                    "worker": worker.name,
+                    "symbol": symbol,
+                    "side": side.upper(),
+                    "qty": float(qty),
+                    "requested_equity_pct": float(
+                        sizing_result.requested_risk / sizing_result.equity
+                        if sizing_result.equity
+                        else 0.0
+                    ),
+                    "adjusted_for_minimum": sizing_result.adjusted_for_minimum(),
+                    "concurrency_adjusted": sizing_result.concurrency_adjusted,
+                    "attempt": attempt,
+                }
+            )
+            if sizing_hint:
+                sizing_payload.update({f"hint_{k}": v for k, v in sizing_hint.items()})
+
             self.logger.write(
                 {
-                    "type": "trade_skipped",
-                    "reason": "insufficient_balance",
+                    "type": "trade_sizing",
                     "worker": worker.name,
                     "symbol": symbol,
                     "side": side,
-                    "detail": balance_check_error,
+                    "qty": float(qty),
+                    "equity_pct": float(sizing_result.risk_pct),
+                    "requested_equity_pct": sizing_payload["requested_equity_pct"],
+                    "min_notional_adjustment": sizing_result.min_notional_applied,
+                    "min_qty_adjustment": sizing_result.min_qty_applied,
+                    "concurrency_adjustment": sizing_result.concurrency_adjusted,
+                    "attempt": attempt,
                 }
             )
-            return None
 
-        minimum_qty = self._minimum_order_size(symbol)
-        if minimum_qty > 0 and float(qty) < minimum_qty:
+            notional_value = qty * reference_price
             self.logger.log_feed_event(
-                "WARNING",
+                "INFO",
                 symbol,
-                "Order below Kraken minimum; skipping execution.",
+                "Submitting market order.",
                 worker=worker.name,
-                requested_qty=float(qty),
-                minimum_qty=float(minimum_qty),
+                qty=float(qty),
+                usd_value=float(notional_value),
+                equity_pct=float(sizing_result.risk_pct),
+                min_notional_adjustment=bool(sizing_result.min_notional_applied),
+                min_qty_adjustment=bool(sizing_result.min_qty_applied),
+                attempt=attempt,
             )
-            self.logger.write(
-                {
-                    "type": "trade_skipped",
-                    "reason": "below_minimum",
-                    "worker": worker.name,
-                    "symbol": symbol,
-                    "side": side,
-                    "requested_qty": float(qty),
-                    "minimum_qty": float(minimum_qty),
-                }
+
+            metadata_payload: Dict[str, Any] = dict(metadata or {})
+            metadata_payload["risk"] = sizing_result.to_dict()
+
+            trade = self._build_trade(
+                worker.name,
+                symbol,
+                side,
+                qty,
+                reference_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                max_hold_minutes=max_hold_minutes,
+                metadata=metadata_payload,
             )
+            placed_order = self.broker.market_order(
+                symbol,
+                side.lower(),
+                qty,
+                order_type="market",
+                client_order_id=trade.trade_id,
+                worker_name=worker.name,
+            )
+            if placed_order is None:
+                return None
+            if placed_order.get("status") != "ok":
+                error_detail = str(placed_order.get("error"))
+                if attempt >= 2 or not self._is_sizing_error(error_detail):
+                    self.logger.write(
+                        {
+                            "type": "trade_skipped",
+                            "reason": "order_rejected",
+                            "worker": worker.name,
+                            "symbol": symbol,
+                            "side": side,
+                            "detail": error_detail,
+                        }
+                    )
+                    return None
+                continue
+            break
+
+        if sizing_result is None:
             return None
 
-        notional_value = qty * reference_price
-        sizing_payload = dict(sizing_info or {})
-        sizing_payload.update(
-            {
-                "worker": worker.name,
-                "symbol": symbol,
-                "side": side.upper(),
-                "qty": float(qty),
-                "notional": float(notional_value),
-                "risk_amount": float(risk_amount),
-                "risk_pct": float(sizing_info.get("risk_pct", 0.0) if sizing_info else 0.0),
-            }
-        )
-        if sizing_info and sizing_info.get("min_notional_applied"):
-            sizing_payload["min_notional_adjustment"] = True
-        if sizing_info and sizing_info.get("min_qty_applied"):
-            sizing_payload["min_qty_adjustment"] = True
-        self.logger.log_feed_event(
-            "INFO",
-            symbol,
-            "Submitting market order.",
-            worker=worker.name,
-            qty=float(qty),
-            usd_value=float(notional_value),
-            equity_pct=float(sizing_payload.get("risk_pct", 0.0)),
-            min_notional_adjustment=bool(sizing_payload.get("min_notional_adjustment", False)),
-            min_qty_adjustment=bool(sizing_payload.get("min_qty_adjustment", False)),
-        )
-
-        trade = self._build_trade(
-            worker.name,
-            symbol,
-            side,
-            qty,
-            reference_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            max_hold_minutes=max_hold_minutes,
-            metadata=metadata,
-        )
-        placed_order = self.broker.market_order(
-            symbol,
-            side.lower(),
-            qty,
-            order_type="market",
-            client_order_id=trade.trade_id,
-            worker_name=worker.name,
-        )
-        if placed_order is None:
-            return None
-        if placed_order.get("status") != "ok":
-            self.logger.write(
-                {
-                    "type": "trade_skipped",
-                    "reason": "order_rejected",
-                    "worker": worker.name,
-                    "symbol": symbol,
-                    "side": side,
-                    "detail": placed_order.get("error"),
-                }
-            )
-            return None
-
-        fill_qty = qty
+        fill_qty = sizing_result.quantity
         fill_price = reference_price
         fee = 0.0
         if isinstance(placed_order, dict):
-            fill_qty = float(placed_order.get("qty", qty) or qty)
+            fill_qty = float(placed_order.get("qty", sizing_result.quantity) or sizing_result.quantity)
             fill_price = float(placed_order.get("price", reference_price) or reference_price)
             remaining = float(placed_order.get("remaining_qty", 0.0) or 0.0)
             fee = float(placed_order.get("fee", 0.0) or 0.0)
             trade.metadata.setdefault("execution", {})
             trade.metadata["execution"].update(
                 {
-                    "requested_qty": float(qty),
+                    "requested_qty": float(sizing_result.quantity),
                     "filled_qty": fill_qty,
                     "remaining_qty": remaining,
                     "fee": float(placed_order.get("fee", 0.0) or 0.0),
@@ -467,8 +567,55 @@ class ExecutionEngine:
         trade.qty = fill_qty
         trade.entry_price = fill_price
 
+        stop_distance = None
+        if stop_loss is not None:
+            if side.upper() == "BUY":
+                stop_distance = price - stop_loss
+            else:
+                stop_distance = stop_loss - price
+            if stop_distance is not None:
+                stop_distance = abs(stop_distance)
+        if not stop_distance or stop_distance <= 0:
+            default_stop = (
+                self.risk_engine.default_stop_pct if self.risk_engine else float(self.risk_config.get("stop_loss_pct", 0.02))
+            )
+            stop_distance = price * max(default_stop, 0.0)
+
+        actual_risk_amount = fill_qty * stop_distance if stop_distance else sizing_result.risk_amount
+        equity = sizing_result.equity
+        if (equity is None or equity <= 0) and self.risk_engine:
+            equity = float(
+                self.risk_engine.current_equity
+                or self.risk_engine.start_equity
+                or 0.0
+            )
+        equity_pct = actual_risk_amount / equity if equity and equity > 0 else sizing_result.risk_pct
+        sizing_payload.update(
+            {
+                "equity_pct": equity_pct,
+                "risk_amount": actual_risk_amount,
+                "notional": float(fill_qty * fill_price),
+                "min_notional_adjustment": bool(sizing_result.min_notional_applied),
+                "min_qty_adjustment": bool(sizing_result.min_qty_applied),
+            }
+        )
+
+        trade.metadata.setdefault("risk", {})
+        if isinstance(trade.metadata["risk"], dict):
+            trade.metadata["risk"].update(
+                {
+                    "equity_pct": float(equity_pct),
+                    "requested_equity_pct": float(
+                        sizing_payload.get("requested_equity_pct", 0.0)
+                    ),
+                    "risk_amount": float(actual_risk_amount),
+                }
+            )
+
         self.open_positions.setdefault(symbol, []).append(trade)
         self.position_store.persist(trade)
+        if self.risk_engine:
+            self.risk_engine.register_allocation(trade.trade_id, max(equity_pct, 0.0))
         self.logger.log_trade(worker, symbol, side, fill_qty, fill_price, pnl=0.0)
         self.logger.write(
             {
@@ -478,14 +625,18 @@ class ExecutionEngine:
                 "side": side,
                 "qty": fill_qty,
                 "price": fill_price,
-                "risk_amount": risk_amount,
+                "risk_amount": float(actual_risk_amount),
                 "notional": float(fill_qty * fill_price),
-                "risk_pct": float(sizing_payload.get("risk_pct", 0.0)),
-                "min_notional_adjustment": bool(
-                    sizing_payload.get("min_notional_adjustment", False)
-                ),
-                "min_qty_adjustment": bool(sizing_payload.get("min_qty_adjustment", False)),
+                "risk_pct": float(equity_pct),
+                "requested_equity_pct": float(sizing_payload.get("requested_equity_pct", 0.0)),
+                "min_notional_adjustment": bool(sizing_result.min_notional_applied),
+                "min_qty_adjustment": bool(sizing_result.min_qty_applied),
+                "sizing": sizing_payload,
             }
+        )
+        print(
+            "TRADE OPENED:"
+            f" {symbol} {side.upper()} {fill_qty:.8f} @ {fill_price:.5f} | {equity_pct * 100:.2f}% equity"
         )
         if self.dashboard:
             features = (metadata or {}).get("features") if metadata else None
@@ -513,6 +664,8 @@ class ExecutionEngine:
                     "qty": fill_qty,
                     "price": fill_price,
                     "order": placed_order,
+                    "equity_pct": equity_pct,
+                    "requested_equity_pct": sizing_payload.get("requested_equity_pct", 0.0),
                 }
             )
         self.logger.write(
@@ -537,6 +690,8 @@ class ExecutionEngine:
         if trade in positions:
             positions.remove(trade)
         self.position_store.remove(trade.trade_id)
+        if self.risk_engine:
+            self.risk_engine.release_allocation(trade.trade_id)
         pnl = trade.unrealized_pnl(exit_price)
         self.logger.log_trade_end(trade.worker, trade.symbol, exit_price, exit_reason, pnl)
         self.logger.write(
@@ -551,6 +706,10 @@ class ExecutionEngine:
                 "exit_reason": exit_reason,
                 "pnl": pnl,
             }
+        )
+        print(
+            "TRADE CLOSED:"
+            f" {trade.symbol} {trade.side} {trade.qty:.8f} @ {exit_price:.5f} | PnL={pnl:.2f}"
         )
         if self.telemetry:
             self.telemetry.record_trade_close(

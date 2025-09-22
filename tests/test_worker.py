@@ -184,6 +184,7 @@ def test_worker_builds_intent_with_features(monkeypatch):
     assert intent.features["learning_risk_multiplier"] == 1.0
     assert "risk_equity_pct" in intent.features
     assert "proposed_notional" in intent.features
+    assert "requested_equity_pct" in intent.features
 
 
 def test_compute_quantity_respects_minimum(monkeypatch):

@@ -1,3 +1,5 @@
+import pytest
+
 from desk.services.risk import PositionSizingResult, RiskEngine
 
 
@@ -98,3 +100,44 @@ def test_equity_floor_halts_only_when_breached():
     assert engine.halted is False
     engine.check_account(900)
     assert engine.halted is True
+
+
+def test_get_position_size_scales_with_equity_pct():
+    engine = RiskEngine(
+        0.05,
+        0.1,
+        0.02,
+        5,
+        False,
+        0.05,
+        base_risk_pct=0.02,
+        max_concurrent_risk_pct=0.05,
+        min_notional=0.0,
+    )
+    engine.check_account(10_000)
+    sizing = engine.get_position_size("BTC/USD", 100.0, side="BUY", stop_loss=95.0)
+    assert pytest.approx(sizing.risk_amount, rel=1e-3) == 200.0
+    assert pytest.approx(sizing.quantity, rel=1e-3) == sizing.risk_amount / 5.0
+
+
+def test_get_position_size_respects_concurrency_cap():
+    engine = RiskEngine(
+        0.05,
+        0.1,
+        0.02,
+        5,
+        False,
+        0.05,
+        base_risk_pct=0.02,
+        max_concurrent_risk_pct=0.04,
+    )
+    engine.check_account(10_000)
+    first = engine.get_position_size("BTC/USD", 100.0, side="BUY", stop_loss=95.0)
+    engine.register_allocation("t1", first.risk_pct)
+    second = engine.get_position_size("BTC/USD", 100.0, side="BUY", stop_loss=95.0)
+    assert second.quantity > 0
+    total_pct = first.risk_pct + second.risk_pct
+    assert total_pct <= 0.0405
+    engine.register_allocation("t2", second.risk_pct)
+    exhausted = engine.get_position_size("BTC/USD", 100.0, side="BUY", stop_loss=95.0)
+    assert exhausted.quantity == 0
