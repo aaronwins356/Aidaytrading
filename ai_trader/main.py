@@ -7,7 +7,7 @@ import signal
 import sqlite3
 from logging import Logger
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Set
+from typing import Any, Dict, Sequence
 
 import yaml
 
@@ -20,6 +20,7 @@ from ai_trader.services.risk import RiskManager
 from ai_trader.services.trade_engine import TradeEngine
 from ai_trader.services.trade_log import TradeLog
 from ai_trader.services.worker_loader import WorkerLoader
+from ai_trader.workers.researcher import MarketResearchWorker
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -29,6 +30,161 @@ DB_PATH = DATA_DIR / "trades.db"
 def load_config() -> Dict[str, Any]:
     with CONFIG_PATH.open("r", encoding="utf-8") as file:
         return yaml.safe_load(file)
+
+
+def _validate_startup(engine: TradeEngine, workers: Sequence[object], config: Dict[str, Any]) -> None:
+    """Ensure critical services and configuration are ready before trading."""
+
+    logger = get_logger(__name__)
+
+    ml_workers = [
+        worker
+        for worker in workers
+        if getattr(worker, "_ml_gate_enabled", False)
+        and getattr(worker, "_ml_service", None) is not None
+    ]
+    if ml_workers:
+        researchers = list(getattr(engine, "_researchers", []))
+        has_researcher = any(isinstance(researcher, MarketResearchWorker) for researcher in researchers)
+        if not has_researcher:
+            logger.error(
+                "ML gating is enabled for %d worker(s) but no MarketResearchWorker was loaded. "
+                "Enable a researcher in configuration or disable ML gating to continue.",
+                len(ml_workers),
+            )
+            raise SystemExit(1)
+
+    _ensure_sqlite_schema(logger)
+
+    trading_cfg = config.get("trading", {})
+    trading_mode = str(trading_cfg.get("mode", "paper")).lower()
+    if trading_mode == "live":
+        kraken_cfg = config.get("kraken", {})
+        api_key = str(kraken_cfg.get("api_key", "")).strip()
+        api_secret = str(kraken_cfg.get("api_secret", "")).strip()
+        missing_keys = [
+            name
+            for name, value in {"api_key": api_key, "api_secret": api_secret}.items()
+            if not value or "YOUR_KRAKEN" in value.upper()
+        ]
+        if missing_keys:
+            logger.warning(
+                "Live trading mode detected but missing Kraken credential(s): %s. "
+                "Populate config.yaml before running with real funds.",
+                ", ".join(missing_keys),
+            )
+
+    logger.info("✅ Startup validation passed")
+
+
+def _ensure_sqlite_schema(logger: Logger) -> None:
+    """Create any missing SQLite tables required for the trading runtime."""
+
+    table_statements: Dict[str, str] = {
+        "trades": """
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                worker TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                cash_spent REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL,
+                pnl_percent REAL,
+                pnl_usd REAL,
+                win_loss TEXT
+            )
+        """,
+        "equity_curve": """
+            CREATE TABLE IF NOT EXISTS equity_curve (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                equity REAL NOT NULL,
+                pnl_percent REAL NOT NULL,
+                pnl_usd REAL NOT NULL
+            )
+        """,
+        "bot_state": """
+            CREATE TABLE IF NOT EXISTS bot_state (
+                worker TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                status TEXT,
+                last_signal TEXT,
+                indicators_json TEXT,
+                risk_json TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(worker, symbol)
+            )
+        """,
+        "market_features": """
+            CREATE TABLE IF NOT EXISTS market_features (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                features_json TEXT NOT NULL,
+                label REAL
+            )
+        """,
+        "ml_predictions": """
+            CREATE TABLE IF NOT EXISTS ml_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                worker TEXT,
+                confidence REAL NOT NULL,
+                decision INTEGER NOT NULL,
+                threshold REAL NOT NULL
+            )
+        """,
+        "ml_metrics": """
+            CREATE TABLE IF NOT EXISTS ml_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                precision REAL,
+                recall REAL,
+                win_rate REAL,
+                support INTEGER
+            )
+        """,
+        "account_snapshots": """
+            CREATE TABLE IF NOT EXISTS account_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                equity REAL NOT NULL,
+                balances_json TEXT NOT NULL
+            )
+        """,
+        "control_flags": """
+            CREATE TABLE IF NOT EXISTS control_flags (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """,
+    }
+
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing = {row[0] for row in cursor.fetchall()}
+            missing = [name for name in table_statements if name not in existing]
+            for table_name in missing:
+                connection.execute(table_statements[table_name])
+            if missing:
+                logger.info("Created missing SQLite tables: %s", ", ".join(sorted(missing)))
+            connection.commit()
+    except sqlite3.Error as exc:
+        logger.error("Failed to validate SQLite schema: %s", exc)
+        raise SystemExit(1) from exc
 
 
 async def start_bot() -> None:
@@ -100,14 +256,6 @@ async def start_bot() -> None:
     shared_services = {"ml_service": ml_service, "trade_log": trade_log}
     workers, researchers = worker_loader.load(shared_services)
 
-    _validate_startup(
-        workers,
-        researchers,
-        ml_service,
-        symbols,
-        logger,
-    )
-
     engine = TradeEngine(
         broker=broker,
         websocket_manager=websocket_manager,
@@ -120,6 +268,8 @@ async def start_bot() -> None:
         max_open_positions=int(trading_cfg.get("max_open_positions", 3)),
         refresh_interval=float(worker_cfg.get("refresh_interval_seconds", 30)),
     )
+
+    _validate_startup(engine, workers, config)
 
     stop_event = asyncio.Event()
 
@@ -142,79 +292,12 @@ async def start_bot() -> None:
 def main() -> None:
     try:
         asyncio.run(start_bot())
-    except RuntimeError as exc:
-        print(f"Startup validation failed: {exc}")
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - catch-all for a clean shutdown message
+        print(f"Fatal error starting bot: {exc}")
         raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":
     main()
-
-
-def _validate_startup(
-    workers: Sequence[object],
-    researchers: Sequence[object],
-    ml_service: MLService,
-    symbols: Iterable[str],
-    logger: Logger,
-) -> None:
-    """Ensure critical dependencies are ready before starting the engine."""
-
-    issues: List[str] = []
-
-    if not researchers:
-        issues.append(
-            "No MarketResearchWorker instances were loaded. Configure `workers.researcher` to "
-            "enable ML feature engineering."
-        )
-
-    missing_tables = _missing_tables(DB_PATH, _required_tables())
-    if missing_tables:
-        issues.append(
-            "Missing database tables detected: "
-            + ", ".join(sorted(missing_tables))
-            + ". Recreate the SQLite schema by running the bot once or clearing the database."
-        )
-
-    ml_workers = [worker for worker in workers if getattr(worker, "_ml_service", None)]
-    if ml_workers and not ml_service.has_feature_history(symbols):
-        issues.append(
-            "ML gating is enabled but no engineered features were found in the database. "
-            "Allow the researcher to run first or disable ML gating."
-        )
-
-    if issues:
-        for message in issues:
-            logger.error(message)
-        raise RuntimeError("see log output for details")
-
-    logger.info("Startup validation passed with %d researcher worker(s).", len(researchers))
-
-
-def _required_tables() -> Set[str]:
-    """Return the set of SQLite tables the bot depends on."""
-
-    return {
-        "trades",
-        "equity_curve",
-        "market_features",
-        "account_snapshots",
-        "bot_state",
-        "control_flags",
-        "ml_models_state",
-        "ml_predictions",
-        "ml_metrics",
-        "ml_models",
-    }
-
-
-def _missing_tables(db_path: Path, required: Set[str]) -> Set[str]:
-    """Compare required tables against the SQLite schema."""
-
-    try:
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            existing = {row[0] for row in cursor.fetchall()}
-    except sqlite3.Error as exc:  # pragma: no cover - defensive logging
-        raise RuntimeError(f"Unable to inspect database schema: {exc}") from exc
-    return required - existing
