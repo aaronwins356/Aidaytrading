@@ -1,0 +1,30 @@
+# Configuration for AI crypto trading bot
+kraken:
+  api_key: "YOUR_KRAKEN_API_KEY"
+  api_secret: "YOUR_KRAKEN_API_SECRET"
+  rest_rate_limit: 0.5  # seconds between REST calls
+
+trading:
+  base_currency: "USD"
+  symbols:
+    - "BTC/USD"
+    - "ETH/USD"
+  equity_allocation_percent: 5.0  # percent of equity per trade
+  max_open_positions: 3
+  paper_trading: true
+  paper_starting_equity: 10000.0
+
+risk:
+  max_drawdown_percent: 25.0
+  daily_loss_limit_percent: 5.0
+  max_position_duration_minutes: 240
+
+workers:
+  refresh_interval_seconds: 30
+  modules:
+    - "ai_trader.workers.momentum.MomentumWorker"
+    - "ai_trader.workers.mean_reversion.MeanReversionWorker"
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8501
