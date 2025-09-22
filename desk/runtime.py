@@ -22,6 +22,7 @@ from desk.services import (
     RiskEngine,
     TelemetryClient,
     Worker,
+    ReadinessChecker,
 )
 from desk.services.feed_updater import CandleStore
 from desk.services.pretty_logger import pretty_logger
@@ -121,6 +122,16 @@ class TradingRuntime:
         if normalized_symbols:
             feed_symbols = normalized_symbols
 
+        def _server_time_fetcher() -> float:
+            fetch_time = getattr(self.broker.exchange, "fetch_time", None)
+            if not callable(fetch_time):
+                raise RuntimeError("ccxt.kraken.fetch_time unavailable")
+            ts = float(fetch_time())
+            if ts > 1e12:
+                # Kraken returns milliseconds – normalise to seconds for drift checks.
+                ts /= 1000.0
+            return ts
+
         self.feed_updater = FeedUpdater(
             exchange="kraken",
             symbols=feed_symbols,
@@ -213,6 +224,23 @@ class TradingRuntime:
         self._warm_progress: Dict[str, int] = {}
         self._retrain_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self._risk_config = risk_cfg
+        self.readiness_checker = ReadinessChecker(
+            broker=self.broker,
+            symbols=feed_symbols,
+            required_env={
+                "KRAKEN_KEY": api_key,
+                "KRAKEN_SECRET": api_secret,
+            },
+            db_path=self.dashboard.db_path,
+            time_provider=time.time,
+            server_time_fetcher=_server_time_fetcher,
+        )
+        self.latest_readiness_report = self.readiness_checker.run()
+        pretty_logger.info(self.latest_readiness_report.render_console())
+        try:
+            self.dashboard.record_readiness(self.latest_readiness_report)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            pretty_logger.warning(f"Failed to persist readiness report: {exc}")
 
     def start_services(self) -> None:
         if self._services_started:
