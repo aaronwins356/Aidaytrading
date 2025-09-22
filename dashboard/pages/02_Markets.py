@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from components import candles_with_trades, download_chart_as_png, volume_profile
+from ._shared import ensure_data_sources
 
 
 @st.cache_data(show_spinner=False)
@@ -54,7 +55,7 @@ st.set_page_config(page_title="Markets · Aurora Desk", page_icon="📈")
 
 st.title("Markets")
 filters = st.session_state.get("filters", {})
-trades = st.session_state.get("data_sources", {}).get("trades", pd.DataFrame())
+trades = ensure_data_sources().get("trades", pd.DataFrame())
 if trades.empty:
     st.info("No trades available; displaying synthetic market data.")
 

@@ -9,6 +9,7 @@ import streamlit as st
 from fpdf import FPDF
 
 from data_io import LOG_DIR, load_logs
+from ._shared import ensure_data_sources
 
 st.set_page_config(page_title="Logs & Reports · Aurora Desk", page_icon="🗂")
 
@@ -39,7 +40,7 @@ report_dir.mkdir(parents=True, exist_ok=True)
 
 st.subheader("Generate weekly PDF")
 if st.button("Create report"):
-    trades = st.session_state.get("data_sources", {}).get("trades", pd.DataFrame())
+    trades = ensure_data_sources().get("trades", pd.DataFrame())
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)

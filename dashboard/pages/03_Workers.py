@@ -9,6 +9,7 @@ import streamlit as st
 from analytics import aggregate_trade_kpis, correlation_matrix, rolling_sharpe
 from components import download_chart_as_png, equity_with_drawdown, risk_return_scatter, rolling_sharpe_chart
 from data_io import save_config
+from ._shared import ensure_data_sources
 
 st.set_page_config(page_title="Workers · Aurora Desk", page_icon="🛠")
 
@@ -18,7 +19,7 @@ if config is None:
     st.warning("Configuration not loaded. Please restart the application.")
     st.stop()
 
-trades = st.session_state.get("data_sources", {}).get("trades", pd.DataFrame())
+trades = ensure_data_sources().get("trades", pd.DataFrame())
 if trades.empty:
     st.info("No trade history. Seed demo data or wait for executions.")
     st.stop()
