@@ -23,7 +23,6 @@ from desk.services import (
     TelemetryClient,
     Worker,
 )
-from desk.services.risk import PositionSizingResult
 from desk.services.feed_updater import CandleStore
 
 
@@ -178,7 +177,7 @@ class TradingRuntime:
                 else None
             ),
             risk_per_trade_pct=float(
-                risk_cfg.get("risk_per_trade_pct", risk_cfg.get("per_trade_risk_pct", 0.03))
+                risk_cfg.get("risk_per_trade_pct", risk_cfg.get("per_trade_risk_pct", 0.015))
             ),
             max_risk_per_trade_pct=(
                 float(risk_cfg.get("max_risk_per_trade_pct"))
@@ -186,11 +185,14 @@ class TradingRuntime:
                 else 0.04
             ),
             min_notional=float(risk_cfg.get("min_trade_notional", 10.0)),
+            base_risk_pct=float(risk_cfg.get("base_risk_pct", 0.015)),
+            max_concurrent_risk_pct=float(risk_cfg.get("max_concurrent_risk_pct", 0.05)),
         )
         self.executor = ExecutionEngine(
             self.broker,
             self.logger,
             risk_cfg,
+            risk_engine=self.risk_engine,
             telemetry=self.telemetry,
             dashboard_recorder=self.dashboard,
         )
@@ -405,28 +407,13 @@ class TradingRuntime:
                     allocation_factor = allocation_share
                     if base_risk > 0:
                         allocation_factor = final_risk_budget / base_risk
-                    minimum_qty = intent.worker.minimum_order_size
-                    sizing: PositionSizingResult = self.risk_engine.size_position(
-                        intent.price,
-                        stop_loss=intent.stop_loss,
-                        side=intent.side,
-                        allocation=allocation_factor,
-                        risk_budget=final_risk_budget,
-                        minimum_qty=minimum_qty,
-                        precision=intent.worker.quantity_precision,
-                    )
-                    qty = sizing.quantity
-                    if qty <= 0:
-                        continue
                     plan_metadata = intent.plan_metadata or {}
 
                     trade = self.executor.open_position(
                         intent.worker,
                         intent.symbol,
                         intent.side,
-                        qty,
                         intent.price,
-                        sizing.risk_amount,
                         stop_loss=intent.stop_loss,
                         take_profit=intent.take_profit,
                         max_hold_minutes=intent.max_hold_minutes,
@@ -435,9 +422,12 @@ class TradingRuntime:
                             "score": intent.score,
                             "ml_edge": intent.ml_score,
                             "plan": plan_metadata,
-                            "risk": sizing.to_dict(),
                         },
-                        sizing_info=sizing.to_dict(),
+                        sizing_hint=intent.worker.state.get("last_sizing"),
+                        allocation=allocation_factor,
+                        risk_budget=final_risk_budget,
+                        minimum_qty=intent.worker.minimum_order_size,
+                        precision=intent.worker.quantity_precision,
                     )
                     if trade:
                         self.portfolio.mark_routed(intent.worker.name)
@@ -447,7 +437,7 @@ class TradingRuntime:
                                 "worker": intent.worker.name,
                                 "symbol": intent.symbol,
                                 "side": intent.side,
-                                "qty": qty,
+                                "qty": trade.qty,
                                 "entry_price": intent.price,
                                 "timestamp": time.time(),
                                 "features": intent.features,
