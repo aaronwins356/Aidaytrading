@@ -5,6 +5,11 @@ from __future__ import annotations
 from statistics import fmean, pstdev
 from typing import Dict, Optional
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from ..services.ml import MLService
+
 from .base import BaseWorker
 from ..services.types import MarketSnapshot, OpenPosition, TradeIntent
 
@@ -20,10 +25,11 @@ class ShortMeanReversionWorker(BaseWorker):
         symbols,
         config: Optional[Dict] = None,
         risk_config: Optional[Dict] = None,
+        ml_service: "MLService" | None = None,
     ) -> None:
         band_window = int((config or {}).get("band_window", 20))
         lookback = max(band_window * 3, int((config or {}).get("lookback", band_window * 3)))
-        super().__init__(symbols=symbols, lookback=lookback, config=config, risk_config=risk_config)
+        super().__init__(symbols=symbols, lookback=lookback, config=config, risk_config=risk_config, ml_service=ml_service)
         self.band_window = band_window
         self.band_std_dev = float((config or {}).get("band_std_dev", 2.2))
         self.reversion_threshold = float((config or {}).get("reversion_threshold", 0.003))
@@ -72,6 +78,8 @@ class ShortMeanReversionWorker(BaseWorker):
                 "price": last_price,
                 "distance": distance,
             }
+            if self._ml_service:
+                indicators["ml_confidence"] = self._ml_service.latest_confidence(symbol, self.name)
             self.update_signal_state(symbol, signal, indicators)
             if signal:
                 signals[symbol] = signal
@@ -97,6 +105,10 @@ class ShortMeanReversionWorker(BaseWorker):
             cash = equity_per_trade * (self.position_size_pct / 100)
             if cash <= 0:
                 return None
+            allowed, ml_confidence = self.ml_confirmation(symbol)
+            if not allowed:
+                self.update_signal_state(symbol, "ml-block", {"ml_confidence": ml_confidence})
+                return None
             tracker["best_price"] = price
             tracker["stop_price"] = price * (1 + self.stop_loss_pct / 100) if self.stop_loss_pct else None
             tracker["mean_price"] = self._state.get(symbol, {}).get("indicators", {}).get("mid", price)
@@ -107,7 +119,7 @@ class ShortMeanReversionWorker(BaseWorker):
                 side="sell",
                 cash_spent=cash * self.leverage,
                 entry_price=price,
-                confidence=0.65,
+                confidence=ml_confidence or 0.65,
             )
 
         tracker["best_price"] = min(tracker.get("best_price", price), price)

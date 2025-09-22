@@ -5,6 +5,11 @@ from __future__ import annotations
 from statistics import fmean
 from typing import Dict, Optional
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from ..services.ml import MLService
+
 from .base import BaseWorker
 from ..services.types import MarketSnapshot, OpenPosition, TradeIntent
 
@@ -15,8 +20,14 @@ class MomentumWorker(BaseWorker):
     name = "Momentum Rider"
     emoji = "⚡"
 
-    def __init__(self, symbols, fast_window: int = 9, slow_window: int = 26) -> None:
-        super().__init__(symbols=symbols, lookback=max(fast_window, slow_window) * 3)
+    def __init__(
+        self,
+        symbols,
+        fast_window: int = 9,
+        slow_window: int = 26,
+        ml_service: "MLService" | None = None,
+    ) -> None:
+        super().__init__(symbols=symbols, lookback=max(fast_window, slow_window) * 3, ml_service=ml_service)
         self.fast_window = fast_window
         self.slow_window = slow_window
 
@@ -55,6 +66,10 @@ class MomentumWorker(BaseWorker):
 
         if signal in {"buy", "sell"} and existing_position is None:
             cash = equity_per_trade
+            allowed, confidence = self.ml_confirmation(symbol)
+            if not allowed:
+                self.update_signal_state(symbol, "ml-block", {"ml_confidence": confidence})
+                return None
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
@@ -62,6 +77,7 @@ class MomentumWorker(BaseWorker):
                 side=signal,
                 cash_spent=cash,
                 entry_price=price,
+                confidence=confidence,
             )
 
         if signal == "sell" and existing_position and existing_position.side == "buy":

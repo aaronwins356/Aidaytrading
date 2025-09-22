@@ -5,6 +5,11 @@ from __future__ import annotations
 import statistics
 from typing import Dict, Optional
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from ..services.ml import MLService
+
 from .base import BaseWorker
 from ..services.types import MarketSnapshot, OpenPosition, TradeIntent
 
@@ -15,8 +20,14 @@ class MeanReversionWorker(BaseWorker):
     name = "Mean Reverter"
     emoji = "🔄"
 
-    def __init__(self, symbols, window: int = 20, threshold: float = 0.01) -> None:
-        super().__init__(symbols=symbols, lookback=window * 3)
+    def __init__(
+        self,
+        symbols,
+        window: int = 20,
+        threshold: float = 0.01,
+        ml_service: "MLService" | None = None,
+    ) -> None:
+        super().__init__(symbols=symbols, lookback=window * 3, ml_service=ml_service)
         self.window = window
         self.threshold = threshold
 
@@ -53,6 +64,10 @@ class MeanReversionWorker(BaseWorker):
             return None
 
         if signal in {"buy", "sell"} and existing_position is None:
+            allowed, confidence = self.ml_confirmation(symbol)
+            if not allowed:
+                self.update_signal_state(symbol, "ml-block", {"ml_confidence": confidence})
+                return None
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
@@ -60,6 +75,7 @@ class MeanReversionWorker(BaseWorker):
                 side=signal,
                 cash_spent=equity_per_trade,
                 entry_price=price,
+                confidence=confidence,
             )
 
         if signal == "flat" and existing_position is not None:

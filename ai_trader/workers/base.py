@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Deque, Dict, Iterable, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from ..services.ml import MLService
 
 from ..services.types import MarketSnapshot, OpenPosition, TradeIntent
 
@@ -22,6 +27,7 @@ class BaseWorker(ABC):
         lookback: int = 50,
         config: Optional[Dict[str, Any]] = None,
         risk_config: Optional[Dict[str, Any]] = None,
+        ml_service: "MLService" | None = None,
     ) -> None:
         self.symbols: List[str] = list(symbols)
         self.lookback = lookback
@@ -39,6 +45,9 @@ class BaseWorker(ABC):
         self.trailing_stop_pct: float = float(self.risk_config.get("trailing_stop_pct", 0.0))
         self._latest_signals: Dict[str, Optional[str]] = {symbol: None for symbol in self.symbols}
         self._state: Dict[str, Dict[str, Any]] = {}
+        self._ml_service = ml_service
+        self._ml_gate_enabled: bool = True
+        self._ml_threshold_override: Optional[float] = None
 
     def update_history(self, snapshot: MarketSnapshot) -> None:
         for symbol, price in snapshot.prices.items():
@@ -102,6 +111,19 @@ class BaseWorker(ABC):
     def activate(self) -> None:
         self.active = True
 
+    def apply_control_flags(self, flags: Dict[str, str]) -> None:
+        gate_flag = flags.get(f"ml::{self.name}")
+        if gate_flag:
+            self._ml_gate_enabled = gate_flag.lower() not in {"off", "false", "0", "disabled"}
+        threshold_flag = flags.get(f"ml::{self.name}::threshold")
+        if threshold_flag:
+            try:
+                self._ml_threshold_override = float(threshold_flag)
+            except (TypeError, ValueError):
+                self._ml_threshold_override = None
+        else:
+            self._ml_threshold_override = None
+
     async def observe(
         self,
         snapshot: MarketSnapshot,
@@ -112,3 +134,24 @@ class BaseWorker(ABC):
 
         # No-op by default. Sub-classes may override.
         _ = (snapshot, equity_metrics, open_positions)
+
+    # ------------------------------------------------------------------
+    # Machine learning gating helpers
+    # ------------------------------------------------------------------
+    def ml_confirmation(
+        self,
+        symbol: str,
+        *,
+        features: Optional[Mapping[str, float]] = None,
+        threshold: Optional[float] = None,
+    ) -> tuple[bool, float]:
+        """Return whether ML gating approves the trade and the associated confidence."""
+
+        if self._ml_service is None or not self._ml_gate_enabled:
+            return True, 0.0
+        feature_payload = features or self._ml_service.latest_features(symbol)
+        if feature_payload is None:
+            return False, 0.0
+        gate = threshold if threshold is not None else self._ml_threshold_override or self._ml_service.default_threshold
+        decision, confidence = self._ml_service.predict(symbol, feature_payload, worker=self.name, threshold=gate)
+        return decision, confidence

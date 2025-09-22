@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from ..services.ml import MLService
+
 from .base import BaseWorker
-from ..services.ml_pipeline import MLPipeline
 from ..services.types import MarketSnapshot, OpenPosition, TradeIntent
 
 
@@ -18,14 +22,14 @@ class MLShortWorker(BaseWorker):
     def __init__(
         self,
         symbols,
-        pipeline: MLPipeline,
+        ml_service: "MLService",
         config: Optional[Dict] = None,
         risk_config: Optional[Dict] = None,
     ) -> None:
-        self._pipeline = pipeline
+        self._ml_service = ml_service
         self.feature_lookback = int((config or {}).get("feature_lookback", 30))
         lookback = max(self.feature_lookback * 2, int((config or {}).get("lookback", self.feature_lookback * 2)))
-        super().__init__(symbols=symbols, lookback=lookback, config=config, risk_config=risk_config)
+        super().__init__(symbols=symbols, lookback=lookback, config=config, risk_config=risk_config, ml_service=ml_service)
         self.threshold = float((config or {}).get("probability_threshold", 0.6))
         self.cover_threshold = float((config or {}).get("cover_threshold", 0.48))
         self._last_probabilities: Dict[str, float] = {}
@@ -34,22 +38,26 @@ class MLShortWorker(BaseWorker):
         self.update_history(snapshot)
         signals: Dict[str, str] = {}
         for symbol in self.symbols:
-            feature_vector = self._pipeline.latest_feature(symbol)
-            if feature_vector is None:
+            feature_payload = self._ml_service.latest_features(symbol)
+            if feature_payload is None:
                 self.update_signal_state(symbol, None, {"status": "awaiting-features"})
                 continue
-            self._pipeline.train(symbol)
-            probability = self._pipeline.predict(symbol, feature_vector.features)
+            decision, probability = self._ml_service.predict(
+                symbol,
+                feature_payload,
+                worker=self.name,
+                threshold=self.threshold,
+            )
             self._last_probabilities[symbol] = probability
             signal: Optional[str] = None
-            if probability >= self.threshold and self.is_ready(symbol):
+            if decision and probability >= self.threshold and self.is_ready(symbol):
                 signal = "sell"
             elif probability <= self.cover_threshold:
                 signal = "buy"
             indicator_state = {
                 "probability": probability,
-                "label": feature_vector.label,
-                "features": dict(zip(self._pipeline.feature_keys, feature_vector.features)),
+                "features": feature_payload,
+                "ml_decision": decision,
             }
             self.update_signal_state(symbol, signal, indicator_state)
             if signal:
@@ -69,13 +77,18 @@ class MLShortWorker(BaseWorker):
             return None
 
         probability = self._last_probabilities.get(symbol, 0.5)
+        features = self._ml_service.latest_features(symbol)
         if existing_position is None:
             if signal != "sell" or not self.is_ready(symbol):
                 return None
             cash = equity_per_trade * (self.position_size_pct / 100)
             if cash <= 0:
                 return None
-            confidence = min(1.0, max(0.0, probability - 0.5))
+            allowed, ml_confidence = self.ml_confirmation(symbol, features=features, threshold=self.threshold)
+            if not allowed:
+                self.update_signal_state(symbol, "ml-block", {"ml_confidence": ml_confidence})
+                return None
+            confidence = ml_confidence or min(1.0, max(0.0, probability - 0.5))
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
