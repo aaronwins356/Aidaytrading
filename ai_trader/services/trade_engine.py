@@ -68,9 +68,10 @@ class TradeEngine:
                 await asyncio.sleep(1.0)
                 continue
 
-            equity = await self._broker.compute_equity(snapshot.prices)
+            equity, balances = await self._broker.compute_equity(snapshot.prices)
             self._equity_engine.update(equity)
             equity_metrics = self._equity_engine.get_latest_metrics()
+            self._trade_log.record_account_snapshot(balances, equity)
             equity_per_trade = equity * (self._equity_allocation_percent / 100)
             await self._run_researchers(snapshot, equity_metrics)
             self._update_control_flags()
