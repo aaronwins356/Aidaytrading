@@ -63,6 +63,10 @@ class WorkerLoader:
             target = researchers if force_researcher or getattr(worker, "is_researcher", False) else workers
             target.append(worker)
             self._logger.info("Worker %s loaded (%s)", worker.name, dotted_path)
+        if not researchers:
+            self._logger.warning(
+                "No MarketResearchWorker instances were loaded; ML feature engineering will remain offline."
+            )
         return workers, researchers
 
     def _iter_definitions(self) -> Iterator[Tuple[str, Dict[str, Any], bool]]:
