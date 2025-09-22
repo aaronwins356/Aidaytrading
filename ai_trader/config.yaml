@@ -49,8 +49,8 @@ ml:
   lr: 0.03
   regularization: 0.0005
   threshold: 0.7
-  ensemble_enabled: true
-  ensemble_trees: 15
+  ensemble: true
+  forest_size: 15
   random_state: 7
 
 workers:
