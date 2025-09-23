@@ -119,6 +119,27 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     trading_cfg.setdefault("equity_allocation_percent", 2.0)
     trading_cfg.setdefault("paper_starting_equity", 25000.0)
     trading_cfg.setdefault("max_open_positions", 3)
+    raw_symbols = trading_cfg.get("symbols", [])
+    normalised_symbols: list[str] = []
+    seen_symbols: set[str] = set()
+    if isinstance(raw_symbols, (list, tuple, set)):
+        for candidate in raw_symbols:
+            if candidate is None:
+                continue
+            text = str(candidate).strip().upper()
+            if not text or "/" not in text:
+                logger.warning("Ignoring malformed trading symbol: %s", candidate)
+                continue
+            base, quote = text.split("/", 1)
+            if base == "XBT":
+                base = "BTC"
+            symbol = f"{base}/{quote}"
+            if symbol not in seen_symbols:
+                normalised_symbols.append(symbol)
+                seen_symbols.add(symbol)
+    elif raw_symbols:
+        logger.warning("Trading symbols must be a sequence; received %s", type(raw_symbols).__name__)
+    trading_cfg["symbols"] = normalised_symbols
     trading_cfg["paper_trading"] = bool(trading_cfg.get("paper_trading", True))
     trading_cfg["equity_allocation_percent"] = float(
         trading_cfg.get("equity_allocation_percent", 2.0)
