@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import types
+from typing import Any, Callable
 
+from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.services.equity import EquityEngine
 from ai_trader.services.risk import RiskManager
 from ai_trader.services.trade_engine import TradeEngine
@@ -20,6 +23,7 @@ class _DummyBroker:
 
     def __post_init__(self) -> None:
         self.orders: list[tuple[str, str, float]] = []
+        self.reduce_only: list[bool | None] = []
 
     async def load_markets(self) -> None:  # pragma: no cover - trivial
         return None
@@ -27,10 +31,18 @@ class _DummyBroker:
     async def compute_equity(self, prices: dict[str, float]) -> tuple[float, dict[str, float]]:
         return self.starting_equity, {"USD": self.starting_equity}
 
-    async def place_order(self, symbol: str, side: str, cash: float) -> tuple[float, float]:
+    async def place_order(
+        self,
+        symbol: str,
+        side: str,
+        cash: float,
+        *,
+        reduce_only: bool | None = None,
+    ) -> tuple[float, float]:
         price = 100.0
         quantity = cash / price
         self.orders.append((symbol, side, cash))
+        self.reduce_only.append(reduce_only)
         return price, quantity
 
     async def close_position(self, symbol: str, side: str, amount: float) -> tuple[float, float]:
@@ -102,6 +114,71 @@ class _TestWorker(BaseWorker):
         return None
 
 
+class _ShortWorker(BaseWorker):
+    name = "ShortWorker"
+
+    def __init__(self, symbol: str, trade_log: TradeLog) -> None:
+        super().__init__([symbol], lookback=3, trade_log=trade_log)
+        self._has_opened = False
+
+    async def evaluate_signal(self, snapshot: MarketSnapshot) -> dict[str, str]:
+        self.update_history(snapshot)
+        return {self.symbols[0]: "sell"}
+
+    async def generate_trade(
+        self,
+        symbol: str,
+        signal: str | None,
+        snapshot: MarketSnapshot,
+        equity_per_trade: float,
+        existing_position: OpenPosition | None = None,
+    ) -> TradeIntent | None:
+        price = snapshot.prices[symbol]
+        if not self._has_opened and existing_position is None and signal == "sell":
+            self._has_opened = True
+            return TradeIntent(
+                worker=self.name,
+                action="OPEN",
+                symbol=symbol,
+                side="sell",
+                cash_spent=equity_per_trade,
+                entry_price=price,
+                confidence=0.5,
+            )
+        return None
+
+
+class _StubExchange:
+    """Minimal ccxt-like stub capturing reduce_only usage."""
+
+    def __init__(self) -> None:
+        self.order_calls: list[dict[str, Any]] = []
+
+    def fetch_ticker(self, symbol: str) -> dict[str, Any]:  # pragma: no cover - trivial
+        return {"last": 100.0}
+
+    def create_order(
+        self,
+        symbol: str,
+        order_type: str,
+        side: str,
+        amount: float,
+        price: Any,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.order_calls.append(
+            {
+                "symbol": symbol,
+                "type": order_type,
+                "side": side,
+                "amount": amount,
+                "price": price,
+                "params": params,
+            }
+        )
+        return {"amount": amount, "average": 100.0}
+
+
 async def _run_trade_engine(tmp_path) -> None:
     """The trade engine should execute a simple open/close cycle in paper mode."""
 
@@ -137,3 +214,75 @@ async def _run_trade_engine(tmp_path) -> None:
 
 def test_trade_engine_paper_mode(tmp_path) -> None:
     asyncio.run(_run_trade_engine(tmp_path))
+
+
+async def _run_short_trade_engine(tmp_path) -> None:
+    """Ensure short entries do not mark reduce_only on brokers allowing shorts."""
+
+    db_path = tmp_path / "engine_short.db"
+    trade_log = TradeLog(db_path)
+    broker = _DummyBroker()
+    websocket_manager = _DummyWebsocketManager("ETH/USD")
+    equity_engine = EquityEngine(trade_log, broker.starting_equity)
+    risk_manager = RiskManager({"max_drawdown_percent": 50, "daily_loss_limit_percent": 50, "max_position_duration_minutes": 5})
+    worker = _ShortWorker("ETH/USD", trade_log)
+
+    engine = TradeEngine(
+        broker=broker,
+        websocket_manager=websocket_manager,
+        workers=[worker],
+        researchers=[],
+        equity_engine=equity_engine,
+        risk_manager=risk_manager,
+        trade_log=trade_log,
+        equity_allocation_percent=10.0,
+        max_open_positions=1,
+        refresh_interval=0.01,
+        paper_trading=True,
+    )
+
+    run_task = asyncio.create_task(engine.start())
+    await asyncio.sleep(0.1)
+    await engine.stop()
+    await run_task
+
+    assert broker.orders, "Short broker should record the open order"
+    assert broker.reduce_only[-1] is False
+
+
+def test_trade_engine_short_sell_without_reduce_only(tmp_path) -> None:
+    asyncio.run(_run_short_trade_engine(tmp_path))
+
+
+async def _place_short_order_with_client() -> dict[str, Any]:
+    """Invoke the Kraken client and capture the raw ccxt payload."""
+
+    client = KrakenClient(
+        api_key="",
+        api_secret="",
+        base_currency="USD",
+        rest_rate_limit=0.0,
+        paper_trading=False,
+        allow_shorting=True,
+    )
+    exchange = _StubExchange()
+    client._exchange = exchange  # type: ignore[attr-defined]
+
+    async def _fake_with_retries(
+        self: KrakenClient,
+        func: Callable[..., Any],
+        *args: Any,
+        description: str,
+        **kwargs: Any,
+    ) -> Any:
+        return func(*args, **kwargs)
+
+    client._with_retries = types.MethodType(_fake_with_retries, client)
+
+    await client.place_order("ETH/USD", "sell", 100.0, reduce_only=False)
+    return exchange.order_calls[-1]
+
+
+def test_kraken_client_sell_order_omits_reduce_only_when_shorting_allowed() -> None:
+    order_payload = asyncio.run(_place_short_order_with_client())
+    assert order_payload["params"] == {}

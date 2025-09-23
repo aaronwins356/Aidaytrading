@@ -234,8 +234,12 @@ class TradeEngine:
             mode,
         )
         try:
+            reduce_only = False if intent.side == "sell" else None
             price, quantity = await self._broker.place_order(
-                intent.symbol, intent.side, intent.cash_spent
+                intent.symbol,
+                intent.side,
+                intent.cash_spent,
+                reduce_only=reduce_only,
             )
         except Exception as exc:  # noqa: BLE001 - broker errors should not crash engine
             self._logger.warning(
