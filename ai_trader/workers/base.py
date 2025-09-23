@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from ai_trader.services.ml import MLService
+    from ai_trader.services.trade_log import TradeLog
 
 from ai_trader.services.logging import get_logger
 from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
@@ -29,6 +30,7 @@ class BaseWorker(ABC):
         config: Optional[Dict[str, Any]] = None,
         risk_config: Optional[Dict[str, Any]] = None,
         ml_service: "MLService" | None = None,
+        trade_log: "TradeLog" | None = None,
     ) -> None:
         self.symbols: List[str] = list(symbols)
         self.lookback = lookback
@@ -47,6 +49,7 @@ class BaseWorker(ABC):
         self._latest_signals: Dict[str, Optional[str]] = {symbol: None for symbol in self.symbols}
         self._state: Dict[str, Dict[str, Any]] = {}
         self._ml_service = ml_service
+        self._trade_log = trade_log
         self._ml_gate_enabled: bool = True
         self._logger = get_logger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._ml_threshold_override: Optional[float] = None
@@ -63,6 +66,7 @@ class BaseWorker(ABC):
                 )
                 self._ml_threshold_override = None
         self._warmup_notified: Dict[str, bool] = {symbol: False for symbol in self.symbols}
+        self._ml_warmup_state: Dict[str, bool] = {symbol: True for symbol in self.symbols}
 
     def update_history(self, snapshot: MarketSnapshot) -> None:
         for symbol, price in snapshot.prices.items():
@@ -110,6 +114,8 @@ class BaseWorker(ABC):
         snapshot = dict(self._state.get(symbol, {}))
         snapshot.setdefault("status", "ready" if self.is_ready(symbol) else "warmup")
         snapshot.setdefault("last_signal", self._latest_signals.get(symbol))
+        if self._ml_service is not None:
+            snapshot.setdefault("ml_warming_up", self._ml_warmup_state.get(symbol, True))
         return snapshot
 
     def get_all_state_snapshots(self) -> Dict[str, Dict[str, Any]]:
@@ -178,12 +184,14 @@ class BaseWorker(ABC):
             return True, 0.0
         feature_payload = features or self._ml_service.latest_features(symbol)
         if feature_payload is None:
-            self._logger.warning(
-                "ML confirmation skipped for %s on %s – no features available yet",
+            self._ml_warmup_state[symbol] = True
+            self._logger.info(
+                "ML gating warming up for %s on %s – awaiting feature pipeline",
                 self.name,
                 symbol,
             )
             return False, 0.0
+        self._ml_warmup_state[symbol] = False
         gate = (
             threshold
             if threshold is not None
@@ -199,5 +207,23 @@ class BaseWorker(ABC):
                 symbol,
                 confidence,
                 gate,
-            )
+        )
         return decision, confidence
+
+    # ------------------------------------------------------------------
+    # Trade log helper
+    # ------------------------------------------------------------------
+    def record_trade_event(self, event: str, symbol: str, details: Optional[Dict[str, object]] = None) -> None:
+        """Persist worker-specific events when a trade log is available."""
+
+        if self._trade_log is None:
+            return
+        try:
+            self._trade_log.record_trade_event(
+                worker=self.name,
+                symbol=symbol,
+                event=event,
+                details=details or {},
+            )
+        except Exception as exc:  # noqa: BLE001 - keep workers resilient
+            self._logger.debug("Failed to record trade event %s for %s: %s", event, symbol, exc)

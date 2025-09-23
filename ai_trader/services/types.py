@@ -25,6 +25,8 @@ class TradeIntent:
     pnl_usd: Optional[float] = None
     win_loss: Optional[str] = None
     confidence: float = 0.0
+    reason: Optional[str] = None
+    metadata: Optional[Dict[str, object]] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
 
 

@@ -27,7 +27,7 @@ class MarketResearchWorker(BaseWorker):
         config: Optional[Dict] = None,
     ) -> None:
         lookback = max(200, int((config or {}).get("lookback", 200)))
-        super().__init__(symbols=symbols, lookback=lookback, config=config)
+        super().__init__(symbols=symbols, lookback=lookback, config=config, trade_log=trade_log)
         self._trade_log = trade_log
         self._ml_service = ml_service
         cfg = config or {}

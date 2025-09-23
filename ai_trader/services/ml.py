@@ -110,6 +110,7 @@ class MLService:
         ensemble: bool = True,
         forest_size: int = 15,
         random_state: int = 7,
+        warmup_target: int = 200,
     ) -> None:
         self._db_path = db_path
         self._feature_keys = list(feature_keys)
@@ -127,6 +128,7 @@ class MLService:
         self._models: Dict[str, _ModelBundle] = {}
         self._latest_features: Dict[str, Dict[str, float]] = {}
         self._latest_confidence: Dict[Tuple[str, str], float] = {}
+        self._warmup_target = max(1, int(warmup_target))
         if self._ensemble_requested and not self._use_ensemble:
             self._logger.warning(
                 "ML ensemble requested but river.forest.ARFClassifier is unavailable. Falling back to logistic regression only."
@@ -435,7 +437,11 @@ class MLService:
     def feature_importance(self, symbol: str, top_n: int = 10) -> Dict[str, float]:
         """Return the top-N absolute weighted features for the symbol."""
 
-        model = self._load_model(symbol)
+        try:
+            model = self._load_model(symbol)
+        except Exception as exc:  # noqa: BLE001 - defensive guard for dashboards
+            self._logger.debug("feature_importance load failed for %s: %s", symbol, exc)
+            return {}
         weights = model.feature_importances()
         if not weights:
             return {}
@@ -460,6 +466,25 @@ class MLService:
         for row in rows:
             history.append((datetime.fromisoformat(row["timestamp"]), float(row["confidence"]), row["worker"]))
         return list(reversed(history))
+
+    def feature_count(self, symbol: str) -> int:
+        """Return the number of stored feature snapshots for a symbol."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(1) FROM market_features WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+        if row is None:
+            return 0
+        return int(row[0] or 0)
+
+    def warmup_progress(self, symbol: str) -> float:
+        """Return a [0,1] warmup ratio based on stored feature history."""
+
+        count = self.feature_count(symbol)
+        progress = min(1.0, count / self._warmup_target)
+        return float(progress)
 
     def run_backtest(
         self,

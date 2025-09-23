@@ -257,6 +257,8 @@ class TradeEngine:
             cash_spent=cost,
         )
         self._open_positions[key] = position
+        metadata = dict(intent.metadata or {})
+        metadata.update({"fill_price": price, "fill_quantity": quantity, "mode": mode})
         recorded_intent = TradeIntent(
             worker=intent.worker,
             action="OPEN",
@@ -265,8 +267,21 @@ class TradeEngine:
             cash_spent=cost,
             entry_price=price,
             confidence=intent.confidence,
+            reason=intent.reason or "entry",
+            metadata=metadata,
         )
         self._trade_log.record_trade(recorded_intent)
+        self._trade_log.record_trade_event(
+            worker=intent.worker,
+            symbol=intent.symbol,
+            event="execution_open",
+            details={
+                "price": price,
+                "quantity": quantity,
+                "confidence": intent.confidence,
+                "mode": mode,
+            },
+        )
         self._logger.info(
             "[TRADE] %s opened %s %s @ %.2f qty=%.6f cash=%.2f",
             intent.worker,
@@ -300,8 +315,22 @@ class TradeEngine:
             )
             self._logger.debug("Close intent payload: %s", intent, exc_info=True)
             return
-        pnl = (price - position.entry_price) * position.quantity if position.side == "buy" else (position.entry_price - price) * position.quantity
+        pnl = (
+            (price - position.entry_price) * position.quantity
+            if position.side == "buy"
+            else (position.entry_price - price) * position.quantity
+        )
         pnl_percent = pnl / position.cash_spent * 100 if position.cash_spent else 0.0
+        reason = intent.reason or "exit"
+        metadata = dict(intent.metadata or {})
+        metadata.update({
+            "fill_price": price,
+            "fill_quantity": quantity,
+            "mode": mode,
+            "pnl_usd": pnl,
+            "pnl_percent": pnl_percent,
+            "reason": reason,
+        })
         recorded_intent = TradeIntent(
             worker=intent.worker,
             action="CLOSE",
@@ -313,18 +342,34 @@ class TradeEngine:
             pnl_percent=pnl_percent,
             pnl_usd=pnl,
             win_loss="win" if pnl > 0 else "loss",
+            reason=reason,
+            metadata=metadata,
         )
         self._trade_log.record_trade(recorded_intent)
+        self._trade_log.record_trade_event(
+            worker=intent.worker,
+            symbol=intent.symbol,
+            event="execution_close",
+            details=metadata,
+        )
         self._open_positions.pop(key, None)
         self._logger.info(
-            "[TRADE] %s closed %s %s @ %.2f | PnL %.2f USD (%.2f%%)",
+            "[TRADE] %s closed %s %s @ %.2f | PnL %.2f USD (%.2f%%) reason=%s",
             intent.worker,
             intent.side.upper(),
             intent.symbol,
             price,
             pnl,
             pnl_percent,
+            reason,
         )
+        if reason in {"stop", "target", "trail", "mean-hit", "prob-revert", "prob-floor"}:
+            self._logger.info(
+                "[TRADE] Risk exit triggered for %s on %s (%s)",
+                intent.worker,
+                intent.symbol,
+                reason,
+            )
 
     async def _enforce_position_duration(self, snapshot: MarketSnapshot) -> None:
         now = datetime.utcnow()
@@ -347,6 +392,8 @@ class TradeEngine:
                     pnl_percent=pnl_percent,
                     pnl_usd=pnl,
                     win_loss="win" if pnl > 0 else "loss",
+                    reason="duration",
+                    metadata={"duration_minutes": self._risk_manager.max_duration_minutes},
                 )
                 await self._close_trade(intent, key, position)
 

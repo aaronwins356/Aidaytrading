@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from ai_trader.services.ml import MLService
+    from ai_trader.services.trade_log import TradeLog
 
 from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
 from ai_trader.workers.base import BaseWorker
@@ -26,8 +27,14 @@ class MeanReversionWorker(BaseWorker):
         window: int = 20,
         threshold: float = 0.01,
         ml_service: "MLService" | None = None,
+        trade_log: "TradeLog" | None = None,
     ) -> None:
-        super().__init__(symbols=symbols, lookback=window * 3, ml_service=ml_service)
+        super().__init__(
+            symbols=symbols,
+            lookback=window * 3,
+            ml_service=ml_service,
+            trade_log=trade_log,
+        )
         self.window = window
         self.threshold = threshold
 
@@ -76,6 +83,7 @@ class MeanReversionWorker(BaseWorker):
                 cash_spent=equity_per_trade,
                 entry_price=price,
                 confidence=confidence,
+                metadata={"signal": signal, "price": price},
             )
 
         if signal == "flat" and existing_position is not None:
@@ -85,6 +93,11 @@ class MeanReversionWorker(BaseWorker):
                 else (existing_position.entry_price - price)
             ) * existing_position.quantity
             pnl_percent = pnl / existing_position.cash_spent * 100 if existing_position.cash_spent else 0.0
+            self.record_trade_event(
+                "close_mean_revert",
+                symbol,
+                {"pnl": pnl, "pnl_percent": pnl_percent, "side": existing_position.side},
+            )
             return TradeIntent(
                 worker=self.name,
                 action="CLOSE",
@@ -96,5 +109,7 @@ class MeanReversionWorker(BaseWorker):
                 pnl_percent=pnl_percent,
                 pnl_usd=pnl,
                 win_loss="win" if pnl > 0 else "loss",
+                reason="mean-revert",
+                metadata={"signal": signal, "pnl": pnl, "pnl_percent": pnl_percent},
             )
         return None

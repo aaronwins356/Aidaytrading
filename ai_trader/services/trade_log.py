@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List
+from typing import Dict, Iterable, Iterator, List, Optional
 
 from ai_trader.services.types import TradeIntent
 
@@ -35,7 +35,9 @@ class TradeLog:
                     exit_price REAL,
                     pnl_percent REAL,
                     pnl_usd REAL,
-                    win_loss TEXT
+                    win_loss TEXT,
+                    reason TEXT,
+                    metadata_json TEXT
                 )
                 """
             )
@@ -100,7 +102,20 @@ class TradeLog:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    worker TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    details_json TEXT NOT NULL
+                )
+                """
+            )
             self._ensure_market_feature_columns(conn)
+            self._ensure_trade_columns(conn)
             conn.commit()
 
     @contextmanager
@@ -120,8 +135,9 @@ class TradeLog:
                 """
                 INSERT INTO trades (
                     timestamp, worker, symbol, side, cash_spent,
-                    entry_price, exit_price, pnl_percent, pnl_usd, win_loss
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entry_price, exit_price, pnl_percent, pnl_usd, win_loss,
+                    reason, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade.created_at.isoformat(),
@@ -134,6 +150,8 @@ class TradeLog:
                     trade.pnl_percent,
                     trade.pnl_usd,
                     trade.win_loss,
+                    trade.reason,
+                    json.dumps(trade.metadata or {}),
                 ),
             )
             conn.commit()
@@ -151,7 +169,12 @@ class TradeLog:
     def fetch_trades(self) -> Iterable[tuple]:
         with self._connect() as conn:
             cursor = conn.execute(
-                "SELECT timestamp, worker, symbol, side, cash_spent, entry_price, exit_price, pnl_percent, pnl_usd, win_loss FROM trades ORDER BY timestamp DESC"
+                """
+                SELECT timestamp, worker, symbol, side, cash_spent, entry_price, exit_price,
+                       pnl_percent, pnl_usd, win_loss, reason, metadata_json
+                FROM trades
+                ORDER BY timestamp DESC
+                """
             )
             return cursor.fetchall()
 
@@ -276,10 +299,22 @@ class TradeLog:
             if column not in existing:
                 conn.execute(f"ALTER TABLE market_features ADD COLUMN {column} REAL")
 
+    def _ensure_trade_columns(self, conn: sqlite3.Connection) -> None:
+        """Ensure optional trade auditing columns exist for legacy installs."""
+
+        cursor = conn.execute("PRAGMA table_info(trades)")
+        existing = {row[1] for row in cursor.fetchall()}
+        if "reason" not in existing:
+            conn.execute("ALTER TABLE trades ADD COLUMN reason TEXT")
+        if "metadata_json" not in existing:
+            conn.execute("ALTER TABLE trades ADD COLUMN metadata_json TEXT")
+
     def record_bot_state(self, worker: str, symbol: str, state: Dict[str, object]) -> None:
         """Store a bot's runtime state for dashboard consumption."""
 
         indicators = state.get("indicators", {})
+        if state.get("ml_warming_up") is not None:
+            indicators = {**indicators, "ml_warming_up": state.get("ml_warming_up")}
         risk_profile = {
             key: state.get(key)
             for key in ("position_size_pct", "leverage", "stop_loss_pct", "take_profit_pct", "trailing_stop_pct")
@@ -334,3 +369,37 @@ class TradeLog:
         with self._connect() as conn:
             cursor = conn.execute("SELECT key, value FROM control_flags")
             return {row["key"]: row["value"] for row in cursor.fetchall()}
+
+    def record_trade_event(
+        self,
+        *,
+        worker: str,
+        symbol: str,
+        event: str,
+        details: Optional[Dict[str, object]] = None,
+    ) -> None:
+        """Record supplemental trade lifecycle events for auditing."""
+
+        payload = json.dumps(details or {})
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO trade_events (timestamp, worker, symbol, event, details_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (datetime.utcnow().isoformat(), worker, symbol, event, payload),
+            )
+            conn.commit()
+
+    def fetch_trade_events(self, limit: int = 200) -> Iterable[sqlite3.Row]:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT timestamp, worker, symbol, event, details_json
+                FROM trade_events
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+            return cursor.fetchall()
