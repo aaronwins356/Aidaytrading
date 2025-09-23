@@ -138,6 +138,7 @@ def init_ml_service(config: Dict) -> MLService:
         ensemble=bool(ml_cfg.get("ensemble", True)),
         forest_size=int(ml_cfg.get("forest_size", 10)),
         random_state=int(ml_cfg.get("random_state", 7)),
+        warmup_samples=int(ml_cfg.get("warmup_samples", 25)),
     )
 
 

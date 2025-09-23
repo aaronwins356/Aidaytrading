@@ -52,6 +52,7 @@ ml:
   ensemble: true
   forest_size: 10
   random_state: 7
+  warmup_samples: 25
 
 workers:
   refresh_interval_seconds: 15

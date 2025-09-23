@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from statistics import fmean, pstdev
-from typing import Dict, Iterable, List, Optional
+from typing import Deque, Dict, Iterable, List, Optional
 
 from ai_trader.services.ml import MLService
 from ai_trader.services.trade_log import TradeLog
@@ -39,7 +40,10 @@ class MarketResearchWorker(BaseWorker):
         self.atr_window = max(5, int(cfg.get("atr_window", 14)))
         self._snapshot_counter = 0
         self._forest_warning_emitted = False
-        self._pending_features: Dict[str, Dict[str, float]] = {}
+        self._feature_flow_warnings: Dict[str, bool] = {}
+        self._pending_features: Dict[str, Deque[Dict[str, object]]] = {
+            symbol: deque() for symbol in self.symbols
+        }
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
         # Researcher does not emit trade signals but we keep interface parity.
@@ -63,20 +67,31 @@ class MarketResearchWorker(BaseWorker):
             candles = snapshot.candles.get(symbol, [])
             required_candles = max(self.warmup_candles, 2)
             if len(candles) < required_candles:
-                self._logger.debug(
-                    "Skipping feature snapshot for %s – need %d candles, have %d",
-                    symbol,
-                    required_candles,
-                    len(candles),
-                )
+                if not self._feature_flow_warnings.get(symbol):
+                    self._logger.warning(
+                        "Waiting for %d candles to warm up %s – ML confidence stream paused",
+                        required_candles,
+                        symbol,
+                    )
+                    self._feature_flow_warnings[symbol] = True
+                else:
+                    self._logger.debug(
+                        "Skipping feature snapshot for %s – need %d candles, have %d",
+                        symbol,
+                        required_candles,
+                        len(candles),
+                    )
                 continue
+            # Reset warning once the warm-up completes for this symbol.
+            self._feature_flow_warnings.pop(symbol, None)
             features = self._build_features(candles)
             ohlcv = dict(candles[-1]) if candles else self._build_ohlcv([])
             label = self._derive_label(candles)
 
             if label is not None:
-                pending = self._pending_features.get(symbol)
-                if pending:
+                pending_queue = self._pending_features.setdefault(symbol, deque())
+                if pending_queue:
+                    pending_payload = pending_queue.popleft()
                     try:
                         self._trade_log.backfill_market_feature_label(
                             symbol, self.timeframe, float(label)
@@ -88,9 +103,9 @@ class MarketResearchWorker(BaseWorker):
                     try:
                         self._ml_service.update(
                             symbol,
-                            pending,
+                            pending_payload.get("features", {}),
                             label=label,
-                            timestamp=snapshot.timestamp,
+                            timestamp=pending_payload.get("timestamp") or snapshot.timestamp,
                         )
                     except Exception as exc:  # noqa: BLE001
                         self._logger.exception(
@@ -127,7 +142,11 @@ class MarketResearchWorker(BaseWorker):
                     symbol,
                 )
                 self._forest_warning_emitted = True
-            self._pending_features[symbol] = features
+            pending_queue = self._pending_features.setdefault(symbol, deque())
+            pending_queue.append({
+                "features": dict(features),
+                "timestamp": snapshot.timestamp,
+            })
             confidence = 0.0
             try:
                 confidence = self._ml_service.update(
@@ -145,13 +164,22 @@ class MarketResearchWorker(BaseWorker):
                 )
                 continue
             self._logger.info(
-                "Snapshot saved for %s | label=%.0f features=%d confidence=%.4f",
+                "Snapshot saved for %s | label=%.0f features=%d confidence=%.4f threshold=%.2f",
                 symbol,
                 float(label) if label is not None else -1.0,
                 len(features),
                 confidence,
             )
-            state_payload = {"features": features, "label": label, "ml_confidence": confidence}
+            warmup_seen, warmup_target = self._ml_service.warmup_progress(symbol)
+            state_payload = {
+                "features": features,
+                "label": label,
+                "ml_confidence": confidence,
+                "ml_threshold": self._ml_service.default_threshold,
+                "ml_warmup_samples": warmup_seen,
+                "ml_warmup_target": warmup_target,
+                "ml_ready": self._ml_service.is_warmed_up(symbol),
+            }
             state_payload.update({f"ohlcv_{key}": value for key, value in ohlcv.items()})
             self.update_signal_state(symbol, None, state_payload)
 
