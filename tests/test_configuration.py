@@ -23,3 +23,15 @@ def test_normalize_config_maps_deprecated_keys(caplog) -> None:
     assert ml_cfg["threshold"] == 0.25
     assert "learning_rate" in caplog.text
     assert "ensemble_trees" in caplog.text
+
+
+def test_normalize_config_sanitises_symbols() -> None:
+    """Trading symbols should be upper-cased, de-duplicated, and XBT normalised."""
+
+    config = {
+        "trading": {"symbols": ["btc/usd", "SOL/USD", "xbt/usd", "ETH/USD", "eth/usd"]}
+    }
+
+    normalised = normalize_config(config)
+
+    assert normalised["trading"]["symbols"] == ["BTC/USD", "SOL/USD", "ETH/USD"]

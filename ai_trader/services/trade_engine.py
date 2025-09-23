@@ -180,6 +180,11 @@ class TradeEngine:
 
     async def start(self) -> None:
         await self._broker.load_markets()
+        for symbol in self._active_symbols():
+            try:
+                await self._broker.ensure_market(symbol)
+            except Exception as exc:  # noqa: BLE001 - defensive logging
+                self._logger.warning("Failed to verify market metadata for %s: %s", symbol, exc)
         await self._websocket_manager.start()
         self._logger.info(
             "Trade engine started with %d workers and %d researcher(s)",
@@ -280,6 +285,23 @@ class TradeEngine:
         self._signal_only_mode = True
         self._signal_only_reason = reason
         self._logger.warning("Signal-only mode enabled: %s", reason)
+
+    def _active_symbols(self) -> list[str]:
+        """Return the union of symbols known to the engine and websocket feed."""
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for symbol in getattr(self._websocket_manager, "symbols", []):
+            if symbol not in seen:
+                seen.add(symbol)
+                ordered.append(symbol)
+        for collection in (self._workers, self._researchers):
+            for worker in collection:
+                for symbol in getattr(worker, "symbols", []):
+                    if symbol not in seen:
+                        seen.add(symbol)
+                        ordered.append(symbol)
+        return ordered
 
     async def _run_researchers(
         self,

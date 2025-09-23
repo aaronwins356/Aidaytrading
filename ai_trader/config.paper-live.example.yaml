@@ -12,6 +12,8 @@ trading:
   base_currency: "USD"
   symbols:
     - "BTC/USD"
+    - "ETH/USD"
+    - "SOL/USD"
   equity_allocation_percent: 2.0
   max_open_positions: 2
   paper_trading: true
@@ -40,6 +42,8 @@ workers:
       enabled: true
       symbols:
         - "BTC/USD"
+        - "ETH/USD"
+        - "SOL/USD"
       parameters:
         feature_lookback: 30
         probability_threshold: 0.3
@@ -56,6 +60,8 @@ researcher:
   enabled: true
   symbols:
     - "BTC/USD"
+    - "ETH/USD"
+    - "SOL/USD"
   parameters:
     warmup_candles: 2
     feature_windows:

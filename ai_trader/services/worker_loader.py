@@ -19,7 +19,7 @@ class WorkerLoader:
         researcher_config: Any | None = None,
     ) -> None:
         self._worker_config: Dict[str, Any] = worker_config or {}
-        self._symbols = list(symbols)
+        self._symbols = self._normalize_symbols(symbols)
         self._logger = get_logger(__name__)
         self._forced_researchers: Set[str] = self._normalize_researchers(researcher_config)
         self._auto_researcher_key: str | None = None
@@ -46,7 +46,11 @@ class WorkerLoader:
                 module = importlib.import_module(module_name)
                 worker_cls = getattr(module, class_name)
                 kwargs: Dict[str, Any] = {}
-                symbols = definition.get("symbols", self._symbols)
+                symbols = self._normalize_symbols(
+                    definition.get("symbols", self._symbols)
+                )
+                if not symbols:
+                    symbols = list(self._symbols)
                 params = definition.get("parameters", {})
                 risk_cfg = definition.get("risk", {})
                 signature = inspect.signature(worker_cls)
@@ -174,6 +178,35 @@ class WorkerLoader:
                 forced.add(worker_name)
 
         return forced
+
+    def _normalize_symbols(self, symbols: Iterable[str] | str | None) -> List[str]:
+        """Return a de-duplicated, upper-cased list of market symbols."""
+
+        if symbols is None:
+            return []
+        if isinstance(symbols, str):
+            candidates: Iterable[str] = [symbols]
+        else:
+            candidates = symbols
+        normalised: List[str] = []
+        seen: Set[str] = set()
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            text = str(candidate).strip().upper()
+            if not text or "/" not in text:
+                self._logger.warning(
+                    "Ignoring malformed worker symbol '%s'", candidate
+                )
+                continue
+            base, quote = text.split("/", 1)
+            if base == "XBT":
+                base = "BTC"
+            symbol = f"{base}/{quote}"
+            if symbol not in seen:
+                seen.add(symbol)
+                normalised.append(symbol)
+        return normalised
 
     @staticmethod
     def _coerce_researchers(

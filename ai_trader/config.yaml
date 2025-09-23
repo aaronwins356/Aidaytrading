@@ -9,6 +9,7 @@ trading:
   symbols:
     - "BTC/USD"
     - "ETH/USD"
+    - "SOL/USD"
   equity_allocation_percent: 2.0
   max_open_positions: 3
   paper_trading: true
@@ -63,6 +64,7 @@ workers:
       symbols:
         - "BTC/USD"
         - "ETH/USD"
+        - "SOL/USD"
       parameters:
         fast_window: 12
         slow_window: 48
@@ -80,6 +82,7 @@ workers:
       enabled: true
       symbols:
         - "BTC/USD"
+        - "SOL/USD"
       parameters:
         band_window: 20
         band_std_dev: 2.4
@@ -98,6 +101,7 @@ workers:
       symbols:
         - "BTC/USD"
         - "ETH/USD"
+        - "SOL/USD"
       parameters:
         feature_lookback: 30
         probability_threshold: 0.3
@@ -116,6 +120,7 @@ researcher:
   symbols:
     - "BTC/USD"
     - "ETH/USD"
+    - "SOL/USD"
   parameters:
     warmup_candles: 2  # Increase to 20+ candles before going live for steadier signals.
     feature_windows:

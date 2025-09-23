@@ -18,15 +18,25 @@ class KrakenWebsocketManager:
     """Maintain live price snapshots from Kraken's public WebSocket."""
 
     def __init__(self, symbols: List[str], history: int = 120, candle_interval_seconds: int = 60) -> None:
-        self._symbols = symbols
+        normalised: list[str] = []
+        seen: set[str] = set()
+        for candidate in symbols:
+            normalised_symbol = self._normalize_symbol(candidate)
+            if not normalised_symbol or normalised_symbol in seen:
+                continue
+            seen.add(normalised_symbol)
+            normalised.append(normalised_symbol)
+        if not normalised:
+            raise ValueError("At least one valid Kraken symbol must be provided")
+        self._symbols = normalised
         self._history = history
         self._url = "wss://ws.kraken.com/"
         self._latest_prices: Dict[str, float] = {}
         self._price_history: Dict[str, Deque[float]] = {
-            symbol: deque(maxlen=history) for symbol in symbols
+            symbol: deque(maxlen=history) for symbol in self._symbols
         }
         self._ohlcv_history: Dict[str, Deque[dict[str, float]]] = {
-            symbol: deque(maxlen=history) for symbol in symbols
+            symbol: deque(maxlen=history) for symbol in self._symbols
         }
         self._current_bars: Dict[str, dict[str, float]] = {}
         self._bar_interval = timedelta(seconds=max(1, candle_interval_seconds))
@@ -34,6 +44,12 @@ class KrakenWebsocketManager:
         self._logger = get_logger(__name__)
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+
+    @property
+    def symbols(self) -> list[str]:
+        """Return the Kraken symbols currently subscribed to."""
+
+        return list(self._symbols)
 
     async def start(self) -> None:
         if self._task is None:
@@ -80,9 +96,9 @@ class KrakenWebsocketManager:
         payload = data[1]
         if not isinstance(payload, dict):
             return
-        pair = data[-1]
-        if isinstance(pair, str) and pair.startswith("XBT/"):
-            pair = pair.replace("XBT", "BTC")
+        pair = self._normalize_symbol(data[-1])
+        if not pair:
+            return
         price_raw = payload.get("c", [None])[0]
         if price_raw is None:
             return
@@ -157,3 +173,15 @@ class KrakenWebsocketManager:
             bar["high"] = bar["close"]
             bar["low"] = bar["close"]
             bar["volume"] = 0.0
+
+    @staticmethod
+    def _normalize_symbol(symbol: object) -> str | None:
+        if symbol is None:
+            return None
+        text = str(symbol).strip().upper()
+        if not text or "/" not in text:
+            return None
+        base, quote = text.split("/", 1)
+        if base == "XBT":
+            base = "BTC"
+        return f"{base}/{quote}"

@@ -63,6 +63,58 @@ def _merge_dicts(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, A
     return merged
 
 
+def _normalize_symbol(symbol: object) -> str | None:
+    """Return a broker-friendly ``BASE/QUOTE`` pair or ``None`` if invalid."""
+
+    if symbol is None:
+        return None
+    text = str(symbol).strip().upper()
+    if not text or "/" not in text:
+        return None
+    base, quote = text.split("/", 1)
+    if base == "XBT":
+        base = "BTC"
+    return f"{base}/{quote}"
+
+
+def _collect_all_symbols(config: Dict[str, Any]) -> list[str]:
+    """Gather the union of symbols referenced across the configuration."""
+
+    collected: list[str] = []
+    seen: set[str] = set()
+
+    def _ingest(candidate: object) -> None:
+        if candidate is None:
+            return
+        if isinstance(candidate, (list, tuple, set)):
+            for item in candidate:
+                _ingest(item)
+            return
+        if isinstance(candidate, dict):
+            _ingest(candidate.get("symbols"))
+            return
+        normalised = _normalize_symbol(candidate)
+        if normalised and normalised not in seen:
+            seen.add(normalised)
+            collected.append(normalised)
+
+    trading_cfg = config.get("trading", {})
+    _ingest(trading_cfg.get("symbols"))
+
+    worker_cfg = config.get("workers", {})
+    definitions = worker_cfg.get("definitions") if isinstance(worker_cfg, dict) else None
+    if isinstance(definitions, dict):
+        for definition in definitions.values():
+            if isinstance(definition, dict):
+                _ingest(definition.get("symbols"))
+
+    researcher_cfg = config.get("researcher")
+    if isinstance(researcher_cfg, dict):
+        _ingest(researcher_cfg.get("symbols"))
+
+    return collected
+
+
 def _cache_path_for_symbol(symbol: str) -> Path:
     """Return the expected cache path for a trading symbol."""
 
@@ -274,9 +326,15 @@ async def start_bot() -> None:
     logger = get_logger(__name__)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    symbols = _collect_all_symbols(config)
+    if not symbols:
+        logger.error("No trading symbols configured. Add at least one market pair to config.yaml")
+        raise SystemExit(1)
+    config.setdefault("trading", {})["symbols"] = symbols
     trading_cfg = config.get("trading", {})
     risk_cfg = config.get("risk", {})
     worker_cfg = config.get("workers", {})
+    logger.info("Tracking markets: %s", ", ".join(symbols))
 
     trading_mode = str(trading_cfg.get("mode", "paper")).lower()
     live_trading = trading_mode == "live"
