@@ -31,6 +31,7 @@ class TradeEngine:
         equity_allocation_percent: float,
         max_open_positions: int,
         refresh_interval: float,
+        paper_trading: bool,
     ) -> None:
         self._broker = broker
         self._websocket_manager = websocket_manager
@@ -48,6 +49,9 @@ class TradeEngine:
         self._control_flags: Dict[str, str] = {}
         self._kill_switch = False
         self._researcher_failures: DefaultDict[str, int] = defaultdict(int)
+        self._signal_only_mode = False
+        self._signal_only_reason = ""
+        self._paper_trading = paper_trading
 
     async def start(self) -> None:
         await self._broker.load_markets()
@@ -57,6 +61,13 @@ class TradeEngine:
             len(self._workers),
             len(self._researchers),
         )
+        mode = "paper" if self._paper_trading else "live"
+        if self._signal_only_mode:
+            self._logger.warning(
+                "Signal-only mode active (%s). Orders will not reach the broker.",
+                self._signal_only_reason,
+            )
+        self._logger.info("Operating in %s trading mode", mode)
         await self._run()
 
     async def stop(self) -> None:
@@ -136,6 +147,13 @@ class TradeEngine:
             await self._enforce_position_duration(snapshot)
             await asyncio.sleep(self._refresh_interval)
 
+    def enable_signal_only_mode(self, reason: str) -> None:
+        """Prevent order placement while allowing research and logging."""
+
+        self._signal_only_mode = True
+        self._signal_only_reason = reason
+        self._logger.warning("Signal-only mode enabled: %s", reason)
+
     async def _run_researchers(
         self,
         snapshot: MarketSnapshot,
@@ -190,6 +208,14 @@ class TradeEngine:
         existing_position: OpenPosition | None,
     ) -> None:
         if intent.action == "OPEN":
+            if self._signal_only_mode:
+                self._logger.info(
+                    "[TRADE] %s blocked from opening %s in signal-only mode (%s)",
+                    intent.worker,
+                    intent.symbol,
+                    self._signal_only_reason,
+                )
+                return
             await self._open_trade(intent, position_key)
         elif intent.action == "CLOSE" and existing_position is not None:
             await self._close_trade(intent, position_key, existing_position)
@@ -197,6 +223,16 @@ class TradeEngine:
             self._logger.debug("Ignoring trade intent %s", intent)
 
     async def _open_trade(self, intent: TradeIntent, key: Tuple[str, str]) -> None:
+        mode = "paper" if self._paper_trading else "live"
+        self._logger.info(
+            "[TRADE] %s submitting %s order for %s size=$%.2f confidence=%.3f mode=%s",
+            intent.worker,
+            intent.side.upper(),
+            intent.symbol,
+            intent.cash_spent,
+            intent.confidence,
+            mode,
+        )
         try:
             price, quantity = await self._broker.place_order(
                 intent.symbol, intent.side, intent.cash_spent
@@ -231,9 +267,25 @@ class TradeEngine:
             confidence=intent.confidence,
         )
         self._trade_log.record_trade(recorded_intent)
-        self._logger.info("Trade opened: %s %s @ %.2f (qty %.6f)", intent.side.upper(), intent.symbol, price, quantity)
+        self._logger.info(
+            "[TRADE] %s opened %s %s @ %.2f qty=%.6f cash=%.2f",
+            intent.worker,
+            intent.side.upper(),
+            intent.symbol,
+            price,
+            quantity,
+            cost,
+        )
 
     async def _close_trade(self, intent: TradeIntent, key: Tuple[str, str], position: OpenPosition) -> None:
+        mode = "paper" if self._paper_trading else "live"
+        self._logger.info(
+            "[TRADE] %s submitting CLOSE order for %s qty=%.6f mode=%s",
+            intent.worker,
+            intent.symbol,
+            position.quantity,
+            mode,
+        )
         try:
             price, quantity = await self._broker.close_position(
                 intent.symbol, position.side, position.quantity
@@ -265,7 +317,8 @@ class TradeEngine:
         self._trade_log.record_trade(recorded_intent)
         self._open_positions.pop(key, None)
         self._logger.info(
-            "Trade closed: %s %s @ %.2f | PnL %.2f USD (%.2f%%)",
+            "[TRADE] %s closed %s %s @ %.2f | PnL %.2f USD (%.2f%%)",
+            intent.worker,
             intent.side.upper(),
             intent.symbol,
             price,

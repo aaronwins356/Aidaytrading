@@ -48,9 +48,9 @@ ml:
     - close_to_low
   lr: 0.03
   regularization: 0.0005
-  threshold: 0.2
-  ensemble_enabled: true
-  ensemble_trees: 15
+  threshold: 0.25  # Raise towards 0.55–0.65 for stricter production gating.
+  ensemble: true
+  forest_size: 10
   random_state: 7
 
 workers:
@@ -69,10 +69,10 @@ workers:
         warmup_candles: 2
         ml_threshold: 0.35
       risk:
-        leverage: 1.2
-        position_size_pct: 100.0
-        stop_loss_pct: 1.2
-        take_profit_pct: 2.5
+        leverage: 1.0
+        position_size_pct: 35.0
+        stop_loss_pct: 1.0
+        take_profit_pct: 2.0
         trailing_stop_pct: 0.8
     short_mean_reversion:
       module: "ai_trader.workers.short_mean_reversion.ShortMeanReversionWorker"
@@ -86,11 +86,11 @@ workers:
         ml_threshold: 0.32
         reversion_threshold: 0.0035
       risk:
-        leverage: 1.1
-        position_size_pct: 90.0
-        stop_loss_pct: 1.0
-        take_profit_pct: 2.2
-        trailing_stop_pct: 0.7
+        leverage: 1.0
+        position_size_pct: 30.0
+        stop_loss_pct: 0.9
+        take_profit_pct: 1.8
+        trailing_stop_pct: 0.6
     ml_short:
       module: "ai_trader.workers.ml_short.MLShortWorker"
       enabled: true
@@ -103,11 +103,11 @@ workers:
         warmup_candles: 2
         ml_threshold: 0.35
       risk:
-        leverage: 1.2
-        position_size_pct: 100.0
-        stop_loss_pct: 1.1
-        take_profit_pct: 2.4
-        trailing_stop_pct: 0.8
+        leverage: 1.0
+        position_size_pct: 30.0
+        stop_loss_pct: 1.0
+        take_profit_pct: 2.0
+        trailing_stop_pct: 0.7
 
 researcher:
   module: "ai_trader.workers.researcher.MarketResearchWorker"
@@ -116,7 +116,7 @@ researcher:
     - "BTC/USD"
     - "ETH/USD"
   parameters:
-    warmup_candles: 2
+    warmup_candles: 2  # Increase to 20+ candles before going live for steadier signals.
     feature_windows:
       - 5
       - 14

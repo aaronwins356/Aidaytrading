@@ -42,6 +42,10 @@ class KrakenClient:
     def starting_equity(self) -> float:
         return self._starting_equity
 
+    @property
+    def is_paper_trading(self) -> bool:
+        return self._paper_trading
+
     async def load_markets(self) -> None:
         self._markets = await asyncio.to_thread(self._exchange.load_markets)
 

@@ -62,6 +62,7 @@ class BaseWorker(ABC):
                     "Invalid ml_threshold for %s; using service default.", self.name
                 )
                 self._ml_threshold_override = None
+        self._warmup_notified: Dict[str, bool] = {symbol: False for symbol in self.symbols}
 
     def update_history(self, snapshot: MarketSnapshot) -> None:
         for symbol, price in snapshot.prices.items():
@@ -73,7 +74,19 @@ class BaseWorker(ABC):
         """Return True when the worker has enough candles to act."""
 
         history = self.price_history.get(symbol, [])
-        return len(history) >= self.warmup_candles
+        ready = len(history) >= self.warmup_candles
+        if not ready and not self._warmup_notified.get(symbol, False):
+            self._logger.info(
+                "Warmup active for %s on %s – need %d candles, have %d",
+                symbol,
+                self.name,
+                self.warmup_candles,
+                len(history),
+            )
+            self._warmup_notified[symbol] = True
+        elif ready:
+            self._warmup_notified[symbol] = False
+        return ready
 
     def update_signal_state(
         self, symbol: str, signal: Optional[str], indicators: Optional[Dict[str, Any]] = None

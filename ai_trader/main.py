@@ -107,6 +107,9 @@ def _validate_startup(
                 "Populate config.yaml before running with real funds.",
                 ", ".join(missing_keys),
             )
+            engine.enable_signal_only_mode(
+                "Missing Kraken API credentials while in live mode"
+            )
 
     if ml_workers:
         try:
@@ -124,9 +127,7 @@ def _validate_startup(
             )
 
     try:
-        ml_service._build_pipeline()
-        if ml_service.ensemble_requested and ml_service.ensemble_available:
-            ml_service._build_forest()
+        ml_service.probe()
     except Exception as exc:  # noqa: BLE001 - defensive initialisation guard
         logger.exception("Failed to initialise ML pipeline: %s", exc)
         raise SystemExit(1) from exc
@@ -310,11 +311,11 @@ async def start_bot() -> None:
     ml_service = MLService(
         db_path=DB_PATH,
         feature_keys=feature_keys,
-        learning_rate=float(ml_cfg.get("lr", 0.03)),
+        lr=float(ml_cfg.get("lr", 0.03)),
         regularization=float(ml_cfg.get("regularization", 0.0005)),
-        threshold=float(ml_cfg.get("threshold", 0.7)),
-        ensemble=bool(ml_cfg.get("ensemble_enabled", True)),
-        forest_size=int(ml_cfg.get("forest_size", ml_cfg.get("ensemble_trees", 15))),
+        threshold=float(ml_cfg.get("threshold", 0.25)),
+        ensemble=bool(ml_cfg.get("ensemble", True)),
+        forest_size=int(ml_cfg.get("forest_size", 10)),
         random_state=int(ml_cfg.get("random_state", 7)),
     )
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
@@ -337,6 +338,7 @@ async def start_bot() -> None:
         equity_allocation_percent=float(trading_cfg.get("equity_allocation_percent", 5.0)),
         max_open_positions=int(trading_cfg.get("max_open_positions", 3)),
         refresh_interval=float(worker_cfg.get("refresh_interval_seconds", 30)),
+        paper_trading=broker.is_paper_trading,
     )
 
     _validate_startup(engine, workers, config, ml_service)

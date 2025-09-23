@@ -39,6 +39,7 @@ class MarketResearchWorker(BaseWorker):
         self.atr_window = max(5, int(cfg.get("atr_window", 14)))
         self._snapshot_counter = 0
         self._forest_warning_emitted = False
+        self._pending_features: Dict[str, Dict[str, float]] = {}
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
         # Researcher does not emit trade signals but we keep interface parity.
@@ -72,6 +73,38 @@ class MarketResearchWorker(BaseWorker):
             features = self._build_features(candles)
             ohlcv = dict(candles[-1]) if candles else self._build_ohlcv([])
             label = self._derive_label(candles)
+
+            if label is not None:
+                pending = self._pending_features.get(symbol)
+                if pending:
+                    try:
+                        self._trade_log.backfill_market_feature_label(
+                            symbol, self.timeframe, float(label)
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self._logger.exception(
+                            "Failed to backfill label for %s: %s", symbol, exc
+                        )
+                    try:
+                        self._ml_service.update(
+                            symbol,
+                            pending,
+                            label=label,
+                            timestamp=snapshot.timestamp,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self._logger.exception(
+                            "ML training failed on prior features for %s: %s",
+                            symbol,
+                            exc,
+                        )
+                else:
+                    self._logger.debug(
+                        "Label %.0f arrived for %s without pending features",
+                        label,
+                        symbol,
+                    )
+
             payload = {
                 "symbol": symbol,
                 "timeframe": self.timeframe,
@@ -81,7 +114,7 @@ class MarketResearchWorker(BaseWorker):
                 "close": ohlcv["close"],
                 "volume": ohlcv["volume"],
                 "features": features,
-                "label": label,
+                "label": None,
             }
             self._trade_log.record_market_features(payload)
             if (
@@ -94,17 +127,19 @@ class MarketResearchWorker(BaseWorker):
                     symbol,
                 )
                 self._forest_warning_emitted = True
+            self._pending_features[symbol] = features
             confidence = 0.0
             try:
                 confidence = self._ml_service.update(
                     symbol,
                     features,
-                    label=label,
+                    label=None,
                     timestamp=snapshot.timestamp,
+                    persist=False,
                 )
             except Exception as exc:  # noqa: BLE001 - keep researcher resilient
                 self._logger.exception(
-                    "Failed to update ML service for %s – researcher will continue capturing features: %s",
+                    "Failed to push fresh features for %s – researcher will continue capturing features: %s",
                     symbol,
                     exc,
                 )
