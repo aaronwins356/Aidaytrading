@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 import random
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import ccxt
 from ccxt.base.errors import (
@@ -17,6 +18,7 @@ from ccxt.base.errors import (
 )
 
 from ai_trader.services.logging import get_logger
+from ai_trader.services.types import OpenPosition
 
 
 class KrakenClient:
@@ -80,6 +82,44 @@ class KrakenClient:
         )
         total = balance.get("total", {})
         return {currency: float(amount) for currency, amount in total.items() if amount}
+
+    async def fetch_open_positions(self) -> List[OpenPosition]:
+        """Return the broker's open positions as :class:`OpenPosition` records."""
+
+        if self._paper_trading:
+            return []
+
+        fetcher = None
+        description = "fetch_open_positions"
+        for candidate, label in (
+            (getattr(self._exchange, "fetch_open_positions", None), "fetch_open_positions"),
+            (getattr(self._exchange, "fetch_positions", None), "fetch_positions"),
+        ):
+            if callable(candidate):
+                fetcher = candidate
+                description = label
+                break
+
+        if fetcher is None:
+            self._logger.debug(
+                "Exchange implementation lacks open position endpoint; returning empty result set."
+            )
+            return []
+
+        raw_positions: Iterable[dict[str, Any]] | None = await self._with_retries(
+            fetcher, description=description
+        )
+        normalized: List[OpenPosition] = []
+        for payload in raw_positions or []:
+            if not isinstance(payload, dict):
+                self._logger.debug(
+                    "Skipping non-dict position payload from broker: %s", payload
+                )
+                continue
+            position = self._normalise_position_payload(payload)
+            if position is not None:
+                normalized.append(position)
+        return normalized
 
     async def place_order(
         self,
@@ -313,3 +353,129 @@ class KrakenClient:
         exponent = self._backoff_factor ** (attempt - 1)
         jitter = random.uniform(0, base_delay)
         return min(20.0, base_delay * exponent + jitter)
+
+    def _normalise_position_payload(
+        self, payload: Dict[str, Any]
+    ) -> Optional[OpenPosition]:
+        """Convert a broker payload into an :class:`OpenPosition`.
+
+        Kraken exposes multiple position schemas depending on the endpoint used.
+        This helper defensively extracts the fields we care about while applying
+        sensible fallbacks when the data is missing or malformed. Returning
+        ``None`` signals the caller to skip the payload.
+        """
+
+        symbol = str(
+            payload.get("symbol")
+            or payload.get("info", {}).get("symbol")
+            or payload.get("info", {}).get("pair")
+            or ""
+        ).upper()
+        if not symbol:
+            return None
+
+        side_raw = payload.get("side") or payload.get("info", {}).get("type")
+        side = str(side_raw or "buy").lower()
+        if side not in {"buy", "sell"}:
+            side = "buy" if side in {"long"} else "sell"
+
+        quantity_candidates = (
+            payload.get("amount"),
+            payload.get("contracts"),
+            payload.get("info", {}).get("vol"),
+            payload.get("info", {}).get("vol_exec"),
+        )
+        quantity: Optional[float] = None
+        for candidate in quantity_candidates:
+            if candidate is None:
+                continue
+            try:
+                quantity = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            else:
+                break
+        if quantity is None or quantity <= 0.0:
+            return None
+
+        price_candidates = (
+            payload.get("entryPrice"),
+            payload.get("price"),
+            payload.get("info", {}).get("price"),
+            payload.get("info", {}).get("cost"),
+        )
+        price: Optional[float] = None
+        for candidate in price_candidates:
+            if candidate is None:
+                continue
+            try:
+                price = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            else:
+                break
+        if price is None or price <= 0.0:
+            price = float(payload.get("info", {}).get("mark_price", 0.0) or 0.0)
+        if price <= 0.0:
+            return None
+
+        cost_value = payload.get("cost") or payload.get("info", {}).get("cost")
+        try:
+            cash_spent = float(cost_value) if cost_value is not None else float(price * quantity)
+        except (TypeError, ValueError):
+            cash_spent = float(price * quantity)
+
+        opened_at = self._coerce_open_timestamp(payload)
+        worker_hint = payload.get("info", {}).get("userref") or payload.get("clientOrderId")
+        worker = str(worker_hint) if worker_hint else "broker::unassigned"
+        try:
+            position = OpenPosition(
+                worker=worker,
+                symbol=symbol,
+                side="buy" if side in {"buy", "long"} else "sell",
+                quantity=quantity,
+                entry_price=price,
+                cash_spent=cash_spent,
+                opened_at=opened_at,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._logger.debug("Failed to normalise broker position %s: %s", payload, exc)
+            return None
+        return position
+
+    @staticmethod
+    def _coerce_open_timestamp(payload: Dict[str, Any]) -> datetime:
+        """Best-effort conversion of broker timestamps to ``datetime``."""
+
+        candidates = (
+            payload.get("timestamp"),
+            payload.get("datetime"),
+            payload.get("info", {}).get("opentm"),
+            payload.get("info", {}).get("time"),
+        )
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            if isinstance(candidate, datetime):
+                return candidate
+            if isinstance(candidate, (int, float)):
+                try:
+                    timestamp = float(candidate)
+                except (TypeError, ValueError):
+                    continue
+                if timestamp > 1e12:
+                    timestamp /= 1000.0
+                try:
+                    return datetime.utcfromtimestamp(timestamp)
+                except (OverflowError, OSError, ValueError):
+                    continue
+            if isinstance(candidate, str):
+                normalised = candidate.replace("Z", "+00:00")
+                try:
+                    parsed = datetime.fromisoformat(normalised)
+                except ValueError:
+                    continue
+                if parsed.tzinfo is not None:
+                    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                return parsed
+        return datetime.utcnow()

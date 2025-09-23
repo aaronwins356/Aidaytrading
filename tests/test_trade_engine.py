@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from dataclasses import dataclass
 import types
 from typing import Any, Callable
@@ -214,6 +215,61 @@ async def _run_trade_engine(tmp_path) -> None:
 
 def test_trade_engine_paper_mode(tmp_path) -> None:
     asyncio.run(_run_trade_engine(tmp_path))
+
+
+def test_rehydrate_open_positions(tmp_path) -> None:
+    """Rehydrating broker positions should seed engine state and trade logs."""
+
+    db_path = tmp_path / "rehydrate.db"
+    trade_log = TradeLog(db_path)
+    broker = _DummyBroker()
+    websocket_manager = _DummyWebsocketManager("BTC/USD")
+    equity_engine = EquityEngine(trade_log, broker.starting_equity)
+    risk_manager = RiskManager({
+        "max_drawdown_percent": 50,
+        "daily_loss_limit_percent": 50,
+        "max_position_duration_minutes": 5,
+    })
+    worker = _TestWorker("BTC/USD", trade_log)
+
+    engine = TradeEngine(
+        broker=broker,
+        websocket_manager=websocket_manager,
+        workers=[worker],
+        researchers=[],
+        equity_engine=equity_engine,
+        risk_manager=risk_manager,
+        trade_log=trade_log,
+        equity_allocation_percent=10.0,
+        max_open_positions=2,
+        refresh_interval=0.01,
+        paper_trading=True,
+    )
+
+    broker_position = OpenPosition(
+        worker="broker::unassigned",
+        symbol="BTC/USD",
+        side="buy",
+        quantity=0.25,
+        entry_price=100.0,
+        cash_spent=25.0,
+        opened_at=datetime.utcnow(),
+    )
+
+    asyncio.run(engine.rehydrate_open_positions([broker_position]))
+
+    key = (worker.name, broker_position.symbol)
+    assert key in engine._open_positions
+    seeded = engine._open_positions[key]
+    assert seeded.quantity == broker_position.quantity
+    trades = list(trade_log.fetch_trades())
+    assert any(row["reason"] == "rehydrated" for row in trades)
+    events = list(trade_log.fetch_trade_events())
+    assert events and events[0]["event"] == "rehydrate_open"
+
+    # Rehydrating again with the same payload should not create duplicates.
+    asyncio.run(engine.rehydrate_open_positions([broker_position]))
+    assert len(list(trade_log.fetch_trades())) == len(trades)
 
 
 async def _run_short_trade_engine(tmp_path) -> None:
