@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -66,6 +67,25 @@ class TradeLog:
                 ),
             )
             conn.commit()
+
+    def has_trade_entry(
+        self, worker: str, symbol: str, entry_price: float, cash_spent: float
+    ) -> bool:
+        """Return ``True`` if a matching trade entry already exists."""
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT entry_price, cash_spent FROM trades WHERE worker = ? AND symbol = ?",
+                (worker, symbol),
+            )
+            for row in cursor.fetchall():
+                logged_entry = float(row["entry_price"])
+                logged_cash = float(row["cash_spent"])
+                if math.isclose(logged_entry, float(entry_price), rel_tol=1e-6, abs_tol=1e-6) and math.isclose(
+                    logged_cash, float(cash_spent), rel_tol=1e-6, abs_tol=1e-4
+                ):
+                    return True
+        return False
 
     def record_equity(self, equity: float, pnl_percent: float, pnl_usd: float) -> None:
         """Store an equity snapshot."""

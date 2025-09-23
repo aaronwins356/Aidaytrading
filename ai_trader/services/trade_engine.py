@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+import json
+import math
 from datetime import datetime, timedelta
 from typing import DefaultDict, Dict, Iterable, List, Tuple
 
@@ -52,6 +54,129 @@ class TradeEngine:
         self._signal_only_mode = False
         self._signal_only_reason = ""
         self._paper_trading = paper_trading
+
+    async def rehydrate_open_positions(self, positions: Iterable[OpenPosition]) -> None:
+        """Reconcile broker open positions with the in-memory engine state."""
+
+        broker_positions = list(positions or [])
+        if not broker_positions:
+            self._logger.info("Broker reports no open positions to rehydrate.")
+            return
+
+        worker_symbol_map: Dict[str, set[str]] = {}
+        for worker in self._workers:
+            name = getattr(worker, "name", "") or worker.__class__.__name__
+            symbols = {str(symbol).upper() for symbol in getattr(worker, "symbols", [])}
+            if symbols:
+                worker_symbol_map[name] = symbols
+
+        trade_history = list(self._trade_log.fetch_trades())
+        reconciled = 0
+
+        def match_worker(position: OpenPosition, candidates: List[str]) -> str | None:
+            """Best effort worker resolution based on trade history and symbols."""
+
+            if position.worker in candidates:
+                return position.worker
+
+            for row in trade_history:
+                row_worker = str(row["worker"])
+                if candidates and row_worker not in candidates:
+                    continue
+                if str(row["symbol"]).upper() != position.symbol.upper():
+                    continue
+                entry_price = float(row["entry_price"])
+                cash_spent = float(row["cash_spent"])
+                # Allow small float variance because fills are rounded differently
+                # across Kraken endpoints and historical trade logs.
+                if math.isclose(entry_price, position.entry_price, rel_tol=1e-5, abs_tol=1e-5) and math.isclose(
+                    cash_spent, position.cash_spent, rel_tol=1e-4, abs_tol=1e-4
+                ):
+                    return row_worker
+                metadata_json = None
+                if hasattr(row, "keys") and "metadata_json" in row.keys():
+                    metadata_json = row["metadata_json"]
+                metadata: Dict[str, object] = {}
+                if metadata_json:
+                    try:
+                        metadata = json.loads(metadata_json)
+                    except (TypeError, ValueError):
+                        metadata = {}
+                quantity = metadata.get("fill_quantity") or metadata.get("quantity")
+                if quantity is not None and math.isclose(
+                    float(quantity), position.quantity, rel_tol=1e-6, abs_tol=1e-6
+                ):
+                    return row_worker
+            return candidates[0] if candidates else None
+
+        for broker_position in broker_positions:
+            symbol_key = broker_position.symbol.upper()
+            candidates = [
+                worker for worker, symbols in worker_symbol_map.items() if symbol_key in symbols
+            ]
+            worker_name = match_worker(broker_position, candidates)
+            if worker_name is None:
+                self._logger.warning(
+                    "Unable to reconcile broker position %s %s; skipping rehydration",
+                    broker_position.side.upper(),
+                    broker_position.symbol,
+                )
+                continue
+
+            key = (worker_name, broker_position.symbol)
+            if key in self._open_positions:
+                self._logger.debug(
+                    "Open position for %s on %s already tracked; skipping broker rehydrate",
+                    worker_name,
+                    broker_position.symbol,
+                )
+                continue
+
+            position = OpenPosition(
+                worker=worker_name,
+                symbol=broker_position.symbol,
+                side=broker_position.side,
+                quantity=broker_position.quantity,
+                entry_price=broker_position.entry_price,
+                cash_spent=broker_position.cash_spent,
+                opened_at=broker_position.opened_at,
+            )
+            self._open_positions[key] = position
+            reconciled += 1
+
+            if not self._trade_log.has_trade_entry(
+                worker_name, position.symbol, position.entry_price, position.cash_spent
+            ):
+                intent = TradeIntent(
+                    worker=worker_name,
+                    action="OPEN",
+                    symbol=position.symbol,
+                    side=position.side,
+                    cash_spent=position.cash_spent,
+                    entry_price=position.entry_price,
+                    reason="rehydrated",
+                    metadata={
+                        "mode": "rehydrated",
+                        "quantity": position.quantity,
+                        "opened_at": position.opened_at.isoformat(),
+                    },
+                )
+                self._trade_log.record_trade(intent)
+                self._trade_log.record_trade_event(
+                    worker=worker_name,
+                    symbol=position.symbol,
+                    event="rehydrate_open",
+                    details={
+                        "price": position.entry_price,
+                        "quantity": position.quantity,
+                        "source": "broker",
+                    },
+                )
+
+        if reconciled:
+            self._logger.info("Rehydrated %d open position(s) from broker state", reconciled)
+        else:
+            self._logger.info("No broker open positions were reconciled with active workers")
 
     async def start(self) -> None:
         await self._broker.load_markets()

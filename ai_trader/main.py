@@ -377,6 +377,15 @@ async def start_bot() -> None:
         paper_trading=broker.is_paper_trading,
     )
 
+    try:
+        broker_positions = await broker.fetch_open_positions()
+    except Exception as exc:  # noqa: BLE001 - network/broker failures shouldn't abort startup
+        logger.warning("Failed to fetch broker open positions during startup: %s", exc)
+        broker_positions = []
+    else:
+        logger.info("Broker returned %d open position(s) for reconciliation", len(broker_positions))
+    await engine.rehydrate_open_positions(broker_positions)
+
     _validate_startup(engine, workers, config, ml_service)
 
     stop_event = asyncio.Event()
