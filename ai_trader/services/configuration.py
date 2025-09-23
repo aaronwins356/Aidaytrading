@@ -81,6 +81,10 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         ml_cfg["lr"] = float(ml_cfg.get("lr", _ML_DEFAULTS["lr"]))
     except (TypeError, ValueError):  # pragma: no cover - configuration sanitation
         raise ValueError("ML configuration 'lr' must be numeric")
+    # Expose a descriptive alias for downstream services that prefer the
+    # ``learning_rate`` keyword while retaining backward compatibility with
+    # existing configuration files using ``lr``.
+    ml_cfg["learning_rate"] = ml_cfg["lr"]
     try:
         ml_cfg["regularization"] = float(
             ml_cfg.get("regularization", _ML_DEFAULTS["regularization"])

@@ -70,11 +70,33 @@ class MeanReversionWorker(BaseWorker):
         if price is None or price <= 0:
             return None
 
+        if existing_position is not None:
+            risk_triggered, risk_reason, risk_meta = self.check_risk_exit(symbol, price)
+            if risk_triggered:
+                self.update_signal_state(symbol, f"close:{risk_reason}")
+                self.clear_risk_tracker(symbol)
+                payload = {"trigger": risk_reason, **{k: v for k, v in risk_meta.items() if v is not None}}
+                close_side = "sell" if existing_position.side == "buy" else "buy"
+                return TradeIntent(
+                    worker=self.name,
+                    action="CLOSE",
+                    symbol=symbol,
+                    side=close_side,
+                    cash_spent=existing_position.cash_spent,
+                    entry_price=existing_position.entry_price,
+                    exit_price=price,
+                    confidence=0.0,
+                    reason=risk_reason,
+                    metadata=payload,
+                )
+
         if signal in {"buy", "sell"} and existing_position is None:
             allowed, confidence = self.ml_confirmation(symbol)
             if not allowed:
                 self.update_signal_state(symbol, "ml-block", {"ml_confidence": confidence})
                 return None
+            risk_meta = self.prepare_entry_risk(symbol, signal, price)
+            metadata = {"signal": signal, "price": price, **{k: v for k, v in risk_meta.items() if v is not None}}
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
@@ -83,7 +105,7 @@ class MeanReversionWorker(BaseWorker):
                 cash_spent=equity_per_trade,
                 entry_price=price,
                 confidence=confidence,
-                metadata={"signal": signal, "price": price},
+                metadata=metadata,
             )
 
         if signal == "flat" and existing_position is not None:
@@ -96,8 +118,14 @@ class MeanReversionWorker(BaseWorker):
             self.record_trade_event(
                 "close_mean_revert",
                 symbol,
-                {"pnl": pnl, "pnl_percent": pnl_percent, "side": existing_position.side},
+                {
+                    "pnl": pnl,
+                    "pnl_percent": pnl_percent,
+                    "side": existing_position.side,
+                    **self.risk_snapshot(symbol),
+                },
             )
+            self.clear_risk_tracker(symbol)
             return TradeIntent(
                 worker=self.name,
                 action="CLOSE",
@@ -110,6 +138,11 @@ class MeanReversionWorker(BaseWorker):
                 pnl_usd=pnl,
                 win_loss="win" if pnl > 0 else "loss",
                 reason="mean-revert",
-                metadata={"signal": signal, "pnl": pnl, "pnl_percent": pnl_percent},
+                metadata={
+                    "signal": signal,
+                    "pnl": pnl,
+                    "pnl_percent": pnl_percent,
+                    **self.risk_snapshot(symbol),
+                },
             )
         return None

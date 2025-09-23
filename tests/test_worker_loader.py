@@ -24,6 +24,7 @@ def test_worker_loader_smoke(tmp_path) -> None:
     ml_service = MLService(
         db_path=db_path,
         feature_keys=feature_keys,
+        learning_rate=0.05,
         ensemble=False,
         forest_size=1,
         warmup_target=5,

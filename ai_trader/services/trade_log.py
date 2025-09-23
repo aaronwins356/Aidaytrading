@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional
 
+from ai_trader.services.schema import TRADE_LOG_TABLES
 from ai_trader.services.types import TradeIntent
 
 
@@ -22,98 +23,8 @@ class TradeLog:
 
     def _init_db(self) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS trades (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    worker TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    cash_spent REAL NOT NULL,
-                    entry_price REAL NOT NULL,
-                    exit_price REAL,
-                    pnl_percent REAL,
-                    pnl_usd REAL,
-                    win_loss TEXT,
-                    reason TEXT,
-                    metadata_json TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS equity_curve (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    equity REAL NOT NULL,
-                    pnl_percent REAL NOT NULL,
-                    pnl_usd REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS market_features (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    open REAL,
-                    high REAL,
-                    low REAL,
-                    close REAL,
-                    volume REAL,
-                    features_json TEXT NOT NULL,
-                    label REAL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS account_snapshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    equity REAL NOT NULL,
-                    balances_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS bot_state (
-                    worker TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    status TEXT,
-                    last_signal TEXT,
-                    indicators_json TEXT,
-                    risk_json TEXT,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(worker, symbol)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS control_flags (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS trade_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    worker TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    event TEXT NOT NULL,
-                    details_json TEXT NOT NULL
-                )
-                """
-            )
+            for statement in TRADE_LOG_TABLES.values():
+                conn.execute(statement)
             self._ensure_market_feature_columns(conn)
             self._ensure_trade_columns(conn)
             conn.commit()

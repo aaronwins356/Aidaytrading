@@ -112,6 +112,8 @@ class MLShortWorker(BaseWorker):
                 "probability": probability,
                 "features_used": list((features or {}).keys()),
             }
+            risk_meta = self.prepare_entry_risk(symbol, "sell", price)
+            metadata.update({k: v for k, v in risk_meta.items() if v is not None})
             self.record_trade_event(
                 "open_signal",
                 symbol,
@@ -132,6 +134,28 @@ class MLShortWorker(BaseWorker):
                 metadata=metadata,
             )
 
+        risk_triggered, risk_reason, risk_meta = self.check_risk_exit(symbol, price)
+        if risk_triggered:
+            self.update_signal_state(symbol, f"close:{risk_reason}")
+            self.clear_risk_tracker(symbol)
+            payload = {
+                "probability": probability,
+                "trigger": risk_reason,
+                **{k: v for k, v in risk_meta.items() if v is not None},
+            }
+            return TradeIntent(
+                worker=self.name,
+                action="CLOSE",
+                symbol=symbol,
+                side="buy",
+                cash_spent=existing_position.cash_spent,
+                entry_price=existing_position.entry_price,
+                exit_price=price,
+                confidence=probability,
+                reason=risk_reason,
+                metadata=payload,
+            )
+
         close_signal = False
         reason = ""
         if signal == "buy":
@@ -141,17 +165,6 @@ class MLShortWorker(BaseWorker):
             close_signal = True
             reason = "prob-floor"
 
-        if self.stop_loss_pct:
-            stop_price = existing_position.entry_price * (1 + self.stop_loss_pct / 100)
-            if price >= stop_price:
-                close_signal = True
-                reason = "stop"
-        if self.take_profit_pct:
-            target_price = existing_position.entry_price * (1 - self.take_profit_pct / 100)
-            if price <= target_price:
-                close_signal = True
-                reason = "target"
-
         if close_signal:
             self.update_signal_state(symbol, f"close:{reason}")
             if reason in {"stop", "target", "prob-revert", "prob-floor"}:
@@ -160,6 +173,7 @@ class MLShortWorker(BaseWorker):
                     symbol,
                     {"probability": probability, "confidence": self._last_probabilities.get(symbol, probability)},
                 )
+            self.clear_risk_tracker(symbol)
             return TradeIntent(
                 worker=self.name,
                 action="CLOSE",
@@ -170,7 +184,11 @@ class MLShortWorker(BaseWorker):
                 exit_price=price,
                 confidence=probability,
                 reason=reason,
-                metadata={"probability": probability, "trigger": reason},
+                metadata={
+                    "probability": probability,
+                    "trigger": reason,
+                    **{k: v for k, v in risk_meta.items() if v is not None},
+                },
             )
 
         return None

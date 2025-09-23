@@ -61,7 +61,7 @@ class TradeEngine:
             len(self._workers),
             len(self._researchers),
         )
-        mode = "paper" if self._paper_trading else "live"
+        mode = "PAPER" if self._paper_trading else "LIVE"
         if self._signal_only_mode:
             self._logger.warning(
                 "Signal-only mode active (%s). Orders will not reach the broker.",

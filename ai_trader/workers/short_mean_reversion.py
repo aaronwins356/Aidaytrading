@@ -42,7 +42,6 @@ class ShortMeanReversionWorker(BaseWorker):
         self.band_window = band_window
         self.band_std_dev = float((config or {}).get("band_std_dev", 2.2))
         self.reversion_threshold = float((config or {}).get("reversion_threshold", 0.003))
-        self._position_tracker: Dict[str, Dict[str, float]] = {}
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
         self.update_history(snapshot)
@@ -106,7 +105,36 @@ class ShortMeanReversionWorker(BaseWorker):
         if price is None:
             return None
 
-        tracker = self._position_tracker.setdefault(symbol, {"best_price": price})
+        indicators = self._state.get(symbol, {}).get("indicators", {})
+
+        if existing_position is not None:
+            target_override: float | None = None
+            if self.take_profit_pct:
+                target_override = existing_position.entry_price * (1 - self.take_profit_pct / 100)
+            else:
+                target_override = indicators.get("mid")
+            if target_override is not None:
+                self.update_risk_levels(symbol, target=target_override)
+            risk_triggered, risk_reason, risk_meta = self.check_risk_exit(symbol, price)
+            if risk_triggered:
+                self.update_signal_state(symbol, f"close:{risk_reason}")
+                self.clear_risk_tracker(symbol)
+                payload = {
+                    "trigger": risk_reason,
+                    **{k: v for k, v in risk_meta.items() if v is not None},
+                }
+                return TradeIntent(
+                    worker=self.name,
+                    action="CLOSE",
+                    symbol=symbol,
+                    side="buy",
+                    cash_spent=existing_position.cash_spent,
+                    entry_price=existing_position.entry_price,
+                    exit_price=price,
+                    confidence=0.7,
+                    reason=risk_reason,
+                    metadata=payload,
+                )
 
         if existing_position is None:
             if signal != "sell" or not self.is_ready(symbol):
@@ -118,14 +146,9 @@ class ShortMeanReversionWorker(BaseWorker):
             if not allowed:
                 self.update_signal_state(symbol, "ml-block", {"ml_confidence": ml_confidence})
                 return None
-            tracker["best_price"] = price
-            tracker["stop_price"] = price * (1 + self.stop_loss_pct / 100) if self.stop_loss_pct else None
-            tracker["mean_price"] = self._state.get(symbol, {}).get("indicators", {}).get("mid", price)
-            tracker["target_price"] = tracker.get("mean_price")
-            metadata = {
-                "stop_price": tracker.get("stop_price"),
-                "target_price": tracker.get("target_price"),
-            }
+            mean_price = indicators.get("mid", price)
+            risk_meta = self.prepare_entry_risk(symbol, "sell", price, target=mean_price)
+            metadata = {k: v for k, v in risk_meta.items() if v is not None}
             self.record_trade_event("open_signal", symbol, metadata)
             return TradeIntent(
                 worker=self.name,
@@ -138,57 +161,18 @@ class ShortMeanReversionWorker(BaseWorker):
                 metadata=metadata,
             )
 
-        previous_best = tracker.get("best_price", price)
-        tracker["best_price"] = min(previous_best, price)
-        if self.take_profit_pct:
-            tracker["target_price"] = existing_position.entry_price * (1 - self.take_profit_pct / 100)
-        else:
-            mean_price = tracker.get("mean_price") or existing_position.entry_price
-            tracker["target_price"] = mean_price
-
-        stop_price = tracker.get("stop_price") or existing_position.entry_price * (1 + self.stop_loss_pct / 100)
-        target_price = tracker.get("target_price")
-        trailing_price = None
-        if self.trailing_stop_pct:
-            prior_trailing = tracker.get("trailing_price")
-            trailing_price = tracker["best_price"] * (1 + self.trailing_stop_pct / 100)
-            tracker["trailing_price"] = trailing_price
-            if trailing_price and trailing_price != prior_trailing:
-                self.record_trade_event(
-                    "trailing_update",
-                    symbol,
-                    {
-                        "previous_trailing": prior_trailing,
-                        "new_trailing": trailing_price,
-                        "best_price": tracker["best_price"],
-                    },
-                )
-
         should_close = False
         reason = ""
         if signal == "buy":
             should_close = True
             reason = "mean-hit"
-        if target_price and price <= target_price:
-            should_close = True
-            reason = reason or "target"
-        if stop_price and price >= stop_price:
-            should_close = True
-            reason = "stop"
-        if trailing_price and price >= trailing_price:
-            should_close = True
-            reason = reason or "trail"
 
         if should_close:
             self.update_signal_state(symbol, f"close:{reason}")
-            metadata = {
-                "stop_price": stop_price,
-                "target_price": target_price,
-                "trailing_price": trailing_price,
-                "trigger": reason,
-            }
+            metadata = {**self.risk_snapshot(symbol), "trigger": reason}
             if reason in {"stop", "target", "trail"}:
                 self.record_trade_event(f"risk_{reason}", symbol, metadata)
+            self.clear_risk_tracker(symbol)
             return TradeIntent(
                 worker=self.name,
                 action="CLOSE",
