@@ -1,0 +1,67 @@
+# Example deployment flow:
+# 1. Start in paper mode to validate signals and confidence while using paper balances.
+# 2. Once satisfied, switch to live mode and ensure KRAKEN_API_KEY / KRAKEN_API_SECRET env vars are set.
+#
+# Copy this file to config.yaml and adjust symbols/risk per your strategy profile.
+kraken:
+  api_key: ""  # Leave blank – bot reads from environment variables in production.
+  api_secret: ""
+  rest_rate_limit: 0.5
+
+trading:
+  base_currency: "USD"
+  symbols:
+    - "BTC/USD"
+  equity_allocation_percent: 2.0
+  max_open_positions: 2
+  paper_trading: true
+  paper_starting_equity: 20000.0
+  allow_shorting: true
+  mode: "paper"  # Toggle to "live" only after credentials + production risk checks.
+
+risk:
+  max_drawdown_percent: 10.0
+  daily_loss_limit_percent: 1.5
+  max_position_duration_minutes: 90
+
+ml:
+  lr: 0.03
+  regularization: 0.0005
+  threshold: 0.25
+  ensemble: true
+  forest_size: 10
+  random_state: 7
+
+workers:
+  refresh_interval_seconds: 15
+  definitions:
+    ml_short:
+      module: "ai_trader.workers.ml_short.MLShortWorker"
+      enabled: true
+      symbols:
+        - "BTC/USD"
+      parameters:
+        feature_lookback: 30
+        probability_threshold: 0.3
+        warmup_candles: 2
+      risk:
+        leverage: 1.0
+        position_size_pct: 25.0
+        stop_loss_pct: 1.0
+        take_profit_pct: 2.0
+        trailing_stop_pct: 0.7
+
+researcher:
+  module: "ai_trader.workers.researcher.MarketResearchWorker"
+  enabled: true
+  symbols:
+    - "BTC/USD"
+  parameters:
+    warmup_candles: 2
+    feature_windows:
+      - 5
+      - 14
+      - 30
+    timeframe: "1m"
+    log_every_n_snapshots: 1
+

@@ -12,13 +12,14 @@ def test_ml_service_prediction_cycle(tmp_path) -> None:
     service = MLService(
         db_path=db_path,
         feature_keys=["f1", "f2"],
-        learning_rate=0.1,
+        lr=0.1,
         regularization=0.01,
         threshold=0.4,
         ensemble=True,
         forest_size=5,
         random_state=42,
     )
+    service.probe()
 
     confidence = service.update("BTC/USD", {"f1": 1.0, "f2": 0.5}, label=1.0)
     assert 0.0 <= confidence <= 1.0

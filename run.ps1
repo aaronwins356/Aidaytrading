@@ -23,5 +23,8 @@ Write-Host 'Installing dependencies from requirements.txt...'
 pip install --upgrade pip
 pip install -r requirements.txt
 
+Write-Host 'Validating core dependencies...'
+python -c "import river, ccxt; print(f'river {river.__version__} | ccxt {ccxt.__version__}')"
+
 Write-Host 'Starting AI Trader bot...'
 python -m ai_trader.main

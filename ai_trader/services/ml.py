@@ -13,8 +13,10 @@ from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
 
 try:  # pragma: no cover - import guard for optional forest backend
     from river import forest
+    _FOREST_AVAILABLE = hasattr(forest, "ARFClassifier")
 except ImportError:  # pragma: no cover - river build without forest module
     forest = None  # type: ignore[assignment]
+    _FOREST_AVAILABLE = False
 
 from river import compose, linear_model, optim, preprocessing
 
@@ -83,6 +85,17 @@ class _ModelBundle:
             weights[str(feature)] = float(weight)
         return weights
 
+    def top_features(self, limit: int = 5) -> list[str]:
+        """Return a sorted list of top contributing features for logging."""
+
+        if limit <= 0:
+            return []
+        importance = self.feature_importances()
+        ranked = sorted(
+            importance.items(), key=lambda item: abs(item[1]), reverse=True
+        )
+        return [name for name, _ in ranked[:limit]]
+
 
 class MLService:
     """Stateful online learning engine shared across workers."""
@@ -91,7 +104,7 @@ class MLService:
         self,
         db_path: Path,
         feature_keys: Iterable[str],
-        learning_rate: float = 0.03,
+        lr: float = 0.03,
         regularization: float = 0.0005,
         threshold: float = 0.2,
         ensemble: bool = True,
@@ -100,12 +113,14 @@ class MLService:
     ) -> None:
         self._db_path = db_path
         self._feature_keys = list(feature_keys)
-        self._learning_rate = learning_rate
+        self._lr = lr
         self._regularization = regularization
         self._threshold = threshold
         self._logger = get_logger(__name__)
         self._ensemble_requested = bool(ensemble)
-        self._forest_backend = "river.forest.ARFClassifier" if forest and hasattr(forest, "ARFClassifier") else None
+        self._forest_backend = (
+            "river.forest.ARFClassifier" if _FOREST_AVAILABLE else None
+        )
         self._use_ensemble = self._ensemble_requested and self._forest_backend is not None
         self._forest_size = forest_size
         self._random_state = random_state
@@ -115,6 +130,10 @@ class MLService:
         if self._ensemble_requested and not self._use_ensemble:
             self._logger.warning(
                 "ML ensemble requested but river.forest.ARFClassifier is unavailable. Falling back to logistic regression only."
+            )
+        if not _FOREST_AVAILABLE and self._ensemble_requested:
+            self._logger.warning(
+                "River installation lacks 'forest.ARFClassifier'; ensemble disabled."
             )
         self._init_db()
 
@@ -176,12 +195,12 @@ class MLService:
     # Model lifecycle management
     # ------------------------------------------------------------------
     def _build_pipeline(self) -> compose.Pipeline:
-        optimizer = optim.SGD(lr=self._learning_rate)
+        optimizer = optim.SGD(lr=self._lr)
         logistic = linear_model.LogisticRegression(optimizer=optimizer, l2=self._regularization)
         return compose.Pipeline(preprocessing.StandardScaler(), logistic)
 
-    def _build_forest(self) -> forest.ARFClassifier:
-        if forest is None or not hasattr(forest, "ARFClassifier"):
+    def _build_forest(self) -> Any:
+        if not _FOREST_AVAILABLE:
             raise RuntimeError("river.forest.ARFClassifier is unavailable in this environment")
         return forest.ARFClassifier(
             n_models=self._forest_size,
@@ -268,6 +287,13 @@ class MLService:
     def ensemble_backend(self) -> str:
         return self._forest_backend or "disabled"
 
+    def probe(self) -> None:
+        """Build core estimators to ensure dependencies are available."""
+
+        _ = self._build_pipeline()
+        if self._ensemble_requested and self._use_ensemble:
+            self._build_forest()
+
     def has_feature_history(self, symbols: Optional[Iterable[str]] = None) -> bool:
         """Return True when at least one engineered feature row exists."""
 
@@ -308,9 +334,14 @@ class MLService:
         model = self._load_model(symbol)
 
         probability = model.predict_proba(cleaned)
+        learner_name = (
+            "forest+logistic"
+            if self._use_ensemble and model.forest is not None
+            else "logistic"
+        )
         if label is None:
-            self._logger.warning(
-                "No label supplied for %s – skipping learning step (confidence=%.4f)",
+            self._logger.debug(
+                "Label unavailable for %s – retaining features for future training (confidence=%.4f)",
                 symbol,
                 probability,
             )
@@ -322,13 +353,14 @@ class MLService:
 
         decision = int(probability >= self._threshold)
         self._latest_confidence[("researcher", symbol)] = probability
-        self._logger.info(f"[ML] {symbol} confidence={probability:.3f} decision={decision}")
+        top_features = model.top_features()
         self._logger.info(
-            "ML UPDATE | symbol=%s confidence=%.2f decision=%d features=%d",
+            "[ML] %s confidence=%.3f decision=%d via %s features=%s",
             symbol,
             probability,
             decision,
-            feature_count,
+            learner_name,
+            ",".join(top_features) if top_features else "-",
         )
         self._record_prediction(
             symbol=symbol,
@@ -364,16 +396,20 @@ class MLService:
         decision = probability >= gate
         worker_name = worker or "worker"
         self._latest_confidence[(worker_name, symbol)] = probability
-        self._logger.info(f"[ML] {symbol} confidence={probability:.3f} decision={int(decision)}")
-        feature_count = len(cleaned)
+        bundle = self._models[symbol]
+        learner_name = (
+            "forest+logistic"
+            if self._use_ensemble and bundle.forest is not None
+            else "logistic"
+        )
+        top_features = bundle.top_features()
         self._logger.info(
-            "ML PREDICT | worker=%s symbol=%s confidence=%.2f threshold=%.2f decision=%d features=%d",
-            worker_name,
+            "[ML] %s confidence=%.3f decision=%d via %s features=%s",
             symbol,
             probability,
-            gate,
             int(decision),
-            feature_count,
+            learner_name,
+            ",".join(top_features) if top_features else "-",
         )
         self._record_prediction(
             symbol=symbol,

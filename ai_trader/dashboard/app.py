@@ -132,11 +132,11 @@ def init_ml_service(config: Dict) -> MLService:
     return MLService(
         db_path=DB_PATH,
         feature_keys=feature_keys,
-        learning_rate=float(ml_cfg.get("lr", 0.03)),
+        lr=float(ml_cfg.get("lr", 0.03)),
         regularization=float(ml_cfg.get("regularization", 0.0005)),
-        threshold=float(ml_cfg.get("threshold", 0.7)),
-        ensemble=bool(ml_cfg.get("ensemble_enabled", True)),
-        forest_size=int(ml_cfg.get("forest_size", ml_cfg.get("ensemble_trees", 15))),
+        threshold=float(ml_cfg.get("threshold", 0.25)),
+        ensemble=bool(ml_cfg.get("ensemble", True)),
+        forest_size=int(ml_cfg.get("forest_size", 10)),
         random_state=int(ml_cfg.get("random_state", 7)),
     )
 
@@ -515,6 +515,9 @@ def render_market_view(symbol: str, trades: pd.DataFrame, ml_service: MLService)
 
 def render_ml_debug_panel(config: Dict, ml_service: MLService, bot_states: pd.DataFrame) -> None:
     st.subheader("ML Diagnostics")
+    st.caption(
+        f"Ensemble backend: {ml_service.ensemble_backend} | requested: {ml_service.ensemble_requested}"
+    )
     with st.expander("Inspect live ML inputs", expanded=False):
         st.caption(
             "Use this panel to print the latest engineered features and confidence levels feeding each worker."

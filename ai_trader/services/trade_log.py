@@ -197,6 +197,30 @@ class TradeLog:
             )
             conn.commit()
 
+    def backfill_market_feature_label(
+        self, symbol: str, timeframe: str, label: float
+    ) -> None:
+        """Update the oldest unlabeled feature row once ground truth arrives."""
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT id FROM market_features
+                WHERE symbol = ? AND timeframe = ? AND label IS NULL
+                ORDER BY timestamp ASC
+                LIMIT 1
+                """,
+                (symbol, timeframe),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return
+            conn.execute(
+                "UPDATE market_features SET label = ? WHERE id = ?",
+                (float(label), int(row["id"])),
+            )
+            conn.commit()
+
     def fetch_market_features(self, symbol: str, limit: int = 500) -> Iterable[sqlite3.Row]:
         with self._connect() as conn:
             cursor = conn.execute(
