@@ -197,7 +197,20 @@ class TradeEngine:
             self._logger.debug("Ignoring trade intent %s", intent)
 
     async def _open_trade(self, intent: TradeIntent, key: Tuple[str, str]) -> None:
-        price, quantity = await self._broker.place_order(intent.symbol, intent.side, intent.cash_spent)
+        try:
+            price, quantity = await self._broker.place_order(
+                intent.symbol, intent.side, intent.cash_spent
+            )
+        except Exception as exc:  # noqa: BLE001 - broker errors should not crash engine
+            self._logger.warning(
+                "Order rejected for %s %s (cash %.2f): %s",
+                intent.side.upper(),
+                intent.symbol,
+                intent.cash_spent,
+                exc,
+            )
+            self._logger.debug("Failed intent payload: %s", intent, exc_info=True)
+            return
         cost = price * quantity
         position = OpenPosition(
             worker=intent.worker,
@@ -221,7 +234,20 @@ class TradeEngine:
         self._logger.info("Trade opened: %s %s @ %.2f (qty %.6f)", intent.side.upper(), intent.symbol, price, quantity)
 
     async def _close_trade(self, intent: TradeIntent, key: Tuple[str, str], position: OpenPosition) -> None:
-        price, quantity = await self._broker.close_position(intent.symbol, position.side, position.quantity)
+        try:
+            price, quantity = await self._broker.close_position(
+                intent.symbol, position.side, position.quantity
+            )
+        except Exception as exc:  # noqa: BLE001 - broker errors should not crash engine
+            self._logger.warning(
+                "Close order failed for %s %s (qty %.6f): %s",
+                position.side.upper(),
+                intent.symbol,
+                position.quantity,
+                exc,
+            )
+            self._logger.debug("Close intent payload: %s", intent, exc_info=True)
+            return
         pnl = (price - position.entry_price) * position.quantity if position.side == "buy" else (position.entry_price - price) * position.quantity
         pnl_percent = pnl / position.cash_spent * 100 if position.cash_spent else 0.0
         recorded_intent = TradeIntent(

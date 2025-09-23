@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal, ROUND_DOWN
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import ccxt
 
@@ -80,15 +80,19 @@ class KrakenClient:
             self._simulate_fill(base, quote, side, amount, price)
             return price, amount
 
-        order = await asyncio.to_thread(
-            self._exchange.create_order,
-            symbol,
-            "market",
-            side,
-            amount,
-            None,
-            {"reduce_only": side == "sell"},
-        )
+        try:
+            order = await asyncio.to_thread(
+                self._exchange.create_order,
+                symbol,
+                "market",
+                side,
+                amount,
+                None,
+                {"reduce_only": side == "sell"},
+            )
+        except ccxt.BaseError as exc:  # pragma: no cover - network/broker failures
+            self._logger.warning("Kraken rejected order for %s: %s", symbol, exc)
+            raise RuntimeError(str(exc)) from exc
         await asyncio.sleep(self._rest_rate_limit)
         filled = order.get("amount", amount)
         avg_price = order.get("average") or price
@@ -104,15 +108,19 @@ class KrakenClient:
             self._simulate_fill(base, quote, exit_side, amount, price)
             return price, amount
 
-        order = await asyncio.to_thread(
-            self._exchange.create_order,
-            symbol,
-            "market",
-            exit_side,
-            amount,
-            None,
-            {"reduce_only": True},
-        )
+        try:
+            order = await asyncio.to_thread(
+                self._exchange.create_order,
+                symbol,
+                "market",
+                exit_side,
+                amount,
+                None,
+                {"reduce_only": True},
+            )
+        except ccxt.BaseError as exc:  # pragma: no cover - network/broker failures
+            self._logger.warning("Kraken rejected close order for %s: %s", symbol, exc)
+            raise RuntimeError(str(exc)) from exc
         await asyncio.sleep(self._rest_rate_limit)
         filled = order.get("amount", amount)
         avg_price = order.get("average") or order.get("price")

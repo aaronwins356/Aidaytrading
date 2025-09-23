@@ -38,12 +38,36 @@ class _ModelBundle:
         if self.forest is not None:
             self.forest.learn_one(features, label)
 
+    @staticmethod
+    def _probability_from_mapping(probabilities: Mapping[Any, float]) -> float:
+        """Return a bounded probability from a River probability mapping.
+
+        River models return an empty mapping until they observe at least one
+        labelled sample. In that case we provide a neutral default of ``0.5``
+        so downstream components can begin gating immediately instead of being
+        stuck at ``0.0`` confidence.
+        """
+
+        if not probabilities:
+            return 0.5
+        # ``True`` and ``1`` are equivalent keys for binary classifiers. We use
+        # ``True`` for clarity while still honouring integer-labelled models.
+        value = probabilities.get(True)
+        if value is None:
+            value = probabilities.get(1, 0.5)
+        return float(max(0.0, min(1.0, value)))
+
     def predict_proba(self, features: FeatureMapping) -> float:
         """Return a blended probability using the configured ensemble."""
 
-        probability = self.pipeline.predict_proba_one(features).get(True, 0.0)
+        logistic_proba = self._probability_from_mapping(
+            self.pipeline.predict_proba_one(features)
+        )
+        probability = logistic_proba
         if self.forest is not None:
-            forest_probability = self.forest.predict_proba_one(features).get(True, 0.0)
+            forest_probability = self._probability_from_mapping(
+                self.forest.predict_proba_one(features)
+            )
             probability = (probability + forest_probability) / 2
         return float(max(0.0, min(1.0, probability)))
 
