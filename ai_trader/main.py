@@ -23,15 +23,41 @@ from ai_trader.services.worker_loader import WorkerLoader
 from ai_trader.workers.researcher import MarketResearchWorker
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
+CONFIG_LIVE_PATH = Path(__file__).resolve().parent / "config.live.yaml"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DB_PATH = DATA_DIR / "trades.db"
 
 
 def load_config() -> Dict[str, Any]:
-    """Load and normalise runtime configuration from ``config.yaml``."""
+    """Load and normalise runtime configuration from YAML sources."""
 
-    raw_config = read_config_file(CONFIG_PATH)
-    return normalize_config(raw_config)
+    logger = get_logger(__name__)
+    base_config = read_config_file(CONFIG_PATH)
+    profile = os.getenv("AI_TRADER_ENV", os.getenv("AI_TRADER_MODE", "")).lower()
+    if profile == "live":
+        live_overrides = read_config_file(CONFIG_LIVE_PATH)
+        if live_overrides:
+            logger.info("Applying live configuration overrides from %s", CONFIG_LIVE_PATH)
+            base_config = _merge_dicts(base_config, live_overrides)
+        else:
+            logger.warning(
+                "AI_TRADER_ENV=live but %s is missing – proceeding with base configuration",
+                CONFIG_LIVE_PATH,
+            )
+    normalised = normalize_config(base_config)
+    return normalised
+
+
+def _merge_dicts(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge ``overrides`` into ``base`` without mutating inputs."""
+
+    merged: Dict[str, Any] = {**base}
+    for key, value in overrides.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _validate_startup(
@@ -265,6 +291,10 @@ async def start_bot() -> None:
 
     trading_mode = str(trading_cfg.get("mode", "paper")).lower()
     live_trading = trading_mode == "live"
+    if live_trading:
+        logger.info("🚀 Running in LIVE trading mode – Kraken API credentials will be pulled from environment variables.")
+    else:
+        logger.info("🧪 Running in PAPER trading mode – no real funds at risk.")
 
     broker = KrakenClient(
         api_key=os.getenv("KRAKEN_API_KEY", config.get("kraken", {}).get("api_key", "")),
@@ -318,6 +348,7 @@ async def start_bot() -> None:
         forest_size=int(ml_cfg.get("forest_size", 10)),
         random_state=int(ml_cfg.get("random_state", 7)),
         warmup_target=int(ml_cfg.get("warmup_target", 200)),
+        warmup_samples=int(ml_cfg.get("warmup_samples", 25)),
     )
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
     risk_manager = RiskManager(risk_cfg)
