@@ -97,12 +97,13 @@ class MeanReversionWorker(BaseWorker):
                 return None
             risk_meta = self.prepare_entry_risk(symbol, signal, price)
             metadata = {"signal": signal, "price": price, **{k: v for k, v in risk_meta.items() if v is not None}}
+            cash_value = float(equity_per_trade)
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
                 symbol=symbol,
                 side=signal,
-                cash_spent=equity_per_trade,
+                cash_spent=cash_value,
                 entry_price=price,
                 confidence=confidence,
                 metadata=metadata,

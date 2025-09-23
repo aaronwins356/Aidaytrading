@@ -139,7 +139,7 @@ class ShortMeanReversionWorker(BaseWorker):
         if existing_position is None:
             if signal != "sell" or not self.is_ready(symbol):
                 return None
-            cash = equity_per_trade * (self.position_size_pct / 100)
+            cash = float(equity_per_trade) * (self.position_size_pct / 100)
             if cash <= 0:
                 return None
             allowed, ml_confidence = self.ml_confirmation(symbol)
@@ -150,12 +150,13 @@ class ShortMeanReversionWorker(BaseWorker):
             risk_meta = self.prepare_entry_risk(symbol, "sell", price, target=mean_price)
             metadata = {k: v for k, v in risk_meta.items() if v is not None}
             self.record_trade_event("open_signal", symbol, metadata)
+            cash_value = float(cash) * float(self.leverage)
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
                 symbol=symbol,
                 side="sell",
-                cash_spent=cash * self.leverage,
+                cash_spent=cash_value,
                 entry_price=price,
                 confidence=ml_confidence or 0.65,
                 metadata=metadata,

@@ -92,7 +92,7 @@ class MomentumWorker(BaseWorker):
                 )
 
         if signal in {"buy", "sell"} and existing_position is None:
-            cash = equity_per_trade
+            cash = float(equity_per_trade)
             allowed, confidence = self.ml_confirmation(symbol)
             if not allowed:
                 self.update_signal_state(symbol, "ml-block", {"ml_confidence": confidence})
@@ -104,7 +104,7 @@ class MomentumWorker(BaseWorker):
                 action="OPEN",
                 symbol=symbol,
                 side=signal,
-                cash_spent=cash,
+                cash_spent=float(cash),
                 entry_price=price,
                 confidence=confidence,
                 metadata=metadata,
