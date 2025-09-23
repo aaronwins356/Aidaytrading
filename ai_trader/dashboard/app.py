@@ -18,10 +18,12 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = BASE_DIR.parent
 
 try:
+    from ai_trader.services.configuration import normalize_config, read_config_file
     from ai_trader.services.ml import MLService
 except ModuleNotFoundError:  # pragma: no cover - fallback for direct script execution
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.append(str(PROJECT_ROOT))
+    from ai_trader.services.configuration import normalize_config, read_config_file
     from ai_trader.services.ml import MLService
 
 st.set_page_config(page_title="AI Trader Control Center", layout="wide", page_icon="🧠")
@@ -86,8 +88,8 @@ def _auto_refresh_script(interval_seconds: int) -> None:
 
 @st.cache_data(ttl=5)
 def load_config() -> Dict:
-    with CONFIG_PATH.open("r", encoding="utf-8") as file:
-        return yaml.safe_load(file)
+    raw_config = read_config_file(CONFIG_PATH)
+    return normalize_config(raw_config)
 
 
 def save_config(config: Dict) -> None:
@@ -130,11 +132,11 @@ def init_ml_service(config: Dict) -> MLService:
     return MLService(
         db_path=DB_PATH,
         feature_keys=feature_keys,
-        learning_rate=float(ml_cfg.get("learning_rate", 0.03)),
+        learning_rate=float(ml_cfg.get("lr", 0.03)),
         regularization=float(ml_cfg.get("regularization", 0.0005)),
         threshold=float(ml_cfg.get("threshold", 0.7)),
         ensemble=bool(ml_cfg.get("ensemble_enabled", True)),
-        forest_size=int(ml_cfg.get("ensemble_trees", 15)),
+        forest_size=int(ml_cfg.get("forest_size", ml_cfg.get("ensemble_trees", 15))),
         random_state=int(ml_cfg.get("random_state", 7)),
     )
 

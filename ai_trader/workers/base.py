@@ -38,7 +38,7 @@ class BaseWorker(ABC):
         self.active: bool = True
         self.config: Dict[str, Any] = config or {}
         self.risk_config: Dict[str, Any] = risk_config or {}
-        self.warmup_candles: int = max(1, int(self.config.get("warmup_candles", 3)))
+        self.warmup_candles: int = max(1, int(self.config.get("warmup_candles", 2)))
         self.position_size_pct: float = float(self.risk_config.get("position_size_pct", 100.0))
         self.leverage: float = float(self.risk_config.get("leverage", 1.0))
         self.stop_loss_pct: float = float(self.risk_config.get("stop_loss_pct", 0.0))

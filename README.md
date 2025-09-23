@@ -34,6 +34,14 @@ ai_trader/
    pip install -r requirements.txt
    ```
 
+   On Windows PowerShell use:
+
+   ```powershell
+   py -3.11 -m venv .venv
+   .venv\\Scripts\\Activate.ps1
+   pip install -r requirements.txt
+   ```
+
 2. **Configure**
 
    Edit `ai_trader/config.yaml` with Kraken API keys, symbols, and risk preferences. Set `paper_trading: false` only when ready for live trading.
@@ -48,6 +56,12 @@ ai_trader/
 
    ```bash
    streamlit run ai_trader/dashboard/app.py
+   ```
+
+5. **Run automated tests**
+
+   ```bash
+   pytest
    ```
 
 ## Dummy Trade Test
