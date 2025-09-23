@@ -401,18 +401,20 @@ class MLService:
         decision = int(probability >= self._threshold)
         self._latest_confidence[("researcher", symbol)] = probability
         top_features = model.top_features()
+        warmup_seen, warmup_target = self.warmup_counts(symbol)
         warmup_progress = self.warmup_progress(symbol)
         warmed_up = self.is_warmed_up(symbol)
         self._logger.info(
-            "[ML] %s confidence=%.3f threshold=%.2f decision=%d via %s features=%s warmup=%d/%d%s",
+            "[ML] %s confidence=%.3f threshold=%.2f decision=%d via %s features=%s warmup=%d/%d (%.0f%%)%s",
             symbol,
             probability,
             self._threshold,
             decision,
             learner_name,
             ",".join(top_features) if top_features else "-",
-            warmup_progress[0],
-            warmup_progress[1],
+            warmup_seen,
+            warmup_target,
+            warmup_progress * 100,
             " (ready)" if warmed_up else "",
         )
         self._record_prediction(
@@ -457,18 +459,20 @@ class MLService:
             else "logistic"
         )
         top_features = bundle.top_features()
+        warmup_seen, warmup_target = self.warmup_counts(symbol)
         warmup_progress = self.warmup_progress(symbol)
         warmed_up = self.is_warmed_up(symbol)
         self._logger.info(
-            "[ML] %s confidence=%.3f threshold=%.2f decision=%d via %s features=%s warmup=%d/%d%s",
+            "[ML] %s confidence=%.3f threshold=%.2f decision=%d via %s features=%s warmup=%d/%d (%.0f%%)%s",
             symbol,
             probability,
             gate,
             int(decision),
             learner_name,
             ",".join(top_features) if top_features else "-",
-            warmup_progress[0],
-            warmup_progress[1],
+            warmup_seen,
+            warmup_target,
+            warmup_progress * 100,
             " (ready)" if warmed_up else "",
         )
         self._record_prediction(
@@ -492,10 +496,18 @@ class MLService:
 
         return self._latest_features.get(symbol)
 
-    def warmup_progress(self, symbol: str) -> Tuple[int, int]:
+    def warmup_counts(self, symbol: str) -> tuple[int, int]:
         """Return (label_count, required_count) for dashboard insights."""
 
         return self._label_counts.get(symbol, 0), self._warmup_target
+
+    def warmup_progress(self, symbol: str) -> float:
+        """Return the warmup ratio based on labelled samples."""
+
+        seen, target = self.warmup_counts(symbol)
+        if target <= 0:
+            return 1.0
+        return float(min(1.0, seen / target))
 
     def is_warmed_up(self, symbol: str) -> bool:
         """Return True once the symbol has seen enough labelled samples."""
@@ -546,13 +558,6 @@ class MLService:
         if row is None:
             return 0
         return int(row[0] or 0)
-
-    def warmup_progress(self, symbol: str) -> float:
-        """Return a [0,1] warmup ratio based on stored feature history."""
-
-        count = self.feature_count(symbol)
-        progress = min(1.0, count / self._warmup_target)
-        return float(progress)
 
     def run_backtest(
         self,
