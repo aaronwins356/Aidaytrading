@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import pickle
 import sqlite3
@@ -9,9 +10,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
 
-from river import compose, ensemble, linear_model, optim, preprocessing
+from river import compose, linear_model, optim, preprocessing
 
 from ai_trader.services.logging import get_logger
 
@@ -19,12 +20,33 @@ from ai_trader.services.logging import get_logger
 FeatureMapping = Mapping[str, float]
 
 
+def _resolve_forest_classifier(logger) -> tuple[Optional[type[Any]], Optional[str]]:
+    """Return the first available River forest classifier class."""
+
+    candidates = [
+        ("river.ensemble", "AdaptiveRandomForestClassifier"),
+        ("river.forest", "ARFClassifier"),
+    ]
+    for module_path, class_name in candidates:
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError:
+            continue
+        candidate = getattr(module, class_name, None)
+        if candidate is not None:
+            return candidate, f"{module_path}.{class_name}"
+    logger.warning(
+        "River forest classifier could not be imported; ensemble predictions will be disabled."
+    )
+    return None, None
+
+
 @dataclass(slots=True)
 class _ModelBundle:
     """Container holding the live online models for a trading symbol."""
 
     pipeline: compose.Pipeline
-    forest: Optional[ensemble.AdaptiveRandomForestClassifier]
+    forest: Optional[Any]
 
     def learn(self, features: FeatureMapping, label: int) -> None:
         """Update the online models with the observed label."""
@@ -74,13 +96,19 @@ class MLService:
         self._learning_rate = learning_rate
         self._regularization = regularization
         self._threshold = threshold
-        self._use_ensemble = ensemble
+        self._logger = get_logger(__name__)
+        self._ensemble_requested = bool(ensemble)
+        self._forest_class, self._forest_backend = _resolve_forest_classifier(self._logger)
+        self._use_ensemble = self._ensemble_requested and self._forest_class is not None
         self._forest_size = forest_size
         self._random_state = random_state
         self._models: Dict[str, _ModelBundle] = {}
         self._latest_features: Dict[str, Dict[str, float]] = {}
         self._latest_confidence: Dict[Tuple[str, str], float] = {}
-        self._logger = get_logger(__name__)
+        if self._ensemble_requested and not self._use_ensemble:
+            self._logger.warning(
+                "ML ensemble requested but compatible River forest implementation is unavailable."
+            )
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -145,12 +173,37 @@ class MLService:
         logistic = linear_model.LogisticRegression(optimizer=optimizer, l2=self._regularization)
         return compose.Pipeline(preprocessing.StandardScaler(), logistic)
 
-    def _build_forest(self) -> ensemble.AdaptiveRandomForestClassifier:
-        return ensemble.AdaptiveRandomForestClassifier(
-            n_models=self._forest_size,
-            max_features="sqrt",
-            seed=self._random_state,
-        )
+    def _build_forest(self) -> Optional[Any]:
+        if not self._use_ensemble or self._forest_class is None:
+            return None
+        try:
+            return self._forest_class(
+                n_models=self._forest_size,
+                max_features="sqrt",
+                seed=self._random_state,
+            )
+        except TypeError:
+            try:
+                return self._forest_class(
+                    n_models=self._forest_size,
+                    max_features="sqrt",
+                    random_state=self._random_state,
+                )
+            except Exception as exc:  # noqa: BLE001 - defensive fallback
+                self._logger.error(
+                    "Failed to initialise forest classifier (%s): %s",
+                    self._forest_backend,
+                    exc,
+                )
+        except Exception as exc:  # noqa: BLE001 - defensive fallback
+            self._logger.error(
+                "Failed to initialise forest classifier (%s): %s",
+                self._forest_backend,
+                exc,
+            )
+        self._use_ensemble = False
+        self._forest_class = None
+        return None
 
     def _load_model(self, symbol: str) -> _ModelBundle:
         if symbol in self._models:
@@ -184,7 +237,9 @@ class MLService:
     def _persist_model(self, symbol: str, bundle: _ModelBundle) -> None:
         logistic_blob = pickle.dumps(bundle.pipeline)
         forest_blob = pickle.dumps(bundle.forest) if bundle.forest is not None else None
-        metadata = json.dumps({"ensemble": self._use_ensemble})
+        metadata = json.dumps(
+            {"ensemble": self._use_ensemble, "backend": self._forest_backend}
+        )
         with self._connect() as conn:
             conn.execute(
                 """
@@ -216,6 +271,18 @@ class MLService:
     @property
     def default_threshold(self) -> float:
         return self._threshold
+
+    @property
+    def ensemble_requested(self) -> bool:
+        return self._ensemble_requested
+
+    @property
+    def ensemble_available(self) -> bool:
+        return self._forest_class is not None
+
+    @property
+    def ensemble_backend(self) -> str:
+        return self._forest_backend or "disabled"
 
     def has_feature_history(self, symbols: Optional[Iterable[str]] = None) -> bool:
         """Return True when at least one engineered feature row exists."""
@@ -311,12 +378,15 @@ class MLService:
         decision = probability >= gate
         worker_name = worker or "worker"
         self._latest_confidence[(worker_name, symbol)] = probability
-        self._logger.debug(
-            "Probability computed for %s via %s: %.4f (threshold=%.4f)",
-            symbol,
+        feature_count = len(cleaned)
+        self._logger.info(
+            "ML PREDICT | worker=%s symbol=%s confidence=%.2f threshold=%.2f decision=%d features=%d",
             worker_name,
+            symbol,
             probability,
             gate,
+            int(decision),
+            feature_count,
         )
         self._record_prediction(
             symbol=symbol,

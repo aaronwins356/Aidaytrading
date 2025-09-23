@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Dict, Iterable, List, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Tuple
 
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.broker.websocket_manager import KrakenWebsocketManager
@@ -46,6 +47,7 @@ class TradeEngine:
         self._stop_event = asyncio.Event()
         self._control_flags: Dict[str, str] = {}
         self._kill_switch = False
+        self._researcher_failures: DefaultDict[str, int] = defaultdict(int)
 
     async def start(self) -> None:
         await self._broker.load_markets()
@@ -147,8 +149,39 @@ class TradeEngine:
                 await researcher.observe(snapshot, equity_metrics, open_positions)
                 for symbol, state in researcher.get_all_state_snapshots().items():
                     self._trade_log.record_bot_state(researcher.name, symbol, state)
+                self._researcher_failures.pop(researcher.name, None)
             except Exception as exc:  # noqa: BLE001
-                self._logger.error("Researcher %s failed: %s", researcher.name, exc)
+                self._researcher_failures[researcher.name] += 1
+                failure_count = self._researcher_failures[researcher.name]
+                self._logger.exception(
+                    "Researcher %s failed (attempt %d): %s",
+                    researcher.name,
+                    failure_count,
+                    exc,
+                )
+                if failure_count >= 3:
+                    reset_hook = getattr(researcher, "reset", None) or getattr(
+                        researcher, "reset_state", None
+                    )
+                    if callable(reset_hook):
+                        try:
+                            reset_hook()
+                            self._researcher_failures.pop(researcher.name, None)
+                            self._logger.warning(
+                                "Researcher %s reset after repeated failures.",
+                                researcher.name,
+                            )
+                        except Exception as reset_exc:  # noqa: BLE001
+                            self._logger.error(
+                                "Failed to reset researcher %s: %s",
+                                researcher.name,
+                                reset_exc,
+                            )
+                    else:
+                        self._logger.error(
+                            "Researcher %s has no reset hook; continuing after failure.",
+                            researcher.name,
+                        )
 
     async def _execute_intent(
         self,

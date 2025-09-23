@@ -120,7 +120,7 @@ class WorkerLoader:
                 {
                     "module": "ai_trader.workers.researcher.MarketResearchWorker",
                     "enabled": True,
-                    "parameters": {"warmup_candles": 3, "log_every_n_snapshots": 1},
+                    "parameters": {"warmup_candles": 2, "log_every_n_snapshots": 1},
                 },
             )
             self._forced_researchers.add(self._auto_researcher_key)

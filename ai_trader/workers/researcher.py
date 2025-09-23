@@ -59,7 +59,7 @@ class MarketResearchWorker(BaseWorker):
             return
         for symbol in self.symbols:
             candles = snapshot.candles.get(symbol, [])
-            required_candles = max(self.warmup_candles, 3)
+            required_candles = max(self.warmup_candles, 2)
             if len(candles) < required_candles:
                 self._logger.debug(
                     "Skipping feature snapshot for %s – need %d candles, have %d",
@@ -167,6 +167,9 @@ class MarketResearchWorker(BaseWorker):
             return 0.0
         prev_close = float(candles[-2].get("close", 0.0))
         latest_close = float(candles[-1].get("close", 0.0))
+        # A label of ``1`` indicates a downward move, aligning with the short bias
+        # of the ML-assisted workers. A value of ``0`` signals upward or flat
+        # closes, helping ensure the model's ground truth matches execution logic.
         return 1.0 if latest_close < prev_close else 0.0
 
     @staticmethod
