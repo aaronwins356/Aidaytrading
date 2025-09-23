@@ -31,6 +31,7 @@ _ML_DEFAULTS: Dict[str, float | bool] = {
     "forest_size": 10,
     "threshold": 0.25,
     "ensemble": True,
+    "warmup_samples": 25,
 }
 
 _DEPRECATED_KEYS: Dict[str, str] = {
@@ -99,6 +100,12 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):  # pragma: no cover - configuration sanitation
         raise ValueError("ML configuration 'threshold' must be numeric")
     ml_cfg["ensemble"] = bool(ml_cfg.get("ensemble", True))
+    try:
+        ml_cfg["warmup_samples"] = int(
+            ml_cfg.get("warmup_samples", _ML_DEFAULTS["warmup_samples"])
+        )
+    except (TypeError, ValueError):  # pragma: no cover - configuration sanitation
+        raise ValueError("ML configuration 'warmup_samples' must be an integer")
 
     normalised["ml"] = ml_cfg
 

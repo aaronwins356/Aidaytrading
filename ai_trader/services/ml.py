@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
 
 try:  # pragma: no cover - import guard for optional forest backend
     from river import forest
+
     _FOREST_AVAILABLE = hasattr(forest, "ARFClassifier")
 except ImportError:  # pragma: no cover - river build without forest module
     forest = None  # type: ignore[assignment]
@@ -110,6 +111,7 @@ class MLService:
         ensemble: bool = True,
         forest_size: int = 15,
         random_state: int = 7,
+        warmup_samples: int = 25,
     ) -> None:
         self._db_path = db_path
         self._feature_keys = list(feature_keys)
@@ -127,6 +129,9 @@ class MLService:
         self._models: Dict[str, _ModelBundle] = {}
         self._latest_features: Dict[str, Dict[str, float]] = {}
         self._latest_confidence: Dict[Tuple[str, str], float] = {}
+        self._label_counts: Dict[str, int] = {}
+        self._warmup_target = max(1, int(warmup_samples))
+        self._warmup_logged: Dict[str, bool] = {}
         if self._ensemble_requested and not self._use_ensemble:
             self._logger.warning(
                 "ML ensemble requested but river.forest.ARFClassifier is unavailable. Falling back to logistic regression only."
@@ -136,6 +141,7 @@ class MLService:
                 "River installation lacks 'forest.ARFClassifier'; ensemble disabled."
             )
         self._init_db()
+        self._bootstrap_warmup_counts()
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -199,21 +205,30 @@ class MLService:
         logistic = linear_model.LogisticRegression(optimizer=optimizer, l2=self._regularization)
         return compose.Pipeline(preprocessing.StandardScaler(), logistic)
 
-    def _build_forest(self) -> Any:
-        if not _FOREST_AVAILABLE:
-            raise RuntimeError("river.forest.ARFClassifier is unavailable in this environment")
-        return forest.ARFClassifier(
-            n_models=self._forest_size,
-            max_features="sqrt",
-            seed=self._random_state,
-        )
+    def _build_forest(self) -> Optional[Any]:
+        if not _FOREST_AVAILABLE or not self._ensemble_requested:
+            return None
+        try:
+            return forest.ARFClassifier(
+                n_models=self._forest_size,
+                max_features="sqrt",
+                seed=self._random_state,
+            )
+        except Exception as exc:  # pragma: no cover - gracefully degrade ensemble
+            self._logger.warning(
+                "Failed to initialise forest ensemble – falling back to logistic regression only: %s",
+                exc,
+            )
+            self._use_ensemble = False
+            self._forest_backend = "disabled"
+            return None
 
     def _load_model(self, symbol: str) -> _ModelBundle:
         if symbol in self._models:
             return self._models[symbol]
 
         pipeline = self._build_pipeline()
-        forest = self._build_forest() if self._use_ensemble else None
+        forest_model = self._build_forest() if self._use_ensemble else None
 
         with self._connect() as conn:
             row = conn.execute(
@@ -228,18 +243,20 @@ class MLService:
                 pipeline = self._build_pipeline()
         if row and row["forest"] and self._use_ensemble:
             try:
-                forest = pickle.loads(row["forest"])
+                forest_model = pickle.loads(row["forest"])
             except Exception as exc:  # noqa: BLE001 - fallback to fresh model
                 self._logger.warning("Failed to load forest model for %s: %s", symbol, exc)
-                forest = self._build_forest()
+                forest_model = self._build_forest()
 
-        bundle = _ModelBundle(pipeline=pipeline, forest=forest)
+        bundle = _ModelBundle(pipeline=pipeline, forest=forest_model)
         self._models[symbol] = bundle
         return bundle
 
     def _persist_model(self, symbol: str, bundle: _ModelBundle) -> None:
         logistic_blob = pickle.dumps(bundle.pipeline)
-        forest_blob = pickle.dumps(bundle.forest) if bundle.forest is not None else None
+        forest_blob = (
+            pickle.dumps(bundle.forest) if bundle.forest is not None and self._use_ensemble else None
+        )
         metadata = json.dumps(
             {"ensemble": self._use_ensemble, "backend": self._forest_backend}
         )
@@ -263,6 +280,24 @@ class MLService:
                 ),
             )
             conn.commit()
+
+    def _bootstrap_warmup_counts(self) -> None:
+        """Seed warm-up counters from existing labelled feature history."""
+
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT symbol, COUNT(1) as labelled FROM market_features WHERE label IS NOT NULL GROUP BY symbol"
+                ).fetchall()
+        except sqlite3.Error as exc:  # pragma: no cover - defensive startup
+            self._logger.warning("Unable to bootstrap ML warm-up counts: %s", exc)
+            return
+        for row in rows:
+            symbol = str(row["symbol"])
+            count = int(row["labelled"])
+            self._label_counts[symbol] = count
+            if self.is_warmed_up(symbol):
+                self._warmup_logged[symbol] = True
 
     # ------------------------------------------------------------------
     # Public API
@@ -334,6 +369,7 @@ class MLService:
         model = self._load_model(symbol)
 
         probability = model.predict_proba(cleaned)
+        probability = self._apply_confidence_floor(symbol, probability)
         learner_name = (
             "forest+logistic"
             if self._use_ensemble and model.forest is not None
@@ -347,20 +383,35 @@ class MLService:
             )
         else:
             model.learn(cleaned, int(label))
+            self._label_counts[symbol] = self._label_counts.get(symbol, 0) + 1
+            if self.is_warmed_up(symbol) and not self._warmup_logged.get(symbol):
+                self._logger.info(
+                    "[ML] %s warm-up complete after %d labelled samples",
+                    symbol,
+                    self._label_counts[symbol],
+                )
+                self._warmup_logged[symbol] = True
             probability = model.predict_proba(cleaned)
+            probability = self._apply_confidence_floor(symbol, probability)
             if persist:
                 self._persist_model(symbol, model)
 
         decision = int(probability >= self._threshold)
         self._latest_confidence[("researcher", symbol)] = probability
         top_features = model.top_features()
+        warmup_progress = self.warmup_progress(symbol)
+        warmed_up = self.is_warmed_up(symbol)
         self._logger.info(
-            "[ML] %s confidence=%.3f decision=%d via %s features=%s",
+            "[ML] %s confidence=%.3f threshold=%.2f decision=%d via %s features=%s warmup=%d/%d%s",
             symbol,
             probability,
+            self._threshold,
             decision,
             learner_name,
             ",".join(top_features) if top_features else "-",
+            warmup_progress[0],
+            warmup_progress[1],
+            " (ready)" if warmed_up else "",
         )
         self._record_prediction(
             symbol=symbol,
@@ -392,6 +443,7 @@ class MLService:
 
         cleaned = self._sanitize_features(feature_payload)
         probability = model.predict_proba(cleaned)
+        probability = self._apply_confidence_floor(symbol, probability)
         gate = threshold if threshold is not None else self._threshold
         decision = probability >= gate
         worker_name = worker or "worker"
@@ -403,13 +455,19 @@ class MLService:
             else "logistic"
         )
         top_features = bundle.top_features()
+        warmup_progress = self.warmup_progress(symbol)
+        warmed_up = self.is_warmed_up(symbol)
         self._logger.info(
-            "[ML] %s confidence=%.3f decision=%d via %s features=%s",
+            "[ML] %s confidence=%.3f threshold=%.2f decision=%d via %s features=%s warmup=%d/%d%s",
             symbol,
             probability,
+            gate,
             int(decision),
             learner_name,
             ",".join(top_features) if top_features else "-",
+            warmup_progress[0],
+            warmup_progress[1],
+            " (ready)" if warmed_up else "",
         )
         self._record_prediction(
             symbol=symbol,
@@ -431,6 +489,16 @@ class MLService:
         """Return the last seen feature vector for a symbol."""
 
         return self._latest_features.get(symbol)
+
+    def warmup_progress(self, symbol: str) -> Tuple[int, int]:
+        """Return (label_count, required_count) for dashboard insights."""
+
+        return self._label_counts.get(symbol, 0), self._warmup_target
+
+    def is_warmed_up(self, symbol: str) -> bool:
+        """Return True once the symbol has seen enough labelled samples."""
+
+        return self._label_counts.get(symbol, 0) >= self._warmup_target
 
     def feature_importance(self, symbol: str, top_n: int = 10) -> Dict[str, float]:
         """Return the top-N absolute weighted features for the symbol."""
@@ -504,7 +572,10 @@ class MLService:
                 "warmup": max(0, warmup),
             }
 
-        test_model = _ModelBundle(pipeline=self._build_pipeline(), forest=self._build_forest() if self._use_ensemble else None)
+        test_model = _ModelBundle(
+            pipeline=self._build_pipeline(),
+            forest=self._build_forest() if self._use_ensemble else None,
+        )
         gate = threshold if threshold is not None else self._threshold
 
         stats = _ClassificationStats()
@@ -522,7 +593,8 @@ class MLService:
                 continue
 
             proba = test_model.predict_proba(features)
-            probabilities.append(float(proba))
+            proba = float(max(0.0, min(1.0, proba)))
+            probabilities.append(proba)
             prediction = int(proba >= gate)
             stats.update(prediction=prediction, label=label)
             test_model.learn(features, label)
@@ -573,6 +645,23 @@ class MLService:
                 value = 0.0
             sanitized[key] = value
         return sanitized
+
+    def _apply_confidence_floor(self, symbol: str, probability: float) -> float:
+        """Clamp probabilities away from hard zero/one once warmed up."""
+
+        bounded = float(max(0.0, min(1.0, probability)))
+        if self.is_warmed_up(symbol):
+            epsilon = 1e-6
+            if bounded <= 0.0:
+                self._logger.debug(
+                    "[ML] %s confidence adjusted from %.6f to epsilon floor after warmup",
+                    symbol,
+                    probability,
+                )
+                bounded = epsilon
+            elif bounded >= 1.0:
+                bounded = 1.0 - epsilon
+        return bounded
 
     def _record_prediction(
         self,
