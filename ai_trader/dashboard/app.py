@@ -19,12 +19,16 @@ PROJECT_ROOT = BASE_DIR.parent
 
 try:
     from ai_trader.services.configuration import normalize_config, read_config_file
+    from ai_trader.services.logging import get_logger
     from ai_trader.services.ml import MLService
+    from ai_trader.services.schema import ALL_TABLES
 except ModuleNotFoundError:  # pragma: no cover - fallback for direct script execution
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.append(str(PROJECT_ROOT))
     from ai_trader.services.configuration import normalize_config, read_config_file
+    from ai_trader.services.logging import get_logger
     from ai_trader.services.ml import MLService
+    from ai_trader.services.schema import ALL_TABLES
 
 if not st.session_state.get("_page_configured", False):
     st.set_page_config(page_title="AI Trader Control Center", layout="wide", page_icon="🧠")
@@ -76,6 +80,8 @@ section.main > div {
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
+LOGGER = get_logger(__name__)
+
 
 def _auto_refresh_script(interval_seconds: int) -> None:
     st.markdown(
@@ -102,6 +108,7 @@ def save_config(config: Dict) -> None:
 
 @st.cache_resource
 def init_ml_service(config: Dict) -> MLService:
+    ensure_database_schema()
     ml_cfg = config.get("ml", {})
     feature_keys = ml_cfg.get(
         "feature_keys",
@@ -144,6 +151,30 @@ def init_ml_service(config: Dict) -> MLService:
         warmup_samples=int(ml_cfg.get("warmup_samples", 25)),
         confidence_stall_limit=int(ml_cfg.get("confidence_stall_limit", 5)),
     )
+
+
+@st.cache_resource
+def ensure_database_schema() -> Path:
+    """Create any missing SQLite tables before the dashboard queries data."""
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    missing: List[str] = []
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing = {row[0] for row in cursor.fetchall()}
+            missing = [name for name in ALL_TABLES if name not in existing]
+            for table_name in missing:
+                # Ensures first-run experiences don't crash when tables are absent.
+                connection.execute(ALL_TABLES[table_name])
+            connection.commit()
+    except sqlite3.Error as exc:  # pragma: no cover - defensive guard for UI usage
+        LOGGER.exception("Failed to initialise SQLite schema: %s", exc)
+        st.error("Failed to initialise the SQLite database. Check application logs for details.")
+        raise RuntimeError("SQLite schema initialisation failed") from exc
+    if missing:
+        LOGGER.info("Created missing SQLite tables: %s", ", ".join(sorted(missing)))
+    return DB_PATH
 
 
 @st.cache_data(ttl=5)
