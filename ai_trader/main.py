@@ -43,6 +43,13 @@ def _validate_startup(
 
     logger = get_logger(__name__)
 
+    researcher_cfg = config.get("researcher", {})
+    if not bool(researcher_cfg.get("enabled", False)):
+        logger.error(
+            "Researcher worker must remain enabled when ML services are active."
+        )
+        raise SystemExit(1)
+
     ml_workers = [
         worker
         for worker in workers
@@ -65,6 +72,20 @@ def _validate_startup(
             )
 
     _ensure_sqlite_schema(logger)
+
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            exists = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='market_features'"
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.error("Failed to verify market_features table: %s", exc)
+        raise SystemExit(1) from exc
+    if exists is None:
+        logger.error(
+            "Required SQLite table 'market_features' is missing. Run initialisation before starting the bot."
+        )
+        raise SystemExit(1)
 
     trading_cfg = config.get("trading", {})
     trading_mode = str(trading_cfg.get("mode", "paper")).lower()
@@ -99,11 +120,20 @@ def _validate_startup(
                 "Market feature store is empty. Allow the researcher to warm up before expecting ML-driven trades."
             )
 
+    try:
+        ml_service._build_pipeline()
+        if ml_service.ensemble_requested and ml_service.ensemble_available:
+            ml_service._build_forest()
+    except Exception as exc:  # noqa: BLE001 - defensive initialisation guard
+        logger.exception("Failed to initialise ML pipeline: %s", exc)
+        raise SystemExit(1) from exc
+
     if ml_service.ensemble_requested and not ml_service.ensemble_available:
-        logger.warning(
-            "Adaptive forest ensemble requested but unavailable. Logistic regression path remains active."
-        )
-    elif ml_service.ensemble_available:
+        logger.warning("❌ ML fallback: logistic only")
+    else:
+        logger.info("✅ ML initialized successfully")
+
+    if ml_service.ensemble_available:
         logger.info("River ensemble backend detected: %s", ml_service.ensemble_backend)
 
     logger.info("✅ Startup validation passed")

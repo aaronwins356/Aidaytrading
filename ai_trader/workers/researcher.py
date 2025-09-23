@@ -38,6 +38,7 @@ class MarketResearchWorker(BaseWorker):
         self.ohlc_window = max(5, int(cfg.get("ohlc_window", 20)))
         self.atr_window = max(5, int(cfg.get("atr_window", 14)))
         self._snapshot_counter = 0
+        self._forest_warning_emitted = False
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
         # Researcher does not emit trade signals but we keep interface parity.
@@ -83,12 +84,31 @@ class MarketResearchWorker(BaseWorker):
                 "label": label,
             }
             self._trade_log.record_market_features(payload)
-            confidence = self._ml_service.update(
-                symbol,
-                features,
-                label=label,
-                timestamp=snapshot.timestamp,
-            )
+            if (
+                self._ml_service.ensemble_requested
+                and not self._ml_service.ensemble_available
+                and not self._forest_warning_emitted
+            ):
+                self._logger.warning(
+                    "Forest ensemble unavailable for %s – continuing with logistic regression only.",
+                    symbol,
+                )
+                self._forest_warning_emitted = True
+            confidence = 0.0
+            try:
+                confidence = self._ml_service.update(
+                    symbol,
+                    features,
+                    label=label,
+                    timestamp=snapshot.timestamp,
+                )
+            except Exception as exc:  # noqa: BLE001 - keep researcher resilient
+                self._logger.exception(
+                    "Failed to update ML service for %s – researcher will continue capturing features: %s",
+                    symbol,
+                    exc,
+                )
+                continue
             self._logger.info(
                 "Snapshot saved for %s | label=%.0f features=%d confidence=%.4f",
                 symbol,
@@ -162,9 +182,9 @@ class MarketResearchWorker(BaseWorker):
         features["close_to_low"] = (latest_close - float(last_candle.get("low", 0.0))) / latest_close if latest_close else 0.0
         return features
 
-    def _derive_label(self, candles: List[dict[str, float]]) -> float:
+    def _derive_label(self, candles: List[dict[str, float]]) -> Optional[float]:
         if len(candles) < 2:
-            return 0.0
+            return None
         prev_close = float(candles[-2].get("close", 0.0))
         latest_close = float(candles[-1].get("close", 0.0))
         # A label of ``1`` indicates a downward move, aligning with the short bias
