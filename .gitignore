@@ -1,0 +1,8 @@
+# Python environments and bytecode
+.venv/
+__pycache__/
+*.pyc
+
+# Local data artifacts
+ai_trader/data/*.db
+ai_trader/data/*.sqlite

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from ai_trader.services.ml import MLService
+    from ai_trader.services.trade_log import TradeLog
 
 from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
 from ai_trader.workers.base import BaseWorker
@@ -26,8 +27,14 @@ class MomentumWorker(BaseWorker):
         fast_window: int = 9,
         slow_window: int = 26,
         ml_service: "MLService" | None = None,
+        trade_log: "TradeLog" | None = None,
     ) -> None:
-        super().__init__(symbols=symbols, lookback=max(fast_window, slow_window) * 3, ml_service=ml_service)
+        super().__init__(
+            symbols=symbols,
+            lookback=max(fast_window, slow_window) * 3,
+            ml_service=ml_service,
+            trade_log=trade_log,
+        )
         self.fast_window = fast_window
         self.slow_window = slow_window
 
@@ -78,11 +85,17 @@ class MomentumWorker(BaseWorker):
                 cash_spent=cash,
                 entry_price=price,
                 confidence=confidence,
+                metadata={"signal": signal, "price": price},
             )
 
         if signal == "sell" and existing_position and existing_position.side == "buy":
             pnl = (price - existing_position.entry_price) * existing_position.quantity
             pnl_percent = pnl / existing_position.cash_spent * 100 if existing_position.cash_spent else 0.0
+            self.record_trade_event(
+                "close_momentum_short",
+                symbol,
+                {"pnl": pnl, "pnl_percent": pnl_percent},
+            )
             return TradeIntent(
                 worker=self.name,
                 action="CLOSE",
@@ -94,11 +107,18 @@ class MomentumWorker(BaseWorker):
                 pnl_percent=pnl_percent,
                 pnl_usd=pnl,
                 win_loss="win" if pnl > 0 else "loss",
+                reason="bear-cross",
+                metadata={"signal": signal, "pnl": pnl, "pnl_percent": pnl_percent},
             )
 
         if signal == "buy" and existing_position and existing_position.side == "sell":
             pnl = (existing_position.entry_price - price) * existing_position.quantity
             pnl_percent = pnl / existing_position.cash_spent * 100 if existing_position.cash_spent else 0.0
+            self.record_trade_event(
+                "close_momentum_cover",
+                symbol,
+                {"pnl": pnl, "pnl_percent": pnl_percent},
+            )
             return TradeIntent(
                 worker=self.name,
                 action="CLOSE",
@@ -110,6 +130,8 @@ class MomentumWorker(BaseWorker):
                 pnl_percent=pnl_percent,
                 pnl_usd=pnl,
                 win_loss="win" if pnl > 0 else "loss",
+                reason="bull-cover",
+                metadata={"signal": signal, "pnl": pnl, "pnl_percent": pnl_percent},
             )
 
         return None

@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal, ROUND_DOWN
-from typing import Dict, Optional, Tuple
+import random
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import ccxt
+from ccxt.base.errors import (
+    DDoSProtection,
+    ExchangeNotAvailable,
+    NetworkError,
+    RateLimitExceeded,
+    RequestTimeout,
+)
 
 from ai_trader.services.logging import get_logger
 
@@ -37,6 +45,8 @@ class KrakenClient:
         })
         self._markets: Dict[str, dict] = {}
         self._starting_equity = paper_starting_equity
+        self._max_retries = 5
+        self._backoff_factor = 1.5
 
     @property
     def starting_equity(self) -> float:
@@ -47,19 +57,26 @@ class KrakenClient:
         return self._paper_trading
 
     async def load_markets(self) -> None:
-        self._markets = await asyncio.to_thread(self._exchange.load_markets)
+        markets = await self._with_retries(
+            self._exchange.load_markets, description="load_markets"
+        )
+        self._markets = markets or {}
 
     async def fetch_price(self, symbol: str) -> Optional[float]:
-        ticker = await asyncio.to_thread(self._exchange.fetch_ticker, symbol)
-        await asyncio.sleep(self._rest_rate_limit)
+        ticker = await self._with_retries(
+            self._exchange.fetch_ticker,
+            symbol,
+            description=f"fetch_ticker:{symbol}",
+        )
         price = ticker.get("last") or ticker.get("close")
         return float(price) if price else None
 
     async def fetch_balances(self) -> Dict[str, float]:
         if self._paper_trading:
             return dict(self._paper_balances)
-        balance = await asyncio.to_thread(self._exchange.fetch_balance)
-        await asyncio.sleep(self._rest_rate_limit)
+        balance = await self._with_retries(
+            self._exchange.fetch_balance, description="fetch_balance"
+        )
         total = balance.get("total", {})
         return {currency: float(amount) for currency, amount in total.items() if amount}
 
@@ -85,7 +102,7 @@ class KrakenClient:
             return price, amount
 
         try:
-            order = await asyncio.to_thread(
+            order = await self._with_retries(
                 self._exchange.create_order,
                 symbol,
                 "market",
@@ -93,11 +110,11 @@ class KrakenClient:
                 amount,
                 None,
                 {"reduce_only": side == "sell"},
+                description=f"create_order:{symbol}",
             )
         except ccxt.BaseError as exc:  # pragma: no cover - network/broker failures
             self._logger.warning("Kraken rejected order for %s: %s", symbol, exc)
             raise RuntimeError(str(exc)) from exc
-        await asyncio.sleep(self._rest_rate_limit)
         filled = order.get("amount", amount)
         avg_price = order.get("average") or price
         return float(avg_price), float(filled)
@@ -113,7 +130,7 @@ class KrakenClient:
             return price, amount
 
         try:
-            order = await asyncio.to_thread(
+            order = await self._with_retries(
                 self._exchange.create_order,
                 symbol,
                 "market",
@@ -121,11 +138,11 @@ class KrakenClient:
                 amount,
                 None,
                 {"reduce_only": True},
+                description=f"close_order:{symbol}",
             )
         except ccxt.BaseError as exc:  # pragma: no cover - network/broker failures
             self._logger.warning("Kraken rejected close order for %s: %s", symbol, exc)
             raise RuntimeError(str(exc)) from exc
-        await asyncio.sleep(self._rest_rate_limit)
         filled = order.get("amount", amount)
         avg_price = order.get("average") or order.get("price")
         if avg_price is None:
@@ -184,3 +201,72 @@ class KrakenClient:
     async def ensure_market(self, symbol: str) -> None:
         if symbol not in self._markets:
             await self.load_markets()
+
+    async def _with_retries(
+        self,
+        func: Callable[..., Any],
+        *args: object,
+        description: str,
+        **kwargs: object,
+    ) -> Any:
+        """Execute a blocking ccxt call with retry and exponential backoff."""
+
+        delay = max(self._rest_rate_limit, 0.2)
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                result = await asyncio.to_thread(func, *args, **kwargs)
+                await asyncio.sleep(self._rest_rate_limit)
+                return result
+            except ccxt.BaseError as exc:  # pragma: no cover - network/broker failures
+                if not self._should_retry(exc) or attempt == self._max_retries:
+                    self._logger.error(
+                        "Kraken %s failed after %d attempts: %s",
+                        description,
+                        attempt,
+                        exc,
+                    )
+                    raise
+                sleep_for = self._backoff_delay(delay, attempt)
+                self._logger.warning(
+                    "Kraken %s retry %d/%d in %.2fs due to %s",
+                    description,
+                    attempt,
+                    self._max_retries,
+                    sleep_for,
+                    exc,
+                )
+                await asyncio.sleep(sleep_for)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                if attempt == self._max_retries:
+                    self._logger.error(
+                        "Unexpected error calling %s after %d attempts: %s",
+                        description,
+                        attempt,
+                        exc,
+                    )
+                    raise
+                sleep_for = self._backoff_delay(delay, attempt)
+                self._logger.warning(
+                    "Unexpected %s failure (%s). Retrying in %.2fs (%d/%d)",
+                    description,
+                    exc,
+                    sleep_for,
+                    attempt,
+                    self._max_retries,
+                )
+                await asyncio.sleep(sleep_for)
+
+    def _should_retry(self, exc: Exception) -> bool:
+        retryable = (
+            NetworkError,
+            DDoSProtection,
+            RateLimitExceeded,
+            RequestTimeout,
+            ExchangeNotAvailable,
+        )
+        return isinstance(exc, retryable)
+
+    def _backoff_delay(self, base_delay: float, attempt: int) -> float:
+        exponent = self._backoff_factor ** (attempt - 1)
+        jitter = random.uniform(0, base_delay)
+        return min(20.0, base_delay * exponent + jitter)

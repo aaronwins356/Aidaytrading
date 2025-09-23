@@ -347,6 +347,7 @@ async def start_bot() -> None:
         ensemble=bool(ml_cfg.get("ensemble", True)),
         forest_size=int(ml_cfg.get("forest_size", 10)),
         random_state=int(ml_cfg.get("random_state", 7)),
+        warmup_target=int(ml_cfg.get("warmup_target", 200)),
         warmup_samples=int(ml_cfg.get("warmup_samples", 25)),
     )
     equity_engine = EquityEngine(trade_log, broker.starting_equity)

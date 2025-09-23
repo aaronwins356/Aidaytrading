@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from ai_trader.services.ml import MLService
+    from ai_trader.services.trade_log import TradeLog
 
 from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
 from ai_trader.workers.base import BaseWorker
@@ -27,11 +28,19 @@ class ShortMomentumWorker(BaseWorker):
         config: Optional[Dict] = None,
         risk_config: Optional[Dict] = None,
         ml_service: "MLService" | None = None,
+        trade_log: "TradeLog" | None = None,
     ) -> None:
         self.fast_window = int((config or {}).get("fast_window", 12))
         self.slow_window = int((config or {}).get("slow_window", 48))
         lookback = max(self.slow_window * 3, int((config or {}).get("lookback", self.slow_window * 3)))
-        super().__init__(symbols=symbols, lookback=lookback, config=config, risk_config=risk_config, ml_service=ml_service)
+        super().__init__(
+            symbols=symbols,
+            lookback=lookback,
+            config=config,
+            risk_config=risk_config,
+            ml_service=ml_service,
+            trade_log=trade_log,
+        )
         self.momentum_threshold = float((config or {}).get("momentum_threshold", 0.004))
         self._position_tracker: Dict[str, Dict[str, float]] = {}
 
@@ -129,6 +138,12 @@ class ShortMomentumWorker(BaseWorker):
             tracker["stop_price"] = price * (1 + self.stop_loss_pct / 100) if self.stop_loss_pct else None
             tracker["target_price"] = price * (1 - self.take_profit_pct / 100) if self.take_profit_pct else None
             tracker["trailing"] = price * (1 + self.trailing_stop_pct / 100) if self.trailing_stop_pct else None
+            metadata = {
+                "stop_price": tracker.get("stop_price"),
+                "target_price": tracker.get("target_price"),
+                "trailing_price": tracker.get("trailing"),
+            }
+            self.record_trade_event("open_signal", symbol, metadata)
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
@@ -137,12 +152,25 @@ class ShortMomentumWorker(BaseWorker):
                 cash_spent=cash * self.leverage,
                 entry_price=price,
                 confidence=ml_confidence or min(1.0, max(0.0, abs(tracker.get("stop_price", price) - price) / price)),
+                metadata=metadata,
             )
 
         # Position management for an open short.
-        tracker["best_price"] = min(tracker.get("best_price", price), price)
+        previous_best = tracker.get("best_price", price)
+        tracker["best_price"] = min(previous_best, price)
         if self.trailing_stop_pct:
+            prior_trailing = tracker.get("trailing")
             tracker["trailing"] = tracker["best_price"] * (1 + self.trailing_stop_pct / 100)
+            if tracker["trailing"] and tracker["trailing"] != prior_trailing:
+                self.record_trade_event(
+                    "trailing_update",
+                    symbol,
+                    {
+                        "previous_trailing": prior_trailing,
+                        "new_trailing": tracker["trailing"],
+                        "best_price": tracker["best_price"],
+                    },
+                )
 
         stop_price = (
             existing_position.entry_price * (1 + self.stop_loss_pct / 100)
@@ -174,6 +202,14 @@ class ShortMomentumWorker(BaseWorker):
         if close_signal:
             tracker["best_price"] = price
             self.update_signal_state(symbol, f"close:{reason}")
+            metadata = {
+                "stop_price": stop_price,
+                "target_price": target_price,
+                "trailing_price": trailing_price,
+                "trigger": reason,
+            }
+            if reason in {"stop", "target", "trail"}:
+                self.record_trade_event(f"risk_{reason}", symbol, metadata)
             return TradeIntent(
                 worker=self.name,
                 action="CLOSE",
@@ -183,6 +219,8 @@ class ShortMomentumWorker(BaseWorker):
                 entry_price=existing_position.entry_price,
                 exit_price=price,
                 confidence=0.7,
+                reason=reason,
+                metadata=metadata,
             )
 
         return None

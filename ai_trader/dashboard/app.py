@@ -26,7 +26,9 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for direct script exe
     from ai_trader.services.configuration import normalize_config, read_config_file
     from ai_trader.services.ml import MLService
 
-st.set_page_config(page_title="AI Trader Control Center", layout="wide", page_icon="🧠")
+if not st.session_state.get("_page_configured", False):
+    st.set_page_config(page_title="AI Trader Control Center", layout="wide", page_icon="🧠")
+    st.session_state["_page_configured"] = True
 
 DB_PATH = BASE_DIR / "data" / "trades.db"
 CONFIG_PATH = BASE_DIR / "config.yaml"
@@ -138,6 +140,7 @@ def init_ml_service(config: Dict) -> MLService:
         ensemble=bool(ml_cfg.get("ensemble", True)),
         forest_size=int(ml_cfg.get("forest_size", 10)),
         random_state=int(ml_cfg.get("random_state", 7)),
+        warmup_target=int(ml_cfg.get("warmup_target", 200)),
         warmup_samples=int(ml_cfg.get("warmup_samples", 25)),
     )
 
@@ -161,10 +164,18 @@ def load_trades() -> pd.DataFrame:
         )
     with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql_query(
-            "SELECT timestamp, worker, symbol, side, cash_spent, entry_price, exit_price, pnl_percent, pnl_usd, win_loss FROM trades ORDER BY timestamp DESC",
+            """
+            SELECT timestamp, worker, symbol, side, cash_spent, entry_price, exit_price,
+                   pnl_percent, pnl_usd, win_loss, reason, metadata_json
+            FROM trades
+            ORDER BY timestamp DESC
+            """,
             conn,
         )
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    if "metadata_json" in df.columns:
+        df["metadata"] = df["metadata_json"].apply(lambda value: json.loads(value or "{}"))
+        df.drop(columns=["metadata_json"], inplace=True)
     return df
 
 
@@ -194,6 +205,7 @@ def load_bot_states() -> pd.DataFrame:
     for row in rows:
         indicators = json.loads(row["indicators_json"] or "{}")
         risk = json.loads(row["risk_json"] or "{}")
+        ml_warmup = indicators.pop("ml_warming_up", None)
         records.append(
             {
                 "worker": row["worker"],
@@ -203,6 +215,7 @@ def load_bot_states() -> pd.DataFrame:
                 "indicators": indicators,
                 "risk": risk,
                 "updated_at": pd.to_datetime(row["updated_at"], utc=True),
+                "ml_warming_up": ml_warmup,
             }
         )
     return pd.DataFrame(records)
@@ -229,6 +242,27 @@ def set_control_flag(key: str, value: str) -> None:
         )
         conn.commit()
     load_bot_states.clear()
+
+
+@st.cache_data(ttl=5)
+def load_trade_events(limit: int = 200) -> pd.DataFrame:
+    if not DB_PATH.exists():
+        return pd.DataFrame(columns=["timestamp", "worker", "symbol", "event", "details"])
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT timestamp, worker, symbol, event, details_json
+            FROM trade_events
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            conn,
+            params=(int(limit),),
+        )
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df["details"] = df["details_json"].apply(lambda payload: json.loads(payload or "{}"))
+    df.drop(columns=["details_json"], inplace=True)
+    return df
 
 
 @st.cache_data(ttl=5)
@@ -367,6 +401,70 @@ def render_equity_curve(equity_df: pd.DataFrame) -> None:
     )
     fig.update_layout(template="plotly_dark", height=320, margin=dict(l=20, r=20, t=40, b=40))
     st.plotly_chart(fig, use_container_width=True)
+
+
+def render_runtime_status(config: Dict, bot_states: pd.DataFrame, ml_service: MLService) -> None:
+    st.subheader("Runtime Status")
+    trading_mode = str(config.get("trading", {}).get("mode", "paper")).lower()
+    mode_label = "Live Trading" if trading_mode == "live" else "Paper Trading"
+    badge = "🟢" if trading_mode == "live" else "🧪"
+    st.markdown(f"**Mode:** {badge} {mode_label}")
+
+    symbols = config.get("trading", {}).get("symbols", [])
+    if symbols:
+        cols = st.columns(min(3, len(symbols)))
+        for idx, symbol in enumerate(symbols):
+            progress = ml_service.warmup_progress(symbol)
+            text = f"{symbol}: {progress * 100:.0f}%" if progress < 1 else f"{symbol}: ready"
+            cols[idx % len(cols)].progress(progress, text)
+    else:
+        st.caption("No trading symbols configured.")
+
+    if not bot_states.empty:
+        warming = bot_states[bot_states["ml_warming_up"].notnull()]
+        if not warming.empty:
+            warming_workers = warming[warming["ml_warming_up"] == True]  # noqa: E712
+            if not warming_workers.empty:
+                st.info(
+                    "ML gating is still warming up for: "
+                    + ", ".join(
+                        sorted(
+                            {
+                                f"{row.worker} {row.symbol}"
+                                for row in warming_workers.itertuples()
+                            }
+                        )
+                    )
+                )
+
+
+def render_signal_monitor(bot_states: pd.DataFrame) -> None:
+    st.subheader("Signal Monitor")
+    if bot_states.empty:
+        st.info("Signals will populate once workers publish state.")
+        return
+    rows: List[Dict[str, object]] = []
+    for row in bot_states.sort_values("updated_at", ascending=False).itertuples():
+        indicators: Dict[str, object] = row.indicators or {}
+        confidence = indicators.get("ml_confidence")
+        warmup_state = getattr(row, "ml_warming_up", None)
+        if warmup_state is None:
+            warmup_label = "n/a"
+        else:
+            warmup_label = "warming" if warmup_state else "ready"
+        rows.append(
+            {
+                "Worker": row.worker,
+                "Symbol": row.symbol,
+                "Status": row.status or "unknown",
+                "Last Signal": row.last_signal or "–",
+                "ML Confidence": round(float(confidence), 3) if isinstance(confidence, (int, float)) else None,
+                "ML Warmup": warmup_label,
+                "Updated": row.updated_at.strftime("%H:%M:%S"),
+            }
+        )
+    signal_df = pd.DataFrame(rows)
+    st.dataframe(signal_df, use_container_width=True)
 
 
 def render_bot_cards(config: Dict, bot_states: pd.DataFrame, ml_service: MLService) -> None:
@@ -550,15 +648,38 @@ def render_ml_debug_panel(config: Dict, ml_service: MLService, bot_states: pd.Da
                     st.caption("Workers have not published state yet; confidence history unavailable.")
 
 
-def render_trade_logs(trades: pd.DataFrame) -> None:
+def render_trade_logs(trades: pd.DataFrame, events: pd.DataFrame) -> None:
     st.subheader("Trade Logs")
-    if trades.empty:
-        st.info("Trades will appear once execution begins.")
-        return
-    workers = ["All"] + sorted(trades["worker"].unique())
-    selected_worker = st.selectbox("Filter by strategy", workers)
-    filtered = trades if selected_worker == "All" else trades[trades["worker"] == selected_worker]
-    st.dataframe(filtered, use_container_width=True)
+    tab_exec, tab_events = st.tabs(["Executions", "Events"])
+
+    with tab_exec:
+        if trades.empty:
+            st.info("Trades will appear once execution begins.")
+        else:
+            workers = ["All"] + sorted(trades["worker"].unique())
+            selected_worker = st.selectbox("Filter by strategy", workers)
+            filtered = trades if selected_worker == "All" else trades[trades["worker"] == selected_worker]
+            display_cols = [
+                "timestamp",
+                "worker",
+                "symbol",
+                "side",
+                "reason",
+                "cash_spent",
+                "entry_price",
+                "exit_price",
+                "pnl_usd",
+                "pnl_percent",
+                "win_loss",
+            ]
+            present_cols = [col for col in display_cols if col in filtered.columns]
+            st.dataframe(filtered[present_cols], use_container_width=True)
+
+    with tab_events:
+        if events.empty:
+            st.info("Trade lifecycle events (stops, trailing updates) will appear here.")
+        else:
+            st.dataframe(events, use_container_width=True)
 
 
 def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> None:
@@ -788,13 +909,16 @@ def main() -> None:
     trades = load_trades()
     equity = load_equity_curve()
     account_snapshot = load_account_snapshot()
+    events = load_trade_events()
 
     render_account_overview(config, equity, trades, account_snapshot)
     render_equity_curve(equity)
+    render_runtime_status(config, bot_states, ml_service)
+    render_signal_monitor(bot_states)
     render_bot_cards(config, bot_states, ml_service)
     render_market_view(symbol, trades, ml_service)
     render_ml_debug_panel(config, ml_service, bot_states)
-    render_trade_logs(trades)
+    render_trade_logs(trades, events)
     render_risk_controls(config, ml_service, symbol)
 
 
