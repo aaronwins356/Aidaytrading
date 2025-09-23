@@ -12,7 +12,13 @@ TradeSide = Literal["buy", "sell"]
 
 @dataclass(slots=True)
 class TradeIntent:
-    """Structured intent returned by a worker."""
+    """Structured intent returned by a worker.
+
+    The broker integrations occasionally return numeric fields as strings, and
+    configuration files may also express numbers using quoted scalars. To avoid
+    subtle bugs when these values participate in arithmetic, we normalise the
+    core numeric attributes to floats immediately after initialisation.
+    """
 
     worker: str
     action: TradeAction
@@ -29,6 +35,19 @@ class TradeIntent:
     metadata: Optional[Dict[str, object]] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
 
+    def __post_init__(self) -> None:
+        """Coerce numeric fields to floats for safe downstream arithmetic."""
+
+        self.cash_spent = float(self.cash_spent)
+        self.entry_price = float(self.entry_price)
+        if self.exit_price is not None:
+            self.exit_price = float(self.exit_price)
+        if self.pnl_percent is not None:
+            self.pnl_percent = float(self.pnl_percent)
+        if self.pnl_usd is not None:
+            self.pnl_usd = float(self.pnl_usd)
+        self.confidence = float(self.confidence)
+
 
 @dataclass(slots=True)
 class OpenPosition:
@@ -41,6 +60,13 @@ class OpenPosition:
     entry_price: float
     cash_spent: float
     opened_at: datetime = field(default_factory=datetime.utcnow)
+
+    def __post_init__(self) -> None:
+        """Normalise numeric fields to floats for consistent arithmetic."""
+
+        self.quantity = float(self.quantity)
+        self.entry_price = float(self.entry_price)
+        self.cash_spent = float(self.cash_spent)
 
     def unrealized_pnl(self, last_price: float) -> float:
         """Return the unrealized profit/loss for the position."""

@@ -36,6 +36,7 @@ class EquityEngine:
     def update(self, equity: float, starting_equity: float | None = None) -> None:
         """Update metrics when a new equity value is available."""
 
+        equity = float(equity)
         if starting_equity is not None and starting_equity > 0.0:
             if self._starting_equity is None or not math.isclose(
                 self._starting_equity,
@@ -45,7 +46,7 @@ class EquityEngine:
             ):
                 self._starting_equity = float(starting_equity)
 
-        baseline = self._starting_equity
+        baseline = float(self._starting_equity) if self._starting_equity else None
         self._latest_equity = equity
         if baseline:
             pnl_usd = equity - baseline
