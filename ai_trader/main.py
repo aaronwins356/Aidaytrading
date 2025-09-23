@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sqlite3
 from logging import Logger
@@ -91,8 +92,10 @@ def _validate_startup(
     trading_mode = str(trading_cfg.get("mode", "paper")).lower()
     if trading_mode == "live":
         kraken_cfg = config.get("kraken", {})
-        api_key = str(kraken_cfg.get("api_key", "")).strip()
-        api_secret = str(kraken_cfg.get("api_secret", "")).strip()
+        api_key = os.getenv("KRAKEN_API_KEY", str(kraken_cfg.get("api_key", "")).strip())
+        api_secret = os.getenv(
+            "KRAKEN_API_SECRET", str(kraken_cfg.get("api_secret", "")).strip()
+        )
         missing_keys = [
             name
             for name, value in {"api_key": api_key, "api_secret": api_secret}.items()
@@ -129,9 +132,9 @@ def _validate_startup(
         raise SystemExit(1) from exc
 
     if ml_service.ensemble_requested and not ml_service.ensemble_available:
-        logger.warning("❌ ML fallback: logistic only")
+        logger.warning("⚠️ ML fallback active – logistic regression only")
     else:
-        logger.info("✅ ML initialized successfully")
+        logger.info("✅ ML ready (forest ensemble active)")
 
     if ml_service.ensemble_available:
         logger.info("River ensemble backend detected: %s", ml_service.ensemble_backend)
@@ -259,12 +262,17 @@ async def start_bot() -> None:
     risk_cfg = config.get("risk", {})
     worker_cfg = config.get("workers", {})
 
+    trading_mode = str(trading_cfg.get("mode", "paper")).lower()
+    live_trading = trading_mode == "live"
+
     broker = KrakenClient(
-        api_key=config.get("kraken", {}).get("api_key", ""),
-        api_secret=config.get("kraken", {}).get("api_secret", ""),
+        api_key=os.getenv("KRAKEN_API_KEY", config.get("kraken", {}).get("api_key", "")),
+        api_secret=os.getenv(
+            "KRAKEN_API_SECRET", config.get("kraken", {}).get("api_secret", "")
+        ),
         base_currency=trading_cfg.get("base_currency", "USD"),
         rest_rate_limit=float(config.get("kraken", {}).get("rest_rate_limit", 0.5)),
-        paper_trading=bool(trading_cfg.get("paper_trading", True)),
+        paper_trading=False if live_trading else bool(trading_cfg.get("paper_trading", True)),
         paper_starting_equity=float(trading_cfg.get("paper_starting_equity", 10000.0)),
         allow_shorting=bool(trading_cfg.get("allow_shorting", False)),
     )

@@ -1,7 +1,7 @@
 # Production-ready configuration for the AI trading stack
 kraken:
-  api_key: "YOUR_KRAKEN_API_KEY"
-  api_secret: "YOUR_KRAKEN_API_SECRET"
+  api_key: ""  # Populated from KRAKEN_API_KEY env var in production.
+  api_secret: ""  # Populated from KRAKEN_API_SECRET env var in production.
   rest_rate_limit: 0.5
 
 trading:
@@ -9,17 +9,17 @@ trading:
   symbols:
     - "BTC/USD"
     - "ETH/USD"
-  equity_allocation_percent: 6.0
-  max_open_positions: 4
+  equity_allocation_percent: 2.0
+  max_open_positions: 3
   paper_trading: true
   paper_starting_equity: 25000.0
   allow_shorting: true
-  mode: "paper"  # "paper" or "live". Switch via dashboard control then restart the bot.
+  mode: "paper"  # Toggle to "live" only after loading env credentials and restarting the bot.
 
 risk:
-  max_drawdown_percent: 22.0
-  daily_loss_limit_percent: 4.5
-  max_position_duration_minutes: 180
+  max_drawdown_percent: 12.0
+  daily_loss_limit_percent: 2.0
+  max_position_duration_minutes: 120
 
 ml:
   feature_keys:
@@ -69,11 +69,11 @@ workers:
         warmup_candles: 2
         ml_threshold: 0.35
       risk:
-        leverage: 2.0
-        position_size_pct: 110.0
-        stop_loss_pct: 1.4
-        take_profit_pct: 3.2
-        trailing_stop_pct: 1.0
+        leverage: 1.2
+        position_size_pct: 100.0
+        stop_loss_pct: 1.2
+        take_profit_pct: 2.5
+        trailing_stop_pct: 0.8
     short_mean_reversion:
       module: "ai_trader.workers.short_mean_reversion.ShortMeanReversionWorker"
       enabled: true
@@ -86,11 +86,11 @@ workers:
         ml_threshold: 0.32
         reversion_threshold: 0.0035
       risk:
-        leverage: 1.6
+        leverage: 1.1
         position_size_pct: 90.0
-        stop_loss_pct: 1.1
-        take_profit_pct: 2.4
-        trailing_stop_pct: 0.75
+        stop_loss_pct: 1.0
+        take_profit_pct: 2.2
+        trailing_stop_pct: 0.7
     ml_short:
       module: "ai_trader.workers.ml_short.MLShortWorker"
       enabled: true
@@ -103,11 +103,11 @@ workers:
         warmup_candles: 2
         ml_threshold: 0.35
       risk:
-        leverage: 1.8
+        leverage: 1.2
         position_size_pct: 100.0
-        stop_loss_pct: 1.2
-        take_profit_pct: 2.8
-        trailing_stop_pct: 0.9
+        stop_loss_pct: 1.1
+        take_profit_pct: 2.4
+        trailing_stop_pct: 0.8
 
 researcher:
   module: "ai_trader.workers.researcher.MarketResearchWorker"

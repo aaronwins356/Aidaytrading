@@ -171,6 +171,20 @@ class BaseWorker(ABC):
                 symbol,
             )
             return False, 0.0
-        gate = threshold if threshold is not None else self._ml_threshold_override or self._ml_service.default_threshold
-        decision, confidence = self._ml_service.predict(symbol, feature_payload, worker=self.name, threshold=gate)
+        gate = (
+            threshold
+            if threshold is not None
+            else self._ml_threshold_override or self._ml_service.default_threshold
+        )
+        decision, confidence = self._ml_service.predict(
+            symbol, feature_payload, worker=self.name, threshold=gate
+        )
+        if not decision:
+            self._logger.info(
+                "ML gate blocked %s signal on %s (confidence=%.3f threshold=%.3f)",
+                self.name,
+                symbol,
+                confidence,
+                gate,
+            )
         return decision, confidence
