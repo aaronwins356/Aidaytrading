@@ -81,7 +81,14 @@ class KrakenClient:
         total = balance.get("total", {})
         return {currency: float(amount) for currency, amount in total.items() if amount}
 
-    async def place_order(self, symbol: str, side: str, cash: float) -> Tuple[float, float]:
+    async def place_order(
+        self,
+        symbol: str,
+        side: str,
+        cash: float,
+        *,
+        reduce_only: bool | None = None,
+    ) -> Tuple[float, float]:
         """Place a market order sized by cash value.
 
         Returns a tuple of (price, quantity).
@@ -102,6 +109,21 @@ class KrakenClient:
             self._simulate_fill(base, quote, side, amount, price)
             return price, amount
 
+        should_reduce_only = False
+        if reduce_only is None:
+            should_reduce_only = side == "sell" and not self._allow_shorting
+        else:
+            # Always enforce reduce_only when shorting is disabled even if explicitly
+            # overridden. This prevents accidental naked short exposure when the
+            # deployment configuration disallows it.
+            should_reduce_only = reduce_only or (
+                side == "sell" and not self._allow_shorting
+            )
+
+        order_params: Dict[str, Any] = {}
+        if should_reduce_only:
+            order_params["reduce_only"] = True
+
         try:
             order = await self._with_retries(
                 self._exchange.create_order,
@@ -110,7 +132,7 @@ class KrakenClient:
                 side,
                 amount,
                 None,
-                {"reduce_only": side == "sell"},
+                order_params,
                 description=f"create_order:{symbol}",
             )
         except ccxt.BaseError as exc:  # pragma: no cover - network/broker failures
