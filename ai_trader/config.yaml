@@ -66,7 +66,7 @@ workers:
         fast_window: 12
         slow_window: 48
         momentum_threshold: 0.004
-        warmup_candles: 3
+        warmup_candles: 2
         ml_threshold: 0.35
       risk:
         leverage: 2.0
@@ -82,7 +82,7 @@ workers:
       parameters:
         band_window: 20
         band_std_dev: 2.4
-        warmup_candles: 3
+        warmup_candles: 2
         ml_threshold: 0.32
         reversion_threshold: 0.0035
       risk:
@@ -99,8 +99,8 @@ workers:
         - "ETH/USD"
       parameters:
         feature_lookback: 30
-        probability_threshold: 0.5
-        warmup_candles: 3
+        probability_threshold: 0.3
+        warmup_candles: 2
         ml_threshold: 0.35
       risk:
         leverage: 1.8
@@ -116,7 +116,7 @@ researcher:
     - "BTC/USD"
     - "ETH/USD"
   parameters:
-    warmup_candles: 3
+    warmup_candles: 2
     feature_windows:
       - 5
       - 14
