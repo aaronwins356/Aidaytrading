@@ -82,7 +82,7 @@ class TradeEngine:
                 continue
 
             equity, balances = await self._broker.compute_equity(snapshot.prices)
-            self._equity_engine.update(equity)
+            self._equity_engine.update(equity, self._broker.starting_equity)
             equity_metrics = self._equity_engine.get_latest_metrics()
             self._trade_log.record_account_snapshot(balances, equity)
             equity_per_trade = equity * (self._equity_allocation_percent / 100)

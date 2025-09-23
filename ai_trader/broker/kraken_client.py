@@ -44,7 +44,8 @@ class KrakenClient:
             "enableRateLimit": True,
         })
         self._markets: Dict[str, dict] = {}
-        self._starting_equity = paper_starting_equity
+        self._starting_equity = paper_starting_equity if paper_trading else 0.0
+        self._starting_equity_captured = paper_trading
         self._max_retries = 5
         self._backoff_factor = 1.5
 
@@ -164,6 +165,12 @@ class KrakenClient:
                 if price is None:
                     continue
             equity += amount * price
+        if not self._paper_trading and not self._starting_equity_captured and equity > 0.0:
+            # Capture the live balance once so downstream performance metrics use the
+            # true baseline instead of the paper default.
+            self._starting_equity = equity
+            self._starting_equity_captured = True
+            self._logger.info("Captured live starting equity at %.2f %s", equity, self._base_currency)
         return equity, balances
 
     def _adjust_amount(self, symbol: str, amount: float) -> float:
