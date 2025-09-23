@@ -134,7 +134,7 @@ def init_ml_service(config: Dict) -> MLService:
     return MLService(
         db_path=DB_PATH,
         feature_keys=feature_keys,
-        lr=float(ml_cfg.get("lr", 0.03)),
+        learning_rate=float(ml_cfg.get("learning_rate", ml_cfg.get("lr", 0.03))),
         regularization=float(ml_cfg.get("regularization", 0.0005)),
         threshold=float(ml_cfg.get("threshold", 0.25)),
         ensemble=bool(ml_cfg.get("ensemble", True)),
@@ -142,6 +142,7 @@ def init_ml_service(config: Dict) -> MLService:
         random_state=int(ml_cfg.get("random_state", 7)),
         warmup_target=int(ml_cfg.get("warmup_target", 200)),
         warmup_samples=int(ml_cfg.get("warmup_samples", 25)),
+        confidence_stall_limit=int(ml_cfg.get("confidence_stall_limit", 5)),
     )
 
 
@@ -414,7 +415,7 @@ def render_runtime_status(config: Dict, bot_states: pd.DataFrame, ml_service: ML
     if symbols:
         cols = st.columns(min(3, len(symbols)))
         for idx, symbol in enumerate(symbols):
-            progress = ml_service.warmup_progress(symbol)
+            progress = ml_service.warmup_ratio(symbol)
             text = f"{symbol}: {progress * 100:.0f}%" if progress < 1 else f"{symbol}: ready"
             cols[idx % len(cols)].progress(progress, text)
     else:

@@ -51,6 +51,8 @@ class BaseWorker(ABC):
         self._ml_service = ml_service
         self._trade_log = trade_log
         self._ml_gate_enabled: bool = True
+        self._ml_prediction_failures: Dict[str, bool] = {}
+        self._risk_trackers: Dict[str, Dict[str, float | None]] = {}
         self._logger = get_logger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._ml_threshold_override: Optional[float] = None
         self._config_ml_threshold: Optional[float] = None
@@ -157,6 +159,126 @@ class BaseWorker(ABC):
         else:
             self._ml_threshold_override = self._config_ml_threshold
 
+    # ------------------------------------------------------------------
+    # Risk helpers shared by all workers
+    # ------------------------------------------------------------------
+    def prepare_entry_risk(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        *,
+        stop: float | None = None,
+        target: float | None = None,
+    ) -> Dict[str, float | None]:
+        tracker = self._risk_trackers.setdefault(symbol, {})
+        tracker.update({"side": side, "entry_price": entry_price, "best_price": entry_price})
+        if stop is None and self.stop_loss_pct:
+            stop = entry_price * (1 - self.stop_loss_pct / 100) if side == "buy" else entry_price * (
+                1 + self.stop_loss_pct / 100
+            )
+        tracker["stop_price"] = stop
+        if target is None and self.take_profit_pct:
+            target = entry_price * (1 + self.take_profit_pct / 100) if side == "buy" else entry_price * (
+                1 - self.take_profit_pct / 100
+            )
+        tracker["target_price"] = target
+        trailing: float | None = None
+        if self.trailing_stop_pct:
+            trailing = entry_price * (1 - self.trailing_stop_pct / 100) if side == "buy" else entry_price * (
+                1 + self.trailing_stop_pct / 100
+            )
+        tracker["trailing_price"] = trailing
+        return {
+            "stop_price": stop,
+            "target_price": target,
+            "trailing_price": trailing,
+        }
+
+    def update_risk_levels(
+        self,
+        symbol: str,
+        *,
+        stop: float | None = None,
+        target: float | None = None,
+    ) -> None:
+        tracker = self._risk_trackers.setdefault(symbol, {})
+        if stop is not None:
+            tracker["stop_price"] = stop
+        if target is not None:
+            tracker["target_price"] = target
+
+    def check_risk_exit(self, symbol: str, price: float) -> tuple[bool, Optional[str], Dict[str, float | None]]:
+        tracker = self._risk_trackers.get(symbol)
+        if not tracker:
+            return False, None, {}
+        side = tracker.get("side")
+        if side not in {"buy", "sell"}:
+            return False, None, {}
+
+        if self.trailing_stop_pct:
+            best_price = tracker.get("best_price", price)
+            if side == "buy" and price > best_price:
+                best_price = price
+            elif side == "sell" and price < best_price:
+                best_price = price
+            tracker["best_price"] = best_price
+            trailing = (
+                best_price * (1 - self.trailing_stop_pct / 100)
+                if side == "buy"
+                else best_price * (1 + self.trailing_stop_pct / 100)
+            )
+            prior_trailing = tracker.get("trailing_price")
+            if trailing != prior_trailing:
+                tracker["trailing_price"] = trailing
+                self.record_trade_event(
+                    "trailing_update",
+                    symbol,
+                    {
+                        "previous_trailing": prior_trailing,
+                        "new_trailing": trailing,
+                        "best_price": best_price,
+                    },
+                )
+
+        metadata = self.risk_snapshot(symbol)
+
+        reason: Optional[str] = None
+        stop_price = metadata.get("stop_price")
+        target_price = metadata.get("target_price")
+        trailing_price = metadata.get("trailing_price")
+        if side == "buy":
+            if stop_price is not None and price <= stop_price:
+                reason = "stop"
+            elif trailing_price is not None and price <= trailing_price:
+                reason = reason or "trail"
+            elif target_price is not None and price >= target_price:
+                reason = reason or "target"
+        else:
+            if stop_price is not None and price >= stop_price:
+                reason = "stop"
+            elif trailing_price is not None and price >= trailing_price:
+                reason = reason or "trail"
+            elif target_price is not None and price <= target_price:
+                reason = reason or "target"
+
+        if reason:
+            if reason in {"stop", "target", "trail"}:
+                self.record_trade_event(f"risk_{reason}", symbol, metadata)
+            return True, reason, metadata
+        return False, None, metadata
+
+    def clear_risk_tracker(self, symbol: str) -> None:
+        self._risk_trackers.pop(symbol, None)
+
+    def risk_snapshot(self, symbol: str) -> Dict[str, float | None]:
+        tracker = self._risk_trackers.get(symbol, {})
+        return {
+            key: value
+            for key, value in tracker.items()
+            if key in {"stop_price", "target_price", "trailing_price"} and isinstance(value, (int, float))
+        }
+
     async def observe(
         self,
         snapshot: MarketSnapshot,
@@ -197,9 +319,21 @@ class BaseWorker(ABC):
             if threshold is not None
             else self._ml_threshold_override or self._ml_service.default_threshold
         )
-        decision, confidence = self._ml_service.predict(
-            symbol, feature_payload, worker=self.name, threshold=gate
-        )
+        try:
+            decision, confidence = self._ml_service.predict(
+                symbol, feature_payload, worker=self.name, threshold=gate
+            )
+        except Exception as exc:  # noqa: BLE001 - keep feature capture resilient
+            if not self._ml_prediction_failures.get(symbol):
+                self._logger.warning(
+                    "ML prediction failed for %s on %s – gating paused: %s",
+                    symbol,
+                    self.name,
+                    exc,
+                )
+                self._ml_prediction_failures[symbol] = True
+            return False, 0.0
+        self._ml_prediction_failures.pop(symbol, None)
         if not decision:
             self._logger.info(
                 "ML gate blocked %s signal on %s (confidence=%.3f threshold=%.3f)",

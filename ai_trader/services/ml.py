@@ -22,9 +22,16 @@ except ImportError:  # pragma: no cover - river build without forest module
 from river import compose, linear_model, optim, preprocessing
 
 from ai_trader.services.logging import get_logger
+from ai_trader.services.schema import ML_TABLES
 
 
 FeatureMapping = Mapping[str, float]
+
+_MODULE_LOGGER = get_logger(__name__)
+if not _FOREST_AVAILABLE:
+    _MODULE_LOGGER.warning(
+        "river.forest.ARFClassifier unavailable – ML ensemble fallback active"
+    )
 
 
 @dataclass(slots=True)
@@ -105,7 +112,9 @@ class MLService:
         self,
         db_path: Path,
         feature_keys: Iterable[str],
-        lr: float = 0.03,
+        learning_rate: float = 0.03,
+        *,
+        lr: Optional[float] = None,
         regularization: float = 0.0005,
         threshold: float = 0.2,
         ensemble: bool = True,
@@ -113,10 +122,11 @@ class MLService:
         random_state: int = 7,
         warmup_target: int = 200,
         warmup_samples: int = 25,
+        confidence_stall_limit: int = 5,
     ) -> None:
         self._db_path = db_path
         self._feature_keys = list(feature_keys)
-        self._lr = lr
+        self._learning_rate = lr if lr is not None else learning_rate
         self._regularization = regularization
         self._threshold = threshold
         self._logger = get_logger(__name__)
@@ -131,16 +141,18 @@ class MLService:
         self._latest_features: Dict[str, Dict[str, float]] = {}
         self._latest_confidence: Dict[Tuple[str, str], float] = {}
         self._warmup_target = max(1, int(warmup_target))
+        self._minimum_warmup_samples = max(1, int(warmup_samples))
+        self._warmup_required = max(self._warmup_target, self._minimum_warmup_samples)
         self._label_counts: Dict[str, int] = {}
-        self._warmup_target = max(1, int(warmup_samples))
         self._warmup_logged: Dict[str, bool] = {}
+        self._prediction_failure_logged: Dict[str, bool] = {}
+        self._zero_confidence_streak: Dict[str, int] = {}
+        self._zero_confidence_alerted: Dict[str, bool] = {}
+        self._confidence_stall_limit = max(1, int(confidence_stall_limit))
         if self._ensemble_requested and not self._use_ensemble:
             self._logger.warning(
-                "ML ensemble requested but river.forest.ARFClassifier is unavailable. Falling back to logistic regression only."
-            )
-        if not _FOREST_AVAILABLE and self._ensemble_requested:
-            self._logger.warning(
-                "River installation lacks 'forest.ARFClassifier'; ensemble disabled."
+                "ML ensemble requested but river.forest.ARFClassifier is unavailable. "
+                "Falling back to logistic regression only."
             )
         self._init_db()
         self._bootstrap_warmup_counts()
@@ -150,44 +162,8 @@ class MLService:
     # ------------------------------------------------------------------
     def _init_db(self) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ml_models_state (
-                    symbol TEXT PRIMARY KEY,
-                    logistic BLOB,
-                    forest BLOB,
-                    updated_at TEXT NOT NULL,
-                    metadata_json TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ml_predictions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    worker TEXT,
-                    confidence REAL NOT NULL,
-                    decision INTEGER NOT NULL,
-                    threshold REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ml_metrics (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    mode TEXT NOT NULL,
-                    precision REAL,
-                    recall REAL,
-                    win_rate REAL,
-                    support INTEGER
-                )
-                """
-            )
+            for statement in ML_TABLES.values():
+                conn.execute(statement)
             conn.commit()
 
     @contextmanager
@@ -203,7 +179,7 @@ class MLService:
     # Model lifecycle management
     # ------------------------------------------------------------------
     def _build_pipeline(self) -> compose.Pipeline:
-        optimizer = optim.SGD(lr=self._lr)
+        optimizer = optim.SGD(lr=self._learning_rate)
         logistic = linear_model.LogisticRegression(optimizer=optimizer, l2=self._regularization)
         return compose.Pipeline(preprocessing.StandardScaler(), logistic)
 
@@ -224,6 +200,50 @@ class MLService:
             self._use_ensemble = False
             self._forest_backend = "disabled"
             return None
+
+    def _predict_probability(
+        self, symbol: str, bundle: _ModelBundle, features: Mapping[str, float]
+    ) -> float:
+        try:
+            probability = bundle.predict_proba(features)
+        except Exception as exc:  # noqa: BLE001 - prediction must be resilient
+            if not self._prediction_failure_logged.get(symbol):
+                self._logger.warning(
+                    "[ML] Prediction failed for %s – using 0.0 confidence until recovery: %s",
+                    symbol,
+                    exc,
+                )
+                self._prediction_failure_logged[symbol] = True
+            return 0.0
+        self._prediction_failure_logged.pop(symbol, None)
+        return float(probability)
+
+    def _safe_learn(
+        self, symbol: str, bundle: _ModelBundle, features: Mapping[str, float], label: int
+    ) -> None:
+        try:
+            bundle.learn(features, label)
+        except Exception as exc:  # noqa: BLE001 - training errors should not halt pipeline
+            self._logger.exception("[ML] Online update failed for %s: %s", symbol, exc)
+
+    def _track_confidence_stall(self, symbol: str, probability: float) -> None:
+        if probability <= 1e-6:
+            streak = self._zero_confidence_streak.get(symbol, 0) + 1
+            self._zero_confidence_streak[symbol] = streak
+            if streak >= self._confidence_stall_limit and not self._zero_confidence_alerted.get(
+                symbol
+            ):
+                self._logger.warning(
+                    "[ML] %s confidence has remained at 0.000 for %d iterations – check feature flow and labels.",
+                    symbol,
+                    streak,
+                )
+                self._zero_confidence_alerted[symbol] = True
+        else:
+            if symbol in self._zero_confidence_streak:
+                self._zero_confidence_streak.pop(symbol, None)
+            if symbol in self._zero_confidence_alerted:
+                self._zero_confidence_alerted.pop(symbol, None)
 
     def _load_model(self, symbol: str) -> _ModelBundle:
         if symbol in self._models:
@@ -370,13 +390,14 @@ class MLService:
         self._latest_features[symbol] = cleaned
         model = self._load_model(symbol)
 
-        probability = model.predict_proba(cleaned)
+        probability = self._predict_probability(symbol, model, cleaned)
         probability = self._apply_confidence_floor(symbol, probability)
         learner_name = (
             "forest+logistic"
             if self._use_ensemble and model.forest is not None
             else "logistic"
         )
+        self._track_confidence_stall(symbol, probability)
         if label is None:
             self._logger.debug(
                 "Label unavailable for %s – retaining features for future training (confidence=%.4f)",
@@ -384,7 +405,7 @@ class MLService:
                 probability,
             )
         else:
-            model.learn(cleaned, int(label))
+            self._safe_learn(symbol, model, cleaned, int(label))
             self._label_counts[symbol] = self._label_counts.get(symbol, 0) + 1
             if self.is_warmed_up(symbol) and not self._warmup_logged.get(symbol):
                 self._logger.info(
@@ -393,8 +414,9 @@ class MLService:
                     self._label_counts[symbol],
                 )
                 self._warmup_logged[symbol] = True
-            probability = model.predict_proba(cleaned)
+            probability = self._predict_probability(symbol, model, cleaned)
             probability = self._apply_confidence_floor(symbol, probability)
+            self._track_confidence_stall(symbol, probability)
             if persist:
                 self._persist_model(symbol, model)
 
@@ -446,7 +468,7 @@ class MLService:
             return False, 0.0
 
         cleaned = self._sanitize_features(feature_payload)
-        probability = model.predict_proba(cleaned)
+        probability = self._predict_probability(symbol, model, cleaned)
         probability = self._apply_confidence_floor(symbol, probability)
         gate = threshold if threshold is not None else self._threshold
         decision = probability >= gate
@@ -483,6 +505,7 @@ class MLService:
             threshold=gate,
             timestamp=datetime.utcnow(),
         )
+        self._track_confidence_stall(symbol, probability)
         return decision, probability
 
     def latest_confidence(self, symbol: str, worker: Optional[str] = None) -> float:
@@ -499,7 +522,7 @@ class MLService:
     def warmup_counts(self, symbol: str) -> tuple[int, int]:
         """Return (label_count, required_count) for dashboard insights."""
 
-        return self._label_counts.get(symbol, 0), self._warmup_target
+        return self._label_counts.get(symbol, 0), self._warmup_required
 
     def warmup_progress(self, symbol: str) -> float:
         """Return the warmup ratio based on labelled samples."""
@@ -512,7 +535,7 @@ class MLService:
     def is_warmed_up(self, symbol: str) -> bool:
         """Return True once the symbol has seen enough labelled samples."""
 
-        return self._label_counts.get(symbol, 0) >= self._warmup_target
+        return self._label_counts.get(symbol, 0) >= self._warmup_required
 
     def feature_importance(self, symbol: str, top_n: int = 10) -> Dict[str, float]:
         """Return the top-N absolute weighted features for the symbol."""
@@ -558,6 +581,14 @@ class MLService:
         if row is None:
             return 0
         return int(row[0] or 0)
+
+
+    def warmup_ratio(self, symbol: str) -> float:
+        """Return a [0,1] warm-up ratio based on stored feature history."""
+
+        count = self.feature_count(symbol)
+        progress = min(1.0, count / self._warmup_required)
+        return float(progress)
 
     def run_backtest(
         self,

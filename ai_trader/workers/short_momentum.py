@@ -42,7 +42,6 @@ class ShortMomentumWorker(BaseWorker):
             trade_log=trade_log,
         )
         self.momentum_threshold = float((config or {}).get("momentum_threshold", 0.004))
-        self._position_tracker: Dict[str, Dict[str, float]] = {}
 
     @staticmethod
     def _ema(prices: list[float], window: int) -> float:
@@ -116,12 +115,27 @@ class ShortMomentumWorker(BaseWorker):
         if price is None:
             return None
 
-        tracker = self._position_tracker.setdefault(
-            symbol,
-            {
-                "best_price": price,
-            },
-        )
+        if existing_position is not None:
+            risk_triggered, risk_reason, risk_meta = self.check_risk_exit(symbol, price)
+            if risk_triggered:
+                self.update_signal_state(symbol, f"close:{risk_reason}")
+                self.clear_risk_tracker(symbol)
+                payload = {
+                    "trigger": risk_reason,
+                    **{k: v for k, v in risk_meta.items() if v is not None},
+                }
+                return TradeIntent(
+                    worker=self.name,
+                    action="CLOSE",
+                    symbol=symbol,
+                    side="buy",
+                    cash_spent=existing_position.cash_spent,
+                    entry_price=existing_position.entry_price,
+                    exit_price=price,
+                    confidence=0.0,
+                    reason=risk_reason,
+                    metadata=payload,
+                )
 
         if existing_position is None:
             if signal != "sell" or not self.is_ready(symbol):
@@ -134,15 +148,13 @@ class ShortMomentumWorker(BaseWorker):
             if not allowed:
                 self.update_signal_state(symbol, "ml-block", {"ml_confidence": ml_confidence})
                 return None
-            tracker["best_price"] = price
-            tracker["stop_price"] = price * (1 + self.stop_loss_pct / 100) if self.stop_loss_pct else None
-            tracker["target_price"] = price * (1 - self.take_profit_pct / 100) if self.take_profit_pct else None
-            tracker["trailing"] = price * (1 + self.trailing_stop_pct / 100) if self.trailing_stop_pct else None
-            metadata = {
-                "stop_price": tracker.get("stop_price"),
-                "target_price": tracker.get("target_price"),
-                "trailing_price": tracker.get("trailing"),
-            }
+            risk_meta = self.prepare_entry_risk(symbol, "sell", price)
+            metadata = {k: v for k, v in risk_meta.items() if v is not None}
+            fallback_confidence = 0.0
+            stop_hint = risk_meta.get("stop_price")
+            if stop_hint is not None:
+                fallback_confidence = min(1.0, abs(stop_hint - price) / max(price, 1e-9))
+            confidence = ml_confidence or fallback_confidence
             self.record_trade_event("open_signal", symbol, metadata)
             return TradeIntent(
                 worker=self.name,
@@ -151,65 +163,22 @@ class ShortMomentumWorker(BaseWorker):
                 side="sell",
                 cash_spent=cash * self.leverage,
                 entry_price=price,
-                confidence=ml_confidence or min(1.0, max(0.0, abs(tracker.get("stop_price", price) - price) / price)),
+                confidence=confidence,
                 metadata=metadata,
             )
-
-        # Position management for an open short.
-        previous_best = tracker.get("best_price", price)
-        tracker["best_price"] = min(previous_best, price)
-        if self.trailing_stop_pct:
-            prior_trailing = tracker.get("trailing")
-            tracker["trailing"] = tracker["best_price"] * (1 + self.trailing_stop_pct / 100)
-            if tracker["trailing"] and tracker["trailing"] != prior_trailing:
-                self.record_trade_event(
-                    "trailing_update",
-                    symbol,
-                    {
-                        "previous_trailing": prior_trailing,
-                        "new_trailing": tracker["trailing"],
-                        "best_price": tracker["best_price"],
-                    },
-                )
-
-        stop_price = (
-            existing_position.entry_price * (1 + self.stop_loss_pct / 100)
-            if self.stop_loss_pct
-            else tracker.get("stop_price")
-        )
-        target_price = (
-            existing_position.entry_price * (1 - self.take_profit_pct / 100)
-            if self.take_profit_pct
-            else tracker.get("target_price")
-        )
-        trailing_price = tracker.get("trailing")
 
         close_signal = False
         reason = ""
         if signal == "buy":
             close_signal = True
             reason = "reverse"
-        if stop_price and price >= stop_price:
-            close_signal = True
-            reason = "stop"
-        if target_price and price <= target_price:
-            close_signal = True
-            reason = reason or "target"
-        if trailing_price and price >= trailing_price:
-            close_signal = True
-            reason = reason or "trail"
 
         if close_signal:
-            tracker["best_price"] = price
             self.update_signal_state(symbol, f"close:{reason}")
-            metadata = {
-                "stop_price": stop_price,
-                "target_price": target_price,
-                "trailing_price": trailing_price,
-                "trigger": reason,
-            }
+            metadata = {**self.risk_snapshot(symbol), "trigger": reason}
             if reason in {"stop", "target", "trail"}:
                 self.record_trade_event(f"risk_{reason}", symbol, metadata)
+            self.clear_risk_tracker(symbol)
             return TradeIntent(
                 worker=self.name,
                 action="CLOSE",

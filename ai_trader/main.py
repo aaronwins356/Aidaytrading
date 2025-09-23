@@ -17,6 +17,7 @@ from ai_trader.services.equity import EquityEngine
 from ai_trader.services.logging import configure_logging, get_logger
 from ai_trader.services.ml import MLService
 from ai_trader.services.risk import RiskManager
+from ai_trader.services.schema import ALL_TABLES
 from ai_trader.services.trade_engine import TradeEngine
 from ai_trader.services.trade_log import TradeLog
 from ai_trader.services.worker_loader import WorkerLoader
@@ -116,26 +117,15 @@ def _validate_startup(
 
     trading_cfg = config.get("trading", {})
     trading_mode = str(trading_cfg.get("mode", "paper")).lower()
+    logger.info("Trading mode: %s", trading_mode.upper())
     if trading_mode == "live":
-        kraken_cfg = config.get("kraken", {})
-        api_key = os.getenv("KRAKEN_API_KEY", str(kraken_cfg.get("api_key", "")).strip())
-        api_secret = os.getenv(
-            "KRAKEN_API_SECRET", str(kraken_cfg.get("api_secret", "")).strip()
-        )
-        missing_keys = [
-            name
-            for name, value in {"api_key": api_key, "api_secret": api_secret}.items()
-            if not value or "YOUR_KRAKEN" in value.upper()
-        ]
-        if missing_keys:
-            logger.warning(
-                "Live trading mode detected but missing Kraken credential(s): %s. "
-                "Populate config.yaml before running with real funds.",
-                ", ".join(missing_keys),
+        api_key = os.getenv("KRAKEN_API_KEY", "").strip()
+        api_secret = os.getenv("KRAKEN_API_SECRET", "").strip()
+        if not api_key or not api_secret:
+            logger.error(
+                "Live trading requires KRAKEN_API_KEY and KRAKEN_API_SECRET environment variables."
             )
-            engine.enable_signal_only_mode(
-                "Missing Kraken API credentials while in live mode"
-            )
+            raise SystemExit(1)
 
     if ml_workers:
         try:
@@ -172,105 +162,13 @@ def _validate_startup(
 def _ensure_sqlite_schema(logger: Logger) -> None:
     """Create any missing SQLite tables required for the trading runtime."""
 
-    table_statements: Dict[str, str] = {
-        "trades": """
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                worker TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                cash_spent REAL NOT NULL,
-                entry_price REAL NOT NULL,
-                exit_price REAL,
-                pnl_percent REAL,
-                pnl_usd REAL,
-                win_loss TEXT
-            )
-        """,
-        "equity_curve": """
-            CREATE TABLE IF NOT EXISTS equity_curve (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                equity REAL NOT NULL,
-                pnl_percent REAL NOT NULL,
-                pnl_usd REAL NOT NULL
-            )
-        """,
-        "bot_state": """
-            CREATE TABLE IF NOT EXISTS bot_state (
-                worker TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                status TEXT,
-                last_signal TEXT,
-                indicators_json TEXT,
-                risk_json TEXT,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY(worker, symbol)
-            )
-        """,
-        "market_features": """
-            CREATE TABLE IF NOT EXISTS market_features (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                timeframe TEXT NOT NULL,
-                open REAL,
-                high REAL,
-                low REAL,
-                close REAL,
-                volume REAL,
-                features_json TEXT NOT NULL,
-                label REAL
-            )
-        """,
-        "ml_predictions": """
-            CREATE TABLE IF NOT EXISTS ml_predictions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                worker TEXT,
-                confidence REAL NOT NULL,
-                decision INTEGER NOT NULL,
-                threshold REAL NOT NULL
-            )
-        """,
-        "ml_metrics": """
-            CREATE TABLE IF NOT EXISTS ml_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                precision REAL,
-                recall REAL,
-                win_rate REAL,
-                support INTEGER
-            )
-        """,
-        "account_snapshots": """
-            CREATE TABLE IF NOT EXISTS account_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                equity REAL NOT NULL,
-                balances_json TEXT NOT NULL
-            )
-        """,
-        "control_flags": """
-            CREATE TABLE IF NOT EXISTS control_flags (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """,
-    }
-
     try:
         with sqlite3.connect(DB_PATH) as connection:
             cursor = connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             existing = {row[0] for row in cursor.fetchall()}
-            missing = [name for name in table_statements if name not in existing]
+            missing = [name for name in ALL_TABLES if name not in existing]
             for table_name in missing:
-                connection.execute(table_statements[table_name])
+                connection.execute(ALL_TABLES[table_name])
             if missing:
                 logger.info("Created missing SQLite tables: %s", ", ".join(sorted(missing)))
             connection.commit()
@@ -341,7 +239,7 @@ async def start_bot() -> None:
     ml_service = MLService(
         db_path=DB_PATH,
         feature_keys=feature_keys,
-        lr=float(ml_cfg.get("lr", 0.03)),
+        learning_rate=float(ml_cfg.get("learning_rate", ml_cfg.get("lr", 0.03))),
         regularization=float(ml_cfg.get("regularization", 0.0005)),
         threshold=float(ml_cfg.get("threshold", 0.25)),
         ensemble=bool(ml_cfg.get("ensemble", True)),
@@ -349,6 +247,7 @@ async def start_bot() -> None:
         random_state=int(ml_cfg.get("random_state", 7)),
         warmup_target=int(ml_cfg.get("warmup_target", 200)),
         warmup_samples=int(ml_cfg.get("warmup_samples", 25)),
+        confidence_stall_limit=int(ml_cfg.get("confidence_stall_limit", 5)),
     )
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
     risk_manager = RiskManager(risk_cfg)
