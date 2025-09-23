@@ -85,7 +85,7 @@ class KrakenClient:
         self,
         symbol: str,
         side: str,
-        cash: float,
+        cash_spent: float,
         *,
         reduce_only: bool | None = None,
     ) -> Tuple[float, float]:
@@ -94,13 +94,18 @@ class KrakenClient:
         Returns a tuple of (price, quantity).
         """
 
+        assert isinstance(
+            cash_spent, (int, float)
+        ), f"cash_spent must be float, got {type(cash_spent)}"
+
         price = await self.fetch_price(symbol)
         if price is None:
             raise RuntimeError(f"Unable to fetch price for {symbol}")
         price = float(price)
-        cash_value = float(cash)
-        amount = cash_value / price
+        cash_value = float(cash_spent)
+        amount = float(cash_value) / float(price)
         amount = self._adjust_amount(symbol, amount)
+        amount = float(amount)
 
         if amount <= 0:
             raise RuntimeError("Calculated trade size is below Kraken minimum")
@@ -132,7 +137,7 @@ class KrakenClient:
                 symbol,
                 "market",
                 side,
-                amount,
+                float(amount),
                 None,
                 order_params,
                 description=f"create_order:{symbol}",
@@ -162,7 +167,7 @@ class KrakenClient:
                 symbol,
                 "market",
                 exit_side,
-                amount,
+                float(amount),
                 None,
                 {"reduce_only": True},
                 description=f"close_order:{symbol}",
@@ -221,7 +226,7 @@ class KrakenClient:
     def _simulate_fill(self, base: str, quote: str, side: str, amount: float, price: float) -> None:
         amount = float(amount)
         price = float(price)
-        cost = amount * price
+        cost = float(amount) * float(price)
         balances = self._paper_balances
         balances.setdefault(base, 0.0)
         balances.setdefault(quote, 0.0)

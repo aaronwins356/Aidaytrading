@@ -35,13 +35,13 @@ class _DummyBroker:
         self,
         symbol: str,
         side: str,
-        cash: float,
+        cash_spent: float,
         *,
         reduce_only: bool | None = None,
     ) -> tuple[float, float]:
         price = 100.0
-        quantity = cash / price
-        self.orders.append((symbol, side, cash))
+        quantity = float(cash_spent) / price
+        self.orders.append((symbol, side, float(cash_spent)))
         self.reduce_only.append(reduce_only)
         return price, quantity
 

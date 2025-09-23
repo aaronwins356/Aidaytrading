@@ -45,6 +45,9 @@ class MarketResearchWorker(BaseWorker):
         self._pending_features: Dict[str, Deque[Dict[str, object]]] = {
             symbol: deque() for symbol in self.symbols
         }
+        self._bootstrap_candles: Dict[str, List[Dict[str, float]]] = {
+            symbol: [] for symbol in self.symbols
+        }
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
         # Researcher does not emit trade signals but we keep interface parity.
@@ -65,7 +68,13 @@ class MarketResearchWorker(BaseWorker):
         if self._snapshot_counter % self.log_every_n != 0:
             return
         for symbol in self.symbols:
-            candles = snapshot.candles.get(symbol, [])
+            incoming_candles = list(snapshot.candles.get(symbol, []))
+            preload = self._bootstrap_candles.get(symbol, [])
+            if preload:
+                candles = [*preload, *incoming_candles]
+                self._bootstrap_candles[symbol] = []
+            else:
+                candles = incoming_candles
             required_candles = max(self.warmup_candles, 2)
             if len(candles) < required_candles:
                 if not self._feature_flow_warnings.get(symbol):
@@ -213,6 +222,34 @@ class MarketResearchWorker(BaseWorker):
             }
             state_payload.update({f"ohlcv_{key}": value for key, value in ohlcv.items()})
             self.update_signal_state(symbol, None, state_payload)
+
+    def preload_candles(
+        self,
+        symbol: str,
+        candles: Iterable[Dict[str, float]],
+    ) -> None:
+        """Seed cached OHLCV data for warm-starting the researcher."""
+
+        history = self.price_history.setdefault(symbol, deque(maxlen=self.lookback))
+        sanitized: List[Dict[str, float]] = []
+        for candle in candles:
+            try:
+                open_ = float(candle["open"])
+                high = float(candle["high"])
+                low = float(candle["low"])
+                close = float(candle["close"])
+                volume = float(candle.get("volume", 0.0))
+            except (KeyError, TypeError, ValueError):
+                self._logger.debug("Skipping malformed cached candle for %s: %s", symbol, candle)
+                continue
+            sanitized.append(
+                {"open": open_, "high": high, "low": low, "close": close, "volume": volume}
+            )
+            history.append(close)
+        if sanitized:
+            max_len = min(len(sanitized), history.maxlen or len(sanitized))
+            self._bootstrap_candles[symbol] = sanitized[-max_len:]
+            self._warmup_notified[symbol] = False
 
     def _build_features(self, candles: List[dict[str, float]]) -> Dict[str, float]:
         closes = [float(candle.get("close", 0.0)) for candle in candles]

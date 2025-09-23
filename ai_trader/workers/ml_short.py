@@ -100,7 +100,7 @@ class MLShortWorker(BaseWorker):
         if existing_position is None:
             if signal != "sell" or not self.is_ready(symbol):
                 return None
-            cash = equity_per_trade * (self.position_size_pct / 100)
+            cash = float(equity_per_trade) * (self.position_size_pct / 100)
             if cash <= 0:
                 return None
             allowed, ml_confidence = self.ml_confirmation(symbol, features=features, threshold=self.threshold)
@@ -123,12 +123,13 @@ class MLShortWorker(BaseWorker):
                     "cover_threshold": self.cover_threshold,
                 },
             )
+            cash_value = float(cash) * float(self.leverage)
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
                 symbol=symbol,
                 side="sell",
-                cash_spent=cash * self.leverage,
+                cash_spent=cash_value,
                 entry_price=price,
                 confidence=confidence,
                 metadata=metadata,

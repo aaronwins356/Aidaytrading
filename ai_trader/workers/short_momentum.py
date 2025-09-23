@@ -140,8 +140,8 @@ class ShortMomentumWorker(BaseWorker):
         if existing_position is None:
             if signal != "sell" or not self.is_ready(symbol):
                 return None
-            cash = equity_per_trade * (self.position_size_pct / 100)
-            cash = max(cash, 0.0)
+            cash = float(equity_per_trade) * (self.position_size_pct / 100)
+            cash = max(float(cash), 0.0)
             if cash == 0:
                 return None
             allowed, ml_confidence = self.ml_confirmation(symbol)
@@ -156,12 +156,13 @@ class ShortMomentumWorker(BaseWorker):
                 fallback_confidence = min(1.0, abs(stop_hint - price) / max(price, 1e-9))
             confidence = ml_confidence or fallback_confidence
             self.record_trade_event("open_signal", symbol, metadata)
+            cash_value = float(cash) * float(self.leverage)
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
                 symbol=symbol,
                 side="sell",
-                cash_spent=cash * self.leverage,
+                cash_spent=cash_value,
                 entry_price=price,
                 confidence=confidence,
                 metadata=metadata,
