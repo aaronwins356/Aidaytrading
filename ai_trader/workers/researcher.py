@@ -41,6 +41,7 @@ class MarketResearchWorker(BaseWorker):
         self._snapshot_counter = 0
         self._forest_warning_emitted = False
         self._feature_flow_warnings: Dict[str, bool] = {}
+        self._confidence_warnings: Dict[str, bool] = {}
         self._pending_features: Dict[str, Deque[Dict[str, object]]] = {
             symbol: deque() for symbol in self.symbols
         }
@@ -163,22 +164,52 @@ class MarketResearchWorker(BaseWorker):
                     exc,
                 )
                 continue
-            self._logger.info(
-                "Snapshot saved for %s | label=%.0f features=%d confidence=%.4f threshold=%.2f",
-                symbol,
-                float(label) if label is not None else -1.0,
-                len(features),
-                confidence,
-            )
-            warmup_seen, warmup_target = self._ml_service.warmup_progress(symbol)
+            warmup_seen, warmup_target = self._ml_service.warmup_counts(symbol)
+            warmup_progress = self._ml_service.warmup_progress(symbol)
+            warmed_up = self._ml_service.is_warmed_up(symbol)
+            confidence_ready = confidence is not None and math.isfinite(float(confidence))
+            confidence_for_state: Optional[float] = None
+            if not confidence_ready or not warmed_up:
+                if not self._confidence_warnings.get(symbol):
+                    if not warmed_up:
+                        self._logger.warning(
+                            "ML service warming up for %s – %d/%d labelled samples processed (%.0f%%)",
+                            symbol,
+                            warmup_seen,
+                            warmup_target,
+                            warmup_progress * 100,
+                        )
+                    else:
+                        self._logger.warning(
+                            "ML confidence unavailable for %s – waiting for the service to return scores",
+                            symbol,
+                        )
+                    self._confidence_warnings[symbol] = True
+            else:
+                self._confidence_warnings.pop(symbol, None)
+                confidence_for_state = float(confidence)
+                self._logger.info(
+                    "Snapshot saved for %s | label=%.0f features=%d confidence=%.4f threshold=%.2f",
+                    symbol,
+                    float(label) if label is not None else -1.0,
+                    len(features),
+                    confidence_for_state,
+                    self._ml_service.default_threshold,
+                )
+            if not warmed_up:
+                self._logger.debug(
+                    "Warm-up progress for %s at %.0f%% – continuing to collect features",
+                    symbol,
+                    warmup_progress * 100,
+                )
             state_payload = {
                 "features": features,
                 "label": label,
-                "ml_confidence": confidence,
+                "ml_confidence": confidence_for_state,
                 "ml_threshold": self._ml_service.default_threshold,
                 "ml_warmup_samples": warmup_seen,
                 "ml_warmup_target": warmup_target,
-                "ml_ready": self._ml_service.is_warmed_up(symbol),
+                "ml_ready": warmed_up,
             }
             state_payload.update({f"ohlcv_{key}": value for key, value in ohlcv.items()})
             self.update_signal_state(symbol, None, state_payload)
