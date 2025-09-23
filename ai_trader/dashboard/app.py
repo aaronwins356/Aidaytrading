@@ -689,7 +689,9 @@ def render_trade_logs(trades: pd.DataFrame, events: pd.DataFrame) -> None:
             st.info("Trades will appear once execution begins.")
         else:
             workers = ["All"] + sorted(trades["worker"].unique())
-            selected_worker = st.selectbox("Filter by strategy", workers)
+            worker_filter_key = "trade_logs_worker_filter"
+            st.selectbox("Filter by strategy", workers, key=worker_filter_key)
+            selected_worker = st.session_state.get(worker_filter_key, workers[0])
             filtered = trades if selected_worker == "All" else trades[trades["worker"] == selected_worker]
             display_cols = [
                 "timestamp",
@@ -723,35 +725,67 @@ def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> No
 
     with st.form("global_risk_form"):
         st.write("### Global Risk")
-        max_drawdown = st.slider(
+        max_drawdown_key = "global_risk_max_drawdown"
+        st.slider(
             "Max drawdown %",
             min_value=5.0,
             max_value=50.0,
             step=0.5,
             value=float(risk_cfg.get("max_drawdown_percent", 25.0)),
+            key=max_drawdown_key,
         )
-        daily_limit = st.slider(
+        daily_limit_key = "global_risk_daily_loss_limit"
+        st.slider(
             "Daily loss limit %",
             min_value=1.0,
             max_value=20.0,
             step=0.5,
             value=float(risk_cfg.get("daily_loss_limit_percent", 5.0)),
+            key=daily_limit_key,
         )
-        allocation = st.slider(
+        allocation_key = "global_risk_allocation"
+        st.slider(
             "Equity allocation per trade %",
             min_value=1.0,
             max_value=25.0,
             step=0.5,
             value=float(trading_cfg.get("equity_allocation_percent", 6.0)),
+            key=allocation_key,
         )
-        max_positions = st.slider(
+        max_positions_key = "global_risk_max_positions"
+        st.slider(
             "Maximum concurrent positions",
             min_value=1,
             max_value=12,
             value=int(trading_cfg.get("max_open_positions", 4)),
+            key=max_positions_key,
         )
         submitted = st.form_submit_button("Update global risk")
         if submitted:
+            max_drawdown = float(
+                st.session_state.get(
+                    max_drawdown_key,
+                    float(risk_cfg.get("max_drawdown_percent", 25.0)),
+                )
+            )
+            daily_limit = float(
+                st.session_state.get(
+                    daily_limit_key,
+                    float(risk_cfg.get("daily_loss_limit_percent", 5.0)),
+                )
+            )
+            allocation = float(
+                st.session_state.get(
+                    allocation_key,
+                    float(trading_cfg.get("equity_allocation_percent", 6.0)),
+                )
+            )
+            max_positions = int(
+                st.session_state.get(
+                    max_positions_key,
+                    int(trading_cfg.get("max_open_positions", 4)),
+                )
+            )
             config["risk"]["max_drawdown_percent"] = max_drawdown
             config["risk"]["daily_loss_limit_percent"] = daily_limit
             config["trading"]["equity_allocation_percent"] = allocation
@@ -765,53 +799,75 @@ def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> No
             symbols = definition.get("symbols", [])
             risk = definition.get("risk", {})
             params = definition.get("parameters", {})
-            new_symbols = st.multiselect(
+            symbol_key = f"symbols_{worker_key}"
+            st.multiselect(
                 "Symbols",
                 options=config["trading"].get("symbols", symbols),
                 default=symbols,
-                key=f"symbols_{worker_key}",
+                key=symbol_key,
             )
-            position_size = st.slider(
+            position_size_key = f"pos_{worker_key}"
+            st.slider(
                 "Position size % of allocation",
                 min_value=10.0,
                 max_value=200.0,
                 step=5.0,
                 value=float(risk.get("position_size_pct", 100.0)),
-                key=f"pos_{worker_key}",
+                key=position_size_key,
             )
-            leverage = st.slider(
+            leverage_key = f"lev_{worker_key}"
+            st.slider(
                 "Leverage",
                 min_value=1.0,
                 max_value=5.0,
                 step=0.1,
                 value=float(risk.get("leverage", 1.0)),
-                key=f"lev_{worker_key}",
+                key=leverage_key,
             )
-            stop_loss = st.slider(
+            stop_loss_key = f"sl_{worker_key}"
+            st.slider(
                 "Stop loss %",
                 min_value=0.5,
                 max_value=5.0,
                 step=0.1,
                 value=float(risk.get("stop_loss_pct", 1.0)),
-                key=f"sl_{worker_key}",
+                key=stop_loss_key,
             )
-            take_profit = st.slider(
+            take_profit_key = f"tp_{worker_key}"
+            st.slider(
                 "Take profit %",
                 min_value=0.5,
                 max_value=6.0,
                 step=0.1,
                 value=float(risk.get("take_profit_pct", 2.0)),
-                key=f"tp_{worker_key}",
+                key=take_profit_key,
             )
-            trailing = st.slider(
+            trailing_key = f"trail_{worker_key}"
+            st.slider(
                 "Trailing stop %",
                 min_value=0.0,
                 max_value=5.0,
                 step=0.1,
                 value=float(risk.get("trailing_stop_pct", 0.0)),
-                key=f"trail_{worker_key}",
+                key=trailing_key,
             )
             if st.button("Save", key=f"save_{worker_key}"):
+                new_symbols = st.session_state.get(symbol_key, symbols)
+                position_size = float(
+                    st.session_state.get(position_size_key, float(risk.get("position_size_pct", 100.0)))
+                )
+                leverage = float(
+                    st.session_state.get(leverage_key, float(risk.get("leverage", 1.0)))
+                )
+                stop_loss = float(
+                    st.session_state.get(stop_loss_key, float(risk.get("stop_loss_pct", 1.0)))
+                )
+                take_profit = float(
+                    st.session_state.get(take_profit_key, float(risk.get("take_profit_pct", 2.0)))
+                )
+                trailing = float(
+                    st.session_state.get(trailing_key, float(risk.get("trailing_stop_pct", 0.0)))
+                )
                 definition["symbols"] = new_symbols
                 definition.setdefault("risk", {})
                 definition["risk"].update(
@@ -842,13 +898,16 @@ def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> No
             worker_label = MODULE_DISPLAY_NAMES.get(module_path, module_path.split(".")[-1])
             flag_key = f"ml::{worker_label}"
             enabled = control_flags.get(flag_key, "on").lower() not in {"off", "false", "0", "disabled"}
-            toggle = cols[idx % len(cols)].toggle(
+            toggle_key = f"ml_gate_{worker_key}"
+            initial_toggle = st.session_state.get(toggle_key, enabled)
+            cols[idx % len(cols)].toggle(
                 f"{worker_label} gating",
-                value=enabled,
-                key=f"ml_gate_{worker_key}",
+                value=initial_toggle,
+                key=toggle_key,
             )
-            if toggle != enabled:
-                set_control_flag(flag_key, "on" if toggle else "off")
+            toggle_state = st.session_state.get(toggle_key, initial_toggle)
+            if toggle_state != enabled:
+                set_control_flag(flag_key, "on" if toggle_state else "off")
                 st.success(f"Updated ML gating for {worker_label}.")
     else:
         st.info("No trading workers configured for ML gating.")
@@ -858,11 +917,15 @@ def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> No
     validation_cols = st.columns(3)
     symbol_options = config.get("trading", {}).get("symbols", [symbol])
     default_index = symbol_options.index(symbol) if symbol in symbol_options else 0
-    selected_symbol = validation_cols[0].selectbox(
+    validation_cols[0].selectbox(
         "Symbol",
         options=symbol_options,
         index=default_index,
         key="ml_metric_symbol",
+    )
+    selected_symbol = st.session_state.get(
+        "ml_metric_symbol",
+        symbol_options[default_index] if symbol_options else symbol,
     )
     if validation_cols[1].button("Run backtest", key="run_ml_backtest"):
         results = ml_service.run_backtest(selected_symbol)
@@ -891,11 +954,17 @@ def render_sidebar(config: Dict) -> str:
 
     control_flags = load_control_flags()
 
-    trading_mode = st.sidebar.radio(
+    trading_mode_default = config["trading"].get("mode", "paper")
+    initial_mode = st.session_state.get("trading_mode_radio", trading_mode_default)
+    if initial_mode not in {"paper", "live"}:
+        initial_mode = trading_mode_default
+    st.sidebar.radio(
         "Trading Mode",
         options=["paper", "live"],
-        index=0 if config["trading"].get("mode", "paper") == "paper" else 1,
+        index=0 if initial_mode == "paper" else 1,
+        key="trading_mode_radio",
     )
+    trading_mode = st.session_state.get("trading_mode_radio", initial_mode)
     if trading_mode != config["trading"].get("mode"):
         config["trading"]["mode"] = trading_mode
         config["trading"]["paper_trading"] = trading_mode == "paper"
@@ -903,7 +972,14 @@ def render_sidebar(config: Dict) -> str:
         st.sidebar.success("Trading mode updated. Restart engine to take effect.")
 
     kill_switch = control_flags.get("kill_switch", "false") == "true"
-    kill_toggle = st.sidebar.toggle("Global Kill Switch", value=kill_switch)
+    kill_toggle_key = "kill_switch_toggle"
+    kill_toggle_default = st.session_state.get(kill_toggle_key, kill_switch)
+    st.sidebar.toggle(
+        "Global Kill Switch",
+        value=kill_toggle_default,
+        key=kill_toggle_key,
+    )
+    kill_toggle = st.session_state.get(kill_toggle_key, kill_toggle_default)
     if kill_toggle != kill_switch:
         set_control_flag("kill_switch", "true" if kill_toggle else "false")
         st.sidebar.success("Kill switch state updated.")
@@ -918,18 +994,29 @@ def render_sidebar(config: Dict) -> str:
         worker_label = MODULE_DISPLAY_NAMES.get(module_path, module_path.split(".")[-1])
         flag_key = f"bot::{worker_label}"
         paused = control_flags.get(flag_key, "active") in {"paused", "disabled"}
-        toggle = st.sidebar.toggle(f"{worker_label}", value=not paused)
-        if toggle == paused:
-            set_control_flag(flag_key, "active" if toggle else "paused")
+        toggle_key = f"bot_toggle_{worker_key}"
+        initial_toggle = st.session_state.get(toggle_key, not paused)
+        st.sidebar.toggle(
+            f"{worker_label}",
+            value=initial_toggle,
+            key=toggle_key,
+        )
+        toggle_state = st.session_state.get(toggle_key, initial_toggle)
+        if toggle_state == paused:
+            set_control_flag(flag_key, "active" if toggle_state else "paused")
             st.sidebar.success(f"Updated {worker_label} control flag.")
 
     st.sidebar.markdown("---")
-    symbol = st.sidebar.selectbox(
+    sidebar_symbol_key = "sidebar_symbol_select"
+    st.sidebar.selectbox(
         "Symbol",
         options=config["trading"].get("symbols", ["BTC/USD"]),
         index=0,
+        key=sidebar_symbol_key,
     )
-    return symbol
+    symbol_options = config["trading"].get("symbols", ["BTC/USD"])
+    default_symbol = symbol_options[0] if symbol_options else "BTC/USD"
+    return st.session_state.get(sidebar_symbol_key, default_symbol)
 
 
 def main() -> None:
