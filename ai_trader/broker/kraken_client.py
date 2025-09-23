@@ -74,7 +74,7 @@ class KrakenClient:
 
     async def fetch_balances(self) -> Dict[str, float]:
         if self._paper_trading:
-            return dict(self._paper_balances)
+            return {currency: float(amount) for currency, amount in self._paper_balances.items()}
         balance = await self._with_retries(
             self._exchange.fetch_balance, description="fetch_balance"
         )
@@ -97,7 +97,9 @@ class KrakenClient:
         price = await self.fetch_price(symbol)
         if price is None:
             raise RuntimeError(f"Unable to fetch price for {symbol}")
-        amount = cash / price
+        price = float(price)
+        cash_value = float(cash)
+        amount = cash_value / price
         amount = self._adjust_amount(symbol, amount)
 
         if amount <= 0:
@@ -107,7 +109,7 @@ class KrakenClient:
 
         if self._paper_trading:
             self._simulate_fill(base, quote, side, amount, price)
-            return price, amount
+            return float(price), float(amount)
 
         should_reduce_only = False
         if reduce_only is None:
@@ -138,16 +140,18 @@ class KrakenClient:
         except ccxt.BaseError as exc:  # pragma: no cover - network/broker failures
             self._logger.warning("Kraken rejected order for %s: %s", symbol, exc)
             raise RuntimeError(str(exc)) from exc
-        filled = order.get("amount", amount)
+        filled = float(order.get("amount", amount))
         avg_price = order.get("average") or price
         return float(avg_price), float(filled)
 
     async def close_position(self, symbol: str, side: str, amount: float) -> Tuple[float, float]:
+        amount = float(amount)
         exit_side = "sell" if side == "buy" else "buy"
         if self._paper_trading:
             price = await self.fetch_price(symbol)
             if price is None:
                 raise RuntimeError("Missing market price for close")
+            price = float(price)
             base, quote = symbol.split("/")
             self._simulate_fill(base, quote, exit_side, amount, price)
             return price, amount
@@ -166,17 +170,20 @@ class KrakenClient:
         except ccxt.BaseError as exc:  # pragma: no cover - network/broker failures
             self._logger.warning("Kraken rejected close order for %s: %s", symbol, exc)
             raise RuntimeError(str(exc)) from exc
-        filled = order.get("amount", amount)
+        filled = float(order.get("amount", amount))
         avg_price = order.get("average") or order.get("price")
         if avg_price is None:
-            avg_price = await self.fetch_price(symbol)
+            market_price = await self.fetch_price(symbol)
+            if market_price is None:
+                raise RuntimeError("Unable to determine fill price")
+            avg_price = market_price
         return float(avg_price), float(filled)
 
     async def compute_equity(self, prices: Dict[str, float]) -> tuple[float, Dict[str, float]]:
         """Return the total account equity alongside the raw balances."""
 
         balances = await self.fetch_balances()
-        equity = balances.get(self._base_currency, 0.0)
+        equity = float(balances.get(self._base_currency, 0.0))
         for asset, amount in balances.items():
             if asset == self._base_currency or amount == 0:
                 continue
@@ -186,7 +193,7 @@ class KrakenClient:
                 price = await self.fetch_price(symbol)
                 if price is None:
                     continue
-            equity += amount * price
+            equity += float(amount) * float(price)
         if not self._paper_trading and not self._starting_equity_captured and equity > 0.0:
             # Capture the live balance once so downstream performance metrics use the
             # true baseline instead of the paper default.
@@ -212,6 +219,8 @@ class KrakenClient:
         return float(Decimal(amount).quantize(Decimal(quantize_str), rounding=ROUND_DOWN))
 
     def _simulate_fill(self, base: str, quote: str, side: str, amount: float, price: float) -> None:
+        amount = float(amount)
+        price = float(price)
         cost = amount * price
         balances = self._paper_balances
         balances.setdefault(base, 0.0)

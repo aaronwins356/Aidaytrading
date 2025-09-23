@@ -40,9 +40,9 @@ class TradeEngine:
         self._equity_engine = equity_engine
         self._risk_manager = risk_manager
         self._trade_log = trade_log
-        self._equity_allocation_percent = equity_allocation_percent
+        self._equity_allocation_percent = float(equity_allocation_percent)
         self._max_open_positions = max_open_positions
-        self._refresh_interval = refresh_interval
+        self._refresh_interval = float(refresh_interval)
         self._open_positions: Dict[Tuple[str, str], OpenPosition] = {}
         self._logger = get_logger(__name__)
         self._stop_event = asyncio.Event()
@@ -82,10 +82,12 @@ class TradeEngine:
                 continue
 
             equity, balances = await self._broker.compute_equity(snapshot.prices)
+            equity = float(equity)
+            normalized_balances = {asset: float(amount) for asset, amount in balances.items()}
             self._equity_engine.update(equity, self._broker.starting_equity)
             equity_metrics = self._equity_engine.get_latest_metrics()
-            self._trade_log.record_account_snapshot(balances, equity)
-            equity_per_trade = equity * (self._equity_allocation_percent / 100)
+            self._trade_log.record_account_snapshot(normalized_balances, equity)
+            equity_per_trade = equity * (self._equity_allocation_percent / 100.0)
             await self._run_researchers(snapshot, equity_metrics)
             self._update_control_flags()
 
@@ -224,13 +226,15 @@ class TradeEngine:
 
     async def _open_trade(self, intent: TradeIntent, key: Tuple[str, str]) -> None:
         mode = "paper" if self._paper_trading else "live"
+        cash_spent = float(intent.cash_spent)
+        confidence = float(intent.confidence)
         self._logger.info(
             "[TRADE] %s submitting %s order for %s size=$%.2f confidence=%.3f mode=%s",
             intent.worker,
             intent.side.upper(),
             intent.symbol,
-            intent.cash_spent,
-            intent.confidence,
+            cash_spent,
+            confidence,
             mode,
         )
         try:
@@ -238,7 +242,7 @@ class TradeEngine:
             price, quantity = await self._broker.place_order(
                 intent.symbol,
                 intent.side,
-                intent.cash_spent,
+                cash_spent,
                 reduce_only=reduce_only,
             )
         except Exception as exc:  # noqa: BLE001 - broker errors should not crash engine
@@ -246,12 +250,14 @@ class TradeEngine:
                 "Order rejected for %s %s (cash %.2f): %s",
                 intent.side.upper(),
                 intent.symbol,
-                intent.cash_spent,
+                cash_spent,
                 exc,
             )
             self._logger.debug("Failed intent payload: %s", intent, exc_info=True)
             return
-        cost = price * quantity
+        price = float(price)
+        quantity = float(quantity)
+        cost = float(price * quantity)
         position = OpenPosition(
             worker=intent.worker,
             symbol=intent.symbol,
@@ -270,7 +276,7 @@ class TradeEngine:
             side=intent.side,
             cash_spent=cost,
             entry_price=price,
-            confidence=intent.confidence,
+            confidence=confidence,
             reason=intent.reason or "entry",
             metadata=metadata,
         )
@@ -282,7 +288,7 @@ class TradeEngine:
             details={
                 "price": price,
                 "quantity": quantity,
-                "confidence": intent.confidence,
+                "confidence": confidence,
                 "mode": mode,
             },
         )
@@ -319,6 +325,8 @@ class TradeEngine:
             )
             self._logger.debug("Close intent payload: %s", intent, exc_info=True)
             return
+        price = float(price)
+        quantity = float(quantity)
         pnl = (
             (price - position.entry_price) * position.quantity
             if position.side == "buy"

@@ -37,8 +37,8 @@ class RiskManager:
         if open_positions >= max_open_positions and intent.action == "OPEN":
             return False
 
-        equity = equity_metrics.get("equity", 0.0)
-        pnl_percent = equity_metrics.get("pnl_percent", 0.0)
+        equity = float(equity_metrics.get("equity", 0.0))
+        pnl_percent = float(equity_metrics.get("pnl_percent", 0.0))
 
         if pnl_percent <= -self._max_drawdown:
             return False
@@ -47,7 +47,9 @@ class RiskManager:
             self._daily_peak_equity = equity
 
         if self._daily_peak_equity:
-            drawdown = (equity - self._daily_peak_equity) / self._daily_peak_equity * 100
+            drawdown = (
+                (equity - self._daily_peak_equity) / self._daily_peak_equity * 100
+            )
             if drawdown <= -self._daily_loss_limit:
                 return False
 
