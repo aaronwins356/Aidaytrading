@@ -204,15 +204,128 @@ def _warm_start_researchers(
                 researcher.preload_candles(symbol, candles)
 
 
+def _validate_strategy_topology(
+    workers: Sequence[object],
+    researchers: Sequence[object],
+    configured_symbols: Iterable[str],
+) -> None:
+    """Ensure each market has two long-only workers and one researcher."""
+
+    logger = get_logger(__name__)
+    symbols = [str(symbol).upper() for symbol in configured_symbols or []]
+    if not symbols:
+        logger.error("No trading symbols configured – unable to validate strategy topology.")
+        raise SystemExit(1)
+
+    expected_worker_count = len(symbols) * 2
+    strategy_workers = [
+        worker for worker in workers if not getattr(worker, "is_researcher", False)
+    ]
+    if len(strategy_workers) != expected_worker_count:
+        logger.error(
+            "Strategy stack requires exactly %d workers (%d symbols × 2). Found %d.",
+            expected_worker_count,
+            len(symbols),
+            len(strategy_workers),
+        )
+        raise SystemExit(1)
+
+    assignment: Dict[str, list[str]] = {symbol: [] for symbol in symbols}
+    for worker in strategy_workers:
+        worker_symbols = [str(sym).upper() for sym in getattr(worker, "symbols", [])]
+        if len(worker_symbols) != 1:
+            logger.error(
+                "Worker %s must focus on exactly one symbol but is configured for %s.",
+                getattr(worker, "name", worker.__class__.__name__),
+                ", ".join(worker_symbols) or "no symbols",
+            )
+            raise SystemExit(1)
+        symbol = worker_symbols[0]
+        if symbol not in assignment:
+            logger.error(
+                "Worker %s references unsupported symbol %s.",
+                getattr(worker, "name", worker.__class__.__name__),
+                symbol,
+            )
+            raise SystemExit(1)
+        if not getattr(worker, "long_only", False):
+            logger.error(
+                "Worker %s must declare long_only=True to comply with the long-only mandate.",
+                getattr(worker, "name", worker.__class__.__name__),
+            )
+            raise SystemExit(1)
+        assignment[symbol].append(getattr(worker, "name", worker.__class__.__name__))
+
+    missing_assignments = {
+        symbol: names for symbol, names in assignment.items() if len(names) != 2
+    }
+    if missing_assignments:
+        for symbol, names in missing_assignments.items():
+            logger.error(
+                "Symbol %s requires exactly two strategy workers but resolved %d (%s).",
+                symbol,
+                len(names),
+                ", ".join(names) or "none",
+            )
+        raise SystemExit(1)
+
+    researcher_map: Dict[str, list[str]] = {symbol: [] for symbol in symbols}
+    for researcher in researchers:
+        researcher_symbols = [
+            str(sym).upper() for sym in getattr(researcher, "symbols", [])
+        ]
+        if len(researcher_symbols) != 1:
+            logger.error(
+                "Researcher %s must track exactly one symbol but is configured for %s.",
+                getattr(researcher, "name", researcher.__class__.__name__),
+                ", ".join(researcher_symbols) or "no symbols",
+            )
+            raise SystemExit(1)
+        symbol = researcher_symbols[0]
+        if symbol not in researcher_map:
+            logger.error(
+                "Researcher %s references unsupported symbol %s.",
+                getattr(researcher, "name", researcher.__class__.__name__),
+                symbol,
+            )
+            raise SystemExit(1)
+        researcher_map[symbol].append(
+            getattr(researcher, "name", researcher.__class__.__name__)
+        )
+
+    missing_researchers = {
+        symbol: names for symbol, names in researcher_map.items() if len(names) != 1
+    }
+    if missing_researchers:
+        for symbol, names in missing_researchers.items():
+            logger.error(
+                "Symbol %s requires one dedicated research bot but resolved %d (%s).",
+                symbol,
+                len(names),
+                ", ".join(names) or "none",
+            )
+        raise SystemExit(1)
+
+    logger.info(
+        "Validated strategy topology: %d long-only workers and %d research bots across %d symbols.",
+        len(strategy_workers),
+        len(researchers),
+        len(symbols),
+    )
+
+
 def _validate_startup(
     engine: TradeEngine,
     workers: Sequence[object],
+    researchers: Sequence[object],
     config: Dict[str, Any],
     ml_service: MLService,
 ) -> None:
     """Ensure critical services and configuration are ready before trading."""
 
     logger = get_logger(__name__)
+
+    _validate_strategy_topology(workers, researchers, config.get("trading", {}).get("symbols", []))
 
     researcher_cfg = config.get("researcher", {})
     if not bool(researcher_cfg.get("enabled", False)):
@@ -436,6 +549,7 @@ async def start_bot() -> None:
         min_cash_per_trade=float(trading_cfg.get("min_cash_per_trade", 10.0)),
         max_cash_per_trade=float(trading_cfg.get("max_cash_per_trade", 20.0)),
         trade_confidence_min=float(trading_cfg.get("trade_confidence_min", 0.5)),
+        ml_service=ml_service,
     )
 
     try:
@@ -447,7 +561,7 @@ async def start_bot() -> None:
         logger.info("Broker returned %d open position(s) for reconciliation", len(broker_positions))
     await engine.rehydrate_open_positions(broker_positions)
 
-    _validate_startup(engine, workers, config, ml_service)
+    _validate_startup(engine, workers, researchers, config, ml_service)
 
     stop_event = asyncio.Event()
 

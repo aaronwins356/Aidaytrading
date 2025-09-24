@@ -1,4 +1,4 @@
-"""Simple momentum worker."""
+"""Long-only exponential moving average momentum worker."""
 
 from __future__ import annotations
 
@@ -16,10 +16,14 @@ from ai_trader.workers.base import BaseWorker
 
 
 class MomentumWorker(BaseWorker):
-    """EMA crossover style momentum worker."""
+    """EMA crossover style momentum worker that only opens long trades."""
 
     name = "Momentum Rider"
     emoji = "⚡"
+    long_only = True
+    strategy_brief = (
+        "Buys when the fast EMA outruns the slow EMA and sells only to close existing longs."
+    )
 
     def __init__(
         self,
@@ -39,21 +43,37 @@ class MomentumWorker(BaseWorker):
         self.slow_window = slow_window
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
+        """Return long-only momentum signals for tracked symbols."""
+
         self.update_history(snapshot)
         signals: Dict[str, str] = {}
         for symbol in self.symbols:
             history = list(self.price_history.get(symbol, []))
+            signal: Optional[str] = None
             if len(history) < self.slow_window:
+                self.update_signal_state(symbol, signal, {"status": "warmup"})
                 continue
             fast_ma = fmean(history[-self.fast_window :])
             slow_ma = fmean(history[-self.slow_window :])
             last_price = history[-1]
             if fast_ma > slow_ma * 1.001:
-                signals[symbol] = "buy"
+                signal = "buy"
             elif fast_ma < slow_ma * 0.999:
-                signals[symbol] = "sell"
+                signal = "exit"
             elif abs(last_price - slow_ma) / slow_ma < 0.001:
-                signals[symbol] = "flat"
+                signal = "hold"
+            indicators = {
+                "fast_ema": fast_ma,
+                "slow_ema": slow_ma,
+                "price": last_price,
+            }
+            if self._ml_service is not None:
+                indicators["ml_confidence"] = self._ml_service.latest_confidence(
+                    symbol, self.name
+                )
+            self.update_signal_state(symbol, signal, indicators)
+            if signal:
+                signals[symbol] = signal
         return signals
 
     async def generate_trade(
@@ -64,7 +84,7 @@ class MomentumWorker(BaseWorker):
         equity_per_trade: float,
         existing_position: Optional[OpenPosition] = None,
     ) -> Optional[TradeIntent]:
-        if signal is None or signal == "flat":
+        if signal is None or signal == "hold":
             return None
 
         price = snapshot.prices.get(symbol)
@@ -91,7 +111,7 @@ class MomentumWorker(BaseWorker):
                     metadata=payload,
                 )
 
-        if signal in {"buy", "sell"} and existing_position is None:
+        if signal == "buy" and existing_position is None:
             cash = float(equity_per_trade)
             allowed, confidence = self.ml_confirmation(symbol)
             if not allowed:
@@ -110,12 +130,12 @@ class MomentumWorker(BaseWorker):
                 metadata=metadata,
             )
 
-        if signal == "sell" and existing_position and existing_position.side == "buy":
+        if signal in {"sell", "exit"} and existing_position and existing_position.side == "buy":
             pnl = (price - existing_position.entry_price) * existing_position.quantity
             base_cash = float(existing_position.cash_spent)
             pnl_percent = pnl / base_cash * 100 if base_cash else 0.0
             self.record_trade_event(
-                "close_momentum_short",
+                "close_momentum_long",
                 symbol,
                 {"pnl": pnl, "pnl_percent": pnl_percent, **self.risk_snapshot(symbol)},
             )
@@ -131,37 +151,7 @@ class MomentumWorker(BaseWorker):
                 pnl_percent=pnl_percent,
                 pnl_usd=pnl,
                 win_loss="win" if pnl > 0 else "loss",
-                reason="bear-cross",
-                metadata={
-                    "signal": signal,
-                    "pnl": pnl,
-                    "pnl_percent": pnl_percent,
-                    **self.risk_snapshot(symbol),
-                },
-            )
-
-        if signal == "buy" and existing_position and existing_position.side == "sell":
-            pnl = (existing_position.entry_price - price) * existing_position.quantity
-            base_cash = float(existing_position.cash_spent)
-            pnl_percent = pnl / base_cash * 100 if base_cash else 0.0
-            self.record_trade_event(
-                "close_momentum_cover",
-                symbol,
-                {"pnl": pnl, "pnl_percent": pnl_percent, **self.risk_snapshot(symbol)},
-            )
-            self.clear_risk_tracker(symbol)
-            return TradeIntent(
-                worker=self.name,
-                action="CLOSE",
-                symbol=symbol,
-                side="buy",
-                cash_spent=existing_position.cash_spent,
-                entry_price=existing_position.entry_price,
-                exit_price=price,
-                pnl_percent=pnl_percent,
-                pnl_usd=pnl,
-                win_loss="win" if pnl > 0 else "loss",
-                reason="bull-cover",
+                reason="momentum-exit",
                 metadata={
                     "signal": signal,
                     "pnl": pnl,

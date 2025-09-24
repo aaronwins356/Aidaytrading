@@ -19,6 +19,9 @@ class MarketResearchWorker(BaseWorker):
     name = "Research Sentinel"
     emoji = "🔬"
     is_researcher = True
+    strategy_brief = (
+        "Streams engineered market features into the ML service so trading bots receive up-to-date confidence scores."
+    )
 
     def __init__(
         self,
@@ -48,6 +51,12 @@ class MarketResearchWorker(BaseWorker):
         self._bootstrap_candles: Dict[str, List[Dict[str, float]]] = {
             symbol: [] for symbol in self.symbols
         }
+        if len(self.symbols) == 1:
+            symbol_label = self.symbols[0].replace("/", "-")
+            self.name = f"Research Sentinel ({symbol_label})"
+        emoji = cfg.get("emoji")
+        if isinstance(emoji, str) and emoji.strip():
+            self.emoji = emoji.strip()
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
         # Researcher does not emit trade signals but we keep interface parity.
@@ -318,10 +327,11 @@ class MarketResearchWorker(BaseWorker):
             return None
         prev_close = float(candles[-2].get("close", 0.0))
         latest_close = float(candles[-1].get("close", 0.0))
-        # A label of ``1`` indicates a downward move, aligning with the short bias
-        # of the ML-assisted workers. A value of ``0`` signals upward or flat
-        # closes, helping ensure the model's ground truth matches execution logic.
-        return 1.0 if latest_close < prev_close else 0.0
+        # A label of ``1`` indicates an upward move which represents a successful
+        # long entry. ``0`` is used for flat or negative closes so the ML
+        # pipeline can learn from both profitable and losing trades while the
+        # engine enforces a long-only execution policy.
+        return 1.0 if latest_close > prev_close else 0.0
 
     @staticmethod
     def _ema(history: Iterable[float], window: int) -> float:
