@@ -230,9 +230,10 @@ class KrakenClient:
         balances = await self.fetch_balances()
         equity = float(balances.get(self._base_currency, 0.0))
         for asset, amount in balances.items():
-            if asset == self._base_currency or amount == 0:
+            normalized_asset = self._normalise_balance_asset(asset)
+            if not normalized_asset or normalized_asset == self._base_currency or amount == 0:
                 continue
-            symbol = f"{asset}/{self._base_currency}"
+            symbol = f"{normalized_asset}/{self._base_currency}"
             price = prices.get(symbol)
             if price is None:
                 price = await self.fetch_price(symbol)
@@ -246,6 +247,25 @@ class KrakenClient:
             self._starting_equity_captured = True
             self._logger.info("Captured live starting equity at %.2f %s", equity, self._base_currency)
         return equity, balances
+
+    def _normalise_balance_asset(self, asset: str) -> str:
+        """Translate exchange-specific asset codes into standard symbols."""
+
+        text = str(asset or "").strip()
+        if not text:
+            return ""
+        try:
+            # ``safe_currency_code`` normalises ccxt/Kraken specific asset identifiers.
+            # It is resilient to missing metadata and simply echoes the input on failure.
+            currency = self._exchange.safe_currency_code(text)
+        except Exception:  # pragma: no cover - defensive guard
+            currency = None
+        normalised = str(currency or text).upper()
+        if "." in normalised:
+            base, suffix = normalised.split(".", 1)
+            if suffix in {"F", "S"}:
+                normalised = base
+        return normalised
 
     def _adjust_amount(self, symbol: str, amount: float) -> float:
         market = self._markets.get(symbol)
