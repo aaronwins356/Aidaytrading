@@ -69,3 +69,21 @@ def test_ml_service_build_forest(tmp_path) -> None:
     forest_model = service._build_forest()
     assert forest_model is not None
     assert forest_model.n_models == 3
+
+
+def test_latest_confidence_falls_back_to_researcher(tmp_path) -> None:
+    """Worker-specific confidence queries should reuse researcher scores."""
+
+    db_path = tmp_path / "ml.db"
+    TradeLog(db_path)
+    service = MLService(
+        db_path=db_path,
+        feature_keys=["f1", "f2"],
+        learning_rate=0.1,
+        regularization=0.01,
+    )
+    probability = service.update("ETH/USD", {"f1": 0.1, "f2": 0.2}, label=1.0)
+
+    # A worker that has not scored yet should inherit the researcher's result.
+    fallback_probability = service.latest_confidence("ETH/USD", worker="new-worker")
+    assert fallback_probability == pytest.approx(probability)

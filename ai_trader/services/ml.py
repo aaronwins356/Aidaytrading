@@ -528,7 +528,10 @@ class MLService:
         """Expose the last scored confidence for dashboards."""
 
         key = (worker or "worker", symbol)
-        return self._latest_confidence.get(key, 0.0)
+        if key in self._latest_confidence:
+            return self._latest_confidence[key]
+        researcher_key = ("researcher", symbol)
+        return self._latest_confidence.get(researcher_key, 0.0)
 
     def latest_features(self, symbol: str) -> Optional[Dict[str, float]]:
         """Return the last seen feature vector for a symbol."""
