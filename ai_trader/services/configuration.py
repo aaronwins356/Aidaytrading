@@ -131,8 +131,11 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
                 logger.warning("Ignoring malformed trading symbol: %s", candidate)
                 continue
             base, quote = text.split("/", 1)
-            if base == "XBT":
-                base = "BTC"
+            base = base.split(".", 1)[0]
+            quote = quote.split(".", 1)[0]
+            alias_map = {"XBT": "BTC", "XETH": "ETH", "ETH2": "ETH"}
+            base = alias_map.get(base, base)
+            quote = alias_map.get(quote, quote)
             symbol = f"{base}/{quote}"
             if symbol not in seen_symbols:
                 normalised_symbols.append(symbol)

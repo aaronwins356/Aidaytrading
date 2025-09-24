@@ -112,7 +112,8 @@ class MomentumWorker(BaseWorker):
 
         if signal == "sell" and existing_position and existing_position.side == "buy":
             pnl = (price - existing_position.entry_price) * existing_position.quantity
-            pnl_percent = pnl / existing_position.cash_spent * 100 if existing_position.cash_spent else 0.0
+            base_cash = float(existing_position.cash_spent)
+            pnl_percent = pnl / base_cash * 100 if base_cash else 0.0
             self.record_trade_event(
                 "close_momentum_short",
                 symbol,
@@ -141,7 +142,8 @@ class MomentumWorker(BaseWorker):
 
         if signal == "buy" and existing_position and existing_position.side == "sell":
             pnl = (existing_position.entry_price - price) * existing_position.quantity
-            pnl_percent = pnl / existing_position.cash_spent * 100 if existing_position.cash_spent else 0.0
+            base_cash = float(existing_position.cash_spent)
+            pnl_percent = pnl / base_cash * 100 if base_cash else 0.0
             self.record_trade_event(
                 "close_momentum_cover",
                 symbol,
