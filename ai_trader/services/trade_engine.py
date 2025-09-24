@@ -34,6 +34,7 @@ class TradeEngine:
         max_open_positions: int,
         refresh_interval: float,
         paper_trading: bool,
+        min_cash_per_trade: float = 15.0,
     ) -> None:
         self._broker = broker
         self._websocket_manager = websocket_manager
@@ -54,6 +55,10 @@ class TradeEngine:
         self._signal_only_mode = False
         self._signal_only_reason = ""
         self._paper_trading = paper_trading
+        # Kraken rejects orders whose notional value is below the exchange minimum (~$10).
+        # Enforcing a configurable floor here keeps all strategies broker-compliant even
+        # when their internal position sizing logic suggests smaller allocations.
+        self._min_cash_per_trade = max(0.0, float(min_cash_per_trade))
 
     async def rehydrate_open_positions(self, positions: Iterable[OpenPosition]) -> None:
         """Reconcile broker open positions with the in-memory engine state."""
@@ -263,6 +268,7 @@ class TradeEngine:
                         continue
                     if intent is None:
                         continue
+                    intent = self._apply_min_trade_cash_floor(intent)
                     if self._kill_switch and intent.action == "OPEN":
                         self._logger.warning("Kill switch active. Blocking %s intent for %s", worker.name, symbol)
                         continue
@@ -370,6 +376,39 @@ class TradeEngine:
             await self._close_trade(intent, position_key, existing_position)
         else:
             self._logger.debug("Ignoring trade intent %s", intent)
+
+    def _apply_min_trade_cash_floor(self, intent: TradeIntent) -> TradeIntent:
+        """Ensure trade intents respect the broker's minimum notional size."""
+
+        if intent.action != "OPEN" or self._min_cash_per_trade <= 0:
+            return intent
+
+        requested_cash = float(intent.cash_spent)
+        if requested_cash >= self._min_cash_per_trade:
+            return intent
+
+        self._logger.info(
+            "Applying $%.2f cash floor to %s order from %s for %s (requested $%.2f)",
+            self._min_cash_per_trade,
+            intent.side.upper(),
+            intent.worker,
+            intent.symbol,
+            requested_cash,
+        )
+
+        metadata = dict(intent.metadata or {})
+        metadata.update(
+            {
+                "cash_floor_applied": True,
+                "original_cash_spent": requested_cash,
+                "min_cash_per_trade": self._min_cash_per_trade,
+            }
+        )
+        intent.metadata = metadata
+        # Override the requested cash so downstream sizing and logging use the
+        # exchange-compliant notional amount.
+        intent.cash_spent = self._min_cash_per_trade
+        return intent
 
     async def _open_trade(self, intent: TradeIntent, key: Tuple[str, str]) -> None:
         mode = "paper" if self._paper_trading else "live"
