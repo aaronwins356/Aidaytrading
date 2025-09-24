@@ -573,7 +573,12 @@ def render_strategy_pulse(config: Dict, bot_states: pd.DataFrame, ml_service: ML
     st.dataframe(signal_df[display_cols], use_container_width=True)
 
 
-def render_bot_cards(config: Dict, bot_states: pd.DataFrame, ml_service: MLService) -> None:
+def render_bot_cards(
+    config: Dict,
+    bot_states: pd.DataFrame,
+    ml_service: MLService,
+    trades: pd.DataFrame,
+) -> None:
     st.subheader("Strategy Stack")
     if bot_states.empty:
         st.info("Workers will appear once the engine publishes their state.")
@@ -584,6 +589,56 @@ def render_bot_cards(config: Dict, bot_states: pd.DataFrame, ml_service: MLServi
         _display_name_for_definition(definition): definition
         for definition in definitions.values()
     }
+    trading_mode = str(config.get("trading", {}).get("mode", "paper")).lower()
+    mode_sentence = (
+        "live trading with the broker"
+        if trading_mode == "live"
+        else "paper simulation mode"
+    )
+
+    def _status_sentence(raw_status: str) -> str:
+        status_key = (raw_status or "").lower()
+        mapping = {
+            "ready": "actively scanning the market and ready to trade",
+            "warmup": "collecting price history before taking new positions",
+            "paused": "paused via the control panel",
+        }
+        return mapping.get(status_key, f"operating in {raw_status or 'an unknown state'}")
+
+    def _performance_summary(worker_trades: pd.DataFrame) -> str:
+        if worker_trades.empty:
+            return "No closed trades yet."
+        closed = worker_trades[worker_trades["exit_price"].notna()]
+        if closed.empty:
+            return "Positions opened, awaiting closes before we can score performance."
+        wins = closed[closed["win_loss"].str.lower() == "win"] if "win_loss" in closed else pd.DataFrame()
+        win_rate = (len(wins) / len(closed) * 100) if len(closed) else 0.0
+        net_pnl = float(closed.get("pnl_usd", pd.Series(dtype=float)).fillna(0.0).sum())
+        avg_return = float(closed.get("pnl_percent", pd.Series(dtype=float)).dropna().mean() or 0.0)
+        return (
+            "{count} closed trade(s), win rate {win:.0f}% with net P/L ${pnl:,.2f} "
+            "and an average return of {avg:.2f}%."
+        ).format(count=len(closed), win=win_rate, pnl=net_pnl, avg=avg_return)
+
+    def _last_action(worker_trades: pd.DataFrame) -> str:
+        if worker_trades.empty:
+            return "No orders have been executed yet."
+        latest_trade = worker_trades.sort_values("timestamp").iloc[-1]
+        action_time = latest_trade["timestamp"].strftime("%Y-%m-%d %H:%M UTC")
+        symbol = latest_trade.get("symbol", "the market")
+        if pd.isna(latest_trade.get("exit_price")):
+            entry = float(latest_trade.get("entry_price", 0.0))
+            return (
+                "Opened a long position on {symbol} at ${price:,.2f} on {time}."
+            ).format(symbol=symbol, price=entry, time=action_time)
+        exit_price = float(latest_trade.get("exit_price", 0.0))
+        pnl_percent = float(latest_trade.get("pnl_percent", 0.0))
+        outcome = str(latest_trade.get("win_loss") or "result").lower()
+        outcome_label = "a win" if outcome == "win" else "a loss" if outcome == "loss" else "an outcome"
+        return (
+            "Closed the latest {symbol} trade at ${price:,.2f} on {time}, "
+            "locking {outcome} of {pnl:.2f}%."
+        ).format(symbol=symbol, price=exit_price, time=action_time, outcome=outcome_label, pnl=pnl_percent)
 
     grouped = bot_states.groupby("worker")
     cols = st.columns(2)
@@ -598,12 +653,14 @@ def render_bot_cards(config: Dict, bot_states: pd.DataFrame, ml_service: MLServi
             strategy_brief = indicators.get("strategy_brief") or _strategy_summary(module_path)
             st.caption(strategy_brief)
             latest = indicators_frame
-            status = latest.get("status", "unknown")
-            last_signal = latest.get("last_signal")
+            symbols = sorted({str(sym) for sym in df["symbol"].dropna().unique()})
+            primary_symbol = ", ".join(symbols) if symbols else "no assigned markets"
+            status = str(latest.get("status", "unknown"))
+            status_sentence = _status_sentence(status)
             st.markdown(
-                f"**Status:** `{status}` · **Symbol:** `{latest.get('symbol', 'n/a')}`"
+                f"{worker} is {status_sentence} while monitoring {primary_symbol} in {mode_sentence}."
             )
-            risk = latest.get("risk", {}) or {}
+            last_signal = latest.get("last_signal")
             ml_confidence = indicators.get("ml_confidence")
             threshold = (
                 indicators.get("ml_threshold")
@@ -611,7 +668,7 @@ def render_bot_cards(config: Dict, bot_states: pd.DataFrame, ml_service: MLServi
                 or ml_service.default_threshold
             )
             decision_text = _human_signal(last_signal)
-            st.markdown(f"**Active decision:** {decision_text}")
+            st.markdown(f"Latest signal assessment: {decision_text}")
             if module_path.endswith("researcher.MarketResearchWorker"):
                 feature_snapshot = indicators.get("features")
                 feature_count = len(feature_snapshot) if isinstance(feature_snapshot, dict) else 0
@@ -633,31 +690,56 @@ def render_bot_cards(config: Dict, bot_states: pd.DataFrame, ml_service: MLServi
                     if long_only
                     else "Mixed positioning configured."
                 )
-                st.markdown(f"**Posture:** {posture_sentence}")
+                st.markdown(posture_sentence)
                 if ml_confidence is None and latest.get("symbol"):
                     ml_confidence = ml_service.latest_confidence(
                         latest.get("symbol"), worker=worker
                     )
                 if ml_confidence is not None:
                     st.markdown(
-                        f"**ML confidence:** {float(ml_confidence):.3f} (gate {float(threshold):.2f})."
+                        (
+                            "ML gate is reading {confidence:.3f} versus a required {threshold:.2f}; "
+                            "the strategy {state}."
+                        ).format(
+                            confidence=float(ml_confidence),
+                            threshold=float(threshold),
+                            state=(
+                                "is cleared to trade"
+                                if float(ml_confidence) >= float(threshold)
+                                else "is waiting for more confirmation"
+                            ),
+                        )
                     )
                 else:
-                    st.markdown("**ML confidence:** Waiting for features from the researcher.")
+                    st.markdown("Waiting for fresh ML features before taking new trades.")
+                risk = latest.get("risk", {}) or {}
                 if risk:
                     position_pct = float(risk.get("position_size_pct", 100.0))
                     stop_loss = float(risk.get("stop_loss_pct", 0.0))
                     take_profit = float(risk.get("take_profit_pct", 0.0))
                     trailing = float(risk.get("trailing_stop_pct", 0.0))
                     st.markdown(
-                        "**Risk controls:** {alloc:.0f}% allocation · stop {sl:.2f}% · target {tp:.2f}% · trail {tr:.2f}%".format(
+                        (
+                            "Risk guard rails: targeting {alloc:.0f}% of allocated capital with a "
+                            "{sl:.2f}% protective stop, {tp:.2f}% profit objective, and {tr:.2f}% trailing buffer."
+                        ).format(
                             alloc=position_pct,
                             sl=stop_loss,
                             tp=take_profit,
                             tr=trailing,
                         )
                     )
-            st.caption(f"Last update: {latest['updated_at'].strftime('%H:%M:%S UTC')}")
+                worker_trades = (
+                    trades[trades["worker"] == worker] if not trades.empty else pd.DataFrame()
+                )
+                st.markdown(f"Most recent action: {_last_action(worker_trades)}")
+                st.markdown(f"Performance snapshot: {_performance_summary(worker_trades)}")
+            last_updated = latest.get("updated_at")
+            if isinstance(last_updated, pd.Timestamp):
+                timestamp_text = last_updated.tz_convert("UTC") if last_updated.tzinfo else last_updated
+                st.caption(f"Last update received at {timestamp_text.strftime('%H:%M:%S UTC')}")
+            else:
+                st.caption("Awaiting the first status update from this worker.")
 
 
 def build_market_figure(
@@ -1180,7 +1262,7 @@ def main() -> None:
     render_equity_curve(equity)
     render_runtime_status(config, bot_states, ml_service)
     render_strategy_pulse(config, bot_states, ml_service)
-    render_bot_cards(config, bot_states, ml_service)
+    render_bot_cards(config, bot_states, ml_service, trades)
     render_market_view(symbol, trades, ml_service)
     render_ml_debug_panel(config, ml_service, bot_states)
     render_trade_logs(trades, events)
