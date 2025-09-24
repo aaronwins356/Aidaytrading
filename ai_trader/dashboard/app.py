@@ -110,6 +110,8 @@ def _strategy_summary(module_path: str) -> str:
 
 
 def _human_signal(signal: Optional[str]) -> str:
+    """Translate low-level strategy signals into friendly UI text."""
+
     mapping = {
         None: "Idle and monitoring conditions.",
         "buy": "Looking for a long entry.",
@@ -118,7 +120,17 @@ def _human_signal(signal: Optional[str]) -> str:
         "hold": "Holding steady; no action required.",
         "ml-block": "Waiting for ML confidence to exceed the gate.",
     }
-    return mapping.get(signal, signal.capitalize())
+
+    # Pandas-backed data frames sometimes deliver ``NaN`` instead of ``None``.
+    if signal is None or (isinstance(signal, float) and pd.isna(signal)):
+        return mapping[None]
+
+    if isinstance(signal, str):
+        normalized = signal.strip().lower()
+        return mapping.get(normalized, normalized.capitalize())
+
+    # Fall back to a string representation for any unexpected signal types.
+    return str(signal)
 
 
 @st.cache_data(ttl=5)
