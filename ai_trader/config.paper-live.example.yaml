@@ -19,6 +19,7 @@ trading:
   paper_trading: true
   paper_starting_equity: 20000.0
   allow_shorting: true
+  min_cash_per_trade: 15.0
   mode: "paper"  # Toggle to "live" only after credentials + production risk checks.
 
 risk:

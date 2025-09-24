@@ -119,6 +119,7 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     trading_cfg.setdefault("equity_allocation_percent", 2.0)
     trading_cfg.setdefault("paper_starting_equity", 25000.0)
     trading_cfg.setdefault("max_open_positions", 3)
+    trading_cfg.setdefault("min_cash_per_trade", 15.0)
     raw_symbols = trading_cfg.get("symbols", [])
     normalised_symbols: list[str] = []
     seen_symbols: set[str] = set()
@@ -152,6 +153,9 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     )
     trading_cfg["max_open_positions"] = int(
         trading_cfg.get("max_open_positions", 3)
+    )
+    trading_cfg["min_cash_per_trade"] = float(
+        trading_cfg.get("min_cash_per_trade", 15.0)
     )
     normalised["trading"] = trading_cfg
 

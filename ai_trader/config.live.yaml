@@ -5,6 +5,7 @@ trading:
   equity_allocation_percent: 1.0
   max_open_positions: 2
   allow_shorting: true
+  min_cash_per_trade: 15.0
 
 risk:
   max_drawdown_percent: 8.0

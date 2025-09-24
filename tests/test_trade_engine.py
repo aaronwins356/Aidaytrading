@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import json
 from dataclasses import dataclass
 import types
 from typing import Any, Callable
@@ -348,7 +349,7 @@ def test_trade_engine_short_sell_without_reduce_only(tmp_path) -> None:
     asyncio.run(_run_short_trade_engine(tmp_path))
 
 
-async def _run_string_cash_trade(tmp_path) -> list[tuple[str, str, float]]:
+async def _run_string_cash_trade(tmp_path) -> tuple[list[tuple[str, str, float]], list[Any]]:
     """Run the engine with a worker submitting string cash sizes."""
 
     db_path = tmp_path / "string_cash.db"
@@ -382,14 +383,21 @@ async def _run_string_cash_trade(tmp_path) -> list[tuple[str, str, float]]:
     await engine.stop()
     await run_task
 
-    return broker.orders
+    trades = list(trade_log.fetch_trades())
+    return broker.orders, trades
 
 
 def test_trade_engine_casts_string_cash_from_workers(tmp_path) -> None:
-    orders = asyncio.run(_run_string_cash_trade(tmp_path))
+    orders, trades = asyncio.run(_run_string_cash_trade(tmp_path))
     assert orders, "Engine should execute at least one order"
     _, _, cash_value = orders[-1]
-    assert cash_value == pytest.approx(3.59)
+    assert cash_value == pytest.approx(15.0)
+
+    assert trades, "Trade log should capture the executed order"
+    metadata = json.loads(trades[0]["metadata_json"])
+    assert metadata.get("cash_floor_applied") is True
+    assert metadata.get("original_cash_spent") == pytest.approx(3.59)
+    assert metadata.get("min_cash_per_trade") == pytest.approx(15.0)
 
 
 async def _place_short_order_with_client() -> dict[str, Any]:
