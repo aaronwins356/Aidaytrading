@@ -14,8 +14,9 @@ trading:
   max_open_positions: 3
   paper_trading: true
   paper_starting_equity: 25000.0
-  allow_shorting: true
-  min_cash_per_trade: 15.0
+  allow_shorting: false
+  min_cash_per_trade: 10.0
+  trade_confidence_min: 0.5
   mode: "paper"  # Toggle to "live" only after loading env credentials and restarting the bot.
 
 risk:
@@ -50,7 +51,7 @@ ml:
     - close_to_low
   lr: 0.03
   regularization: 0.0005
-  threshold: 0.25  # Raise towards 0.55–0.65 for stricter production gating.
+  threshold: 0.5  # Raise towards 0.55–0.65 for stricter production gating.
   ensemble: true
   forest_size: 10
   random_state: 7

@@ -20,7 +20,7 @@ def test_normalize_config_maps_deprecated_keys(caplog) -> None:
     assert ml_cfg["lr"] == 0.1
     assert ml_cfg["forest_size"] == 25
     assert ml_cfg["ensemble"] is True
-    assert ml_cfg["threshold"] == 0.25
+    assert ml_cfg["threshold"] == 0.5
     assert "learning_rate" in caplog.text
     assert "ensemble_trees" in caplog.text
 
@@ -35,3 +35,4 @@ def test_normalize_config_sanitises_symbols() -> None:
     normalised = normalize_config(config)
 
     assert normalised["trading"]["symbols"] == ["BTC/USD", "SOL/USD", "ETH/USD"]
+    assert normalised["trading"]["trade_confidence_min"] == 0.5

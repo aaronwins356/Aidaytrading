@@ -433,7 +433,8 @@ async def start_bot() -> None:
         max_open_positions=int(trading_cfg.get("max_open_positions", 3)),
         refresh_interval=float(worker_cfg.get("refresh_interval_seconds", 30)),
         paper_trading=broker.is_paper_trading,
-        min_cash_per_trade=float(trading_cfg.get("min_cash_per_trade", 15.0)),
+        min_cash_per_trade=float(trading_cfg.get("min_cash_per_trade", 10.0)),
+        trade_confidence_min=float(trading_cfg.get("trade_confidence_min", 0.5)),
     )
 
     try:
