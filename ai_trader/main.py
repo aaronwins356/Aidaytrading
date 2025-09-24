@@ -434,6 +434,7 @@ async def start_bot() -> None:
         refresh_interval=float(worker_cfg.get("refresh_interval_seconds", 30)),
         paper_trading=broker.is_paper_trading,
         min_cash_per_trade=float(trading_cfg.get("min_cash_per_trade", 10.0)),
+        max_cash_per_trade=float(trading_cfg.get("max_cash_per_trade", 20.0)),
         trade_confidence_min=float(trading_cfg.get("trade_confidence_min", 0.5)),
     )
 

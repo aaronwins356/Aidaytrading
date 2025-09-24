@@ -6,6 +6,7 @@ trading:
   max_open_positions: 2
   allow_shorting: false
   min_cash_per_trade: 10.0
+  max_cash_per_trade: 20.0
   trade_confidence_min: 0.6
 
 risk:

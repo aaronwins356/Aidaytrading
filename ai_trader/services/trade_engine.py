@@ -35,6 +35,7 @@ class TradeEngine:
         refresh_interval: float,
         paper_trading: bool,
         min_cash_per_trade: float = 10.0,
+        max_cash_per_trade: float = 20.0,
         trade_confidence_min: float = 0.5,
     ) -> None:
         self._broker = broker
@@ -60,6 +61,7 @@ class TradeEngine:
         # Enforcing a configurable floor here keeps all strategies broker-compliant even
         # when their internal position sizing logic suggests smaller allocations.
         self._min_cash_per_trade = max(0.0, float(min_cash_per_trade))
+        self._max_cash_per_trade = max(self._min_cash_per_trade, float(max_cash_per_trade))
         self._trade_confidence_min = max(0.0, min(1.0, float(trade_confidence_min)))
         self._base_currency = getattr(broker, "base_currency", "USD")
 
@@ -271,7 +273,7 @@ class TradeEngine:
                         continue
                     if intent is None:
                         continue
-                    intent = self._apply_min_trade_cash_floor(intent)
+                    intent = self._apply_trade_size_bounds(intent)
                     if self._violates_long_only(worker, intent, open_position):
                         continue
                     if (
@@ -281,7 +283,7 @@ class TradeEngine:
                         and float(intent.confidence) < self._trade_confidence_min
                     ):
                         self._logger.info(
-                            "[RISK] Skipped ML trade for %s – confidence %.3f below %.3f",
+                            "[ML] Skipped low-confidence trade (symbol=%s, confidence=%.3f < threshold=%.3f)",
                             intent.symbol,
                             float(intent.confidence),
                             self._trade_confidence_min,
@@ -413,7 +415,7 @@ class TradeEngine:
             confidence = float(intent.confidence)
             if self._is_ml_worker(worker):
                 self._logger.info(
-                    "[RISK] Short trade blocked by policy (symbol=%s, confidence=%.3f)",
+                    "[RISK] Short signal blocked (symbol=%s, confidence=%.3f)",
                     intent.symbol,
                     confidence,
                 )
@@ -465,37 +467,56 @@ class TradeEngine:
             intent.cash_spent = available
         return intent
 
-    def _apply_min_trade_cash_floor(self, intent: TradeIntent) -> TradeIntent:
-        """Ensure trade intents respect the broker's minimum notional size."""
+    def _apply_trade_size_bounds(self, intent: TradeIntent) -> TradeIntent:
+        """Clamp open order cash sizing to the configured $10–$20 policy band."""
 
         if intent.action != "OPEN" or self._min_cash_per_trade <= 0:
             return intent
 
         requested_cash = float(intent.cash_spent)
-        if requested_cash >= self._min_cash_per_trade:
-            return intent
-
-        self._logger.info(
-            "Applying $%.2f cash floor to %s order from %s for %s (requested $%.2f)",
-            self._min_cash_per_trade,
-            intent.side.upper(),
-            intent.worker,
-            intent.symbol,
-            requested_cash,
-        )
-
         metadata = dict(intent.metadata or {})
-        metadata.update(
-            {
-                "cash_floor_applied": True,
-                "original_cash_spent": requested_cash,
-                "min_cash_per_trade": self._min_cash_per_trade,
-            }
-        )
-        intent.metadata = metadata
-        # Override the requested cash so downstream sizing and logging use the
-        # exchange-compliant notional amount.
-        intent.cash_spent = self._min_cash_per_trade
+        original_cash = requested_cash
+        adjusted = False
+
+        if requested_cash < self._min_cash_per_trade:
+            self._logger.info(
+                "Applying $%.2f cash floor to %s order from %s for %s (requested $%.2f)",
+                self._min_cash_per_trade,
+                intent.side.upper(),
+                intent.worker,
+                intent.symbol,
+                requested_cash,
+            )
+            metadata.update(
+                {
+                    "cash_floor_applied": True,
+                    "original_cash_spent": original_cash,
+                    "min_cash_per_trade": self._min_cash_per_trade,
+                }
+            )
+            requested_cash = self._min_cash_per_trade
+            adjusted = True
+
+        if requested_cash > self._max_cash_per_trade:
+            self._logger.info(
+                "[RISK] Capping %s order size to $%.2f (requested $%.2f exceeds ceiling)",
+                intent.symbol,
+                self._max_cash_per_trade,
+                requested_cash,
+            )
+            metadata.setdefault("original_cash_spent", original_cash)
+            metadata.update(
+                {
+                    "cash_cap_applied": True,
+                    "max_cash_per_trade": self._max_cash_per_trade,
+                }
+            )
+            requested_cash = self._max_cash_per_trade
+            adjusted = True
+
+        if adjusted:
+            intent.metadata = metadata
+            intent.cash_spent = requested_cash
         return intent
 
     async def _open_trade(self, intent: TradeIntent, key: Tuple[str, str]) -> None:

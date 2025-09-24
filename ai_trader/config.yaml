@@ -16,6 +16,7 @@ trading:
   paper_starting_equity: 25000.0
   allow_shorting: false
   min_cash_per_trade: 10.0
+  max_cash_per_trade: 20.0
   trade_confidence_min: 0.5
   mode: "paper"  # Toggle to "live" only after loading env credentials and restarting the bot.
 
