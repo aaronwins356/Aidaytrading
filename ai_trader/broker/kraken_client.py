@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import math
 from decimal import Decimal, ROUND_DOWN
 import random
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -314,9 +315,55 @@ class KrakenClient:
         return adjusted
 
     @staticmethod
-    def _apply_precision(amount: float, precision: int) -> float:
-        quantize_str = "0." + "0" * (precision - 1) + "1" if precision > 0 else "1"
-        return float(Decimal(amount).quantize(Decimal(quantize_str), rounding=ROUND_DOWN))
+    def _apply_precision(
+        amount: float, precision: int | float | str | None
+    ) -> float:
+        """Round ``amount`` down to the exchange precision or step size.
+
+        Kraken (via ccxt) occasionally reports the precision as a fractional step
+        (e.g. ``0.0001``) instead of the number of decimal places. The original
+        implementation treated the value as an integer count of decimals which
+        resulted in ``TypeError`` when Python attempted to multiply a string by a
+        non-integer float. Handling both representations keeps order sizing
+        robust regardless of the market metadata shape.
+        """
+
+        amount_dec = Decimal(str(amount))
+
+        if isinstance(precision, str):
+            precision = precision.strip()
+            if precision:
+                try:
+                    precision_value: float | int | None = float(precision)
+                except ValueError:
+                    precision_value = None
+            else:
+                precision_value = None
+        else:
+            precision_value = precision
+
+        if isinstance(precision_value, float):
+            if math.isnan(precision_value):
+                precision_value = None
+            elif not precision_value.is_integer():
+                step = Decimal(str(precision_value))
+                if step <= 0:
+                    return float(amount_dec)
+                steps = (amount_dec / step).to_integral_value(rounding=ROUND_DOWN)
+                return float(steps * step)
+            else:
+                precision_value = int(precision_value)
+
+        if isinstance(precision_value, int):
+            digits = max(0, precision_value)
+        else:
+            digits = 0
+
+        if digits == 0:
+            quantum = Decimal("1")
+        else:
+            quantum = Decimal("1") / (Decimal("10") ** digits)
+        return float(amount_dec.quantize(quantum, rounding=ROUND_DOWN))
 
     def _simulate_fill(self, base: str, quote: str, side: str, amount: float, price: float) -> None:
         amount = float(amount)

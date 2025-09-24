@@ -43,3 +43,18 @@ def test_normalise_balance_asset_strips_suffix(monkeypatch: pytest.MonkeyPatch) 
     assert client._normalise_balance_asset("eth.s") == "ETH"
     assert client._normalise_balance_asset(" usd ") == "USD"
     assert client._normalise_balance_asset("") == ""
+
+
+def test_apply_precision_handles_fractional_steps() -> None:
+    client = DummyKrakenClient()
+
+    # Kraken can report the precision as a fractional step (e.g. 0.001). The
+    # helper should trim to the nearest multiple of that step without raising.
+    assert client._apply_precision(1.234567, 0.001) == pytest.approx(1.234)
+
+
+def test_apply_precision_accepts_decimal_digits() -> None:
+    client = DummyKrakenClient()
+
+    # Precision values represented as strings should be treated as digit counts.
+    assert client._apply_precision(0.123456789, "5") == pytest.approx(0.12345)
