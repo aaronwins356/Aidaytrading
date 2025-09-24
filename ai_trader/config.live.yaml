@@ -4,15 +4,16 @@ trading:
   paper_trading: false
   equity_allocation_percent: 1.0
   max_open_positions: 2
-  allow_shorting: true
-  min_cash_per_trade: 15.0
+  allow_shorting: false
+  min_cash_per_trade: 10.0
+  trade_confidence_min: 0.6
 
 risk:
   max_drawdown_percent: 8.0
   daily_loss_limit_percent: 1.5
 
 ml:
-  threshold: 0.4
+  threshold: 0.5
   warmup_samples: 50
   ensemble: true
 

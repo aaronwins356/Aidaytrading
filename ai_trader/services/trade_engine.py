@@ -34,7 +34,8 @@ class TradeEngine:
         max_open_positions: int,
         refresh_interval: float,
         paper_trading: bool,
-        min_cash_per_trade: float = 15.0,
+        min_cash_per_trade: float = 10.0,
+        trade_confidence_min: float = 0.5,
     ) -> None:
         self._broker = broker
         self._websocket_manager = websocket_manager
@@ -59,6 +60,8 @@ class TradeEngine:
         # Enforcing a configurable floor here keeps all strategies broker-compliant even
         # when their internal position sizing logic suggests smaller allocations.
         self._min_cash_per_trade = max(0.0, float(min_cash_per_trade))
+        self._trade_confidence_min = max(0.0, min(1.0, float(trade_confidence_min)))
+        self._base_currency = getattr(broker, "base_currency", "USD")
 
     async def rehydrate_open_positions(self, positions: Iterable[OpenPosition]) -> None:
         """Reconcile broker open positions with the in-memory engine state."""
@@ -269,6 +272,26 @@ class TradeEngine:
                     if intent is None:
                         continue
                     intent = self._apply_min_trade_cash_floor(intent)
+                    if self._violates_long_only(worker, intent, open_position):
+                        continue
+                    if (
+                        intent.action == "OPEN"
+                        and self._trade_confidence_min > 0.0
+                        and self._is_ml_worker(worker)
+                        and float(intent.confidence) < self._trade_confidence_min
+                    ):
+                        self._logger.info(
+                            "[RISK] Skipped ML trade for %s – confidence %.3f below %.3f",
+                            intent.symbol,
+                            float(intent.confidence),
+                            self._trade_confidence_min,
+                        )
+                        continue
+                    if intent.action == "OPEN":
+                        funding_checked = await self._ensure_sufficient_balance(intent)
+                        if funding_checked is None:
+                            continue
+                        intent = funding_checked
                     if self._kill_switch and intent.action == "OPEN":
                         self._logger.warning("Kill switch active. Blocking %s intent for %s", worker.name, symbol)
                         continue
@@ -376,6 +399,71 @@ class TradeEngine:
             await self._close_trade(intent, position_key, existing_position)
         else:
             self._logger.debug("Ignoring trade intent %s", intent)
+
+    def _is_ml_worker(self, worker: object) -> bool:
+        return getattr(worker, "_ml_service", None) is not None
+
+    def _violates_long_only(
+        self,
+        worker: object,
+        intent: TradeIntent,
+        existing_position: OpenPosition | None,
+    ) -> bool:
+        if intent.action == "OPEN" and intent.side == "sell":
+            confidence = float(intent.confidence)
+            if self._is_ml_worker(worker):
+                self._logger.info(
+                    "[RISK] Short trade blocked by policy (symbol=%s, confidence=%.3f)",
+                    intent.symbol,
+                    confidence,
+                )
+            else:
+                self._logger.info(
+                    "Short trade blocked by long-only policy (%s -> %s)",
+                    getattr(worker, "name", worker.__class__.__name__),
+                    intent.symbol,
+                )
+            return True
+        if intent.action == "CLOSE" and intent.side == "sell":
+            if existing_position is None or existing_position.side != "buy":
+                self._logger.info(
+                    "Ignoring SELL close for %s – no matching long position to unwind",
+                    intent.symbol,
+                )
+                return True
+        return False
+
+    async def _ensure_sufficient_balance(self, intent: TradeIntent) -> TradeIntent | None:
+        try:
+            balances = await self._broker.fetch_balances()
+        except Exception as exc:  # noqa: BLE001 - defensive logging
+            self._logger.warning("Failed to fetch balances prior to order: %s", exc)
+            return None
+        available = float(balances.get(self._base_currency, 0.0))
+        required = float(intent.cash_spent)
+        if available < self._min_cash_per_trade:
+            self._logger.info(
+                "[RISK] Skipped trade for %s – insufficient funds",
+                intent.symbol,
+            )
+            return None
+        if required > available:
+            metadata = dict(intent.metadata or {})
+            metadata.update(
+                {
+                    "balance_capped": True,
+                    "available_cash": available,
+                }
+            )
+            self._logger.info(
+                "Adjusting %s order size to available cash %.2f (requested %.2f)",
+                intent.symbol,
+                available,
+                required,
+            )
+            intent.metadata = metadata
+            intent.cash_spent = available
+        return intent
 
     def _apply_min_trade_cash_floor(self, intent: TradeIntent) -> TradeIntent:
         """Ensure trade intents respect the broker's minimum notional size."""

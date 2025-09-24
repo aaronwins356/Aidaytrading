@@ -18,8 +18,9 @@ trading:
   max_open_positions: 2
   paper_trading: true
   paper_starting_equity: 20000.0
-  allow_shorting: true
-  min_cash_per_trade: 15.0
+  allow_shorting: false
+  min_cash_per_trade: 10.0
+  trade_confidence_min: 0.5
   mode: "paper"  # Toggle to "live" only after credentials + production risk checks.
 
 risk:
@@ -30,7 +31,7 @@ risk:
 ml:
   lr: 0.03
   regularization: 0.0005
-  threshold: 0.25
+  threshold: 0.5
   ensemble: true
   forest_size: 10
   random_state: 7

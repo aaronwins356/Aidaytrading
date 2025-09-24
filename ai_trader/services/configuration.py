@@ -29,7 +29,7 @@ _ML_DEFAULTS: Dict[str, float | bool] = {
     "lr": 0.03,
     "regularization": 0.0005,
     "forest_size": 10,
-    "threshold": 0.25,
+    "threshold": 0.5,
     "ensemble": True,
     "warmup_samples": 25,
 }
@@ -119,7 +119,8 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     trading_cfg.setdefault("equity_allocation_percent", 2.0)
     trading_cfg.setdefault("paper_starting_equity", 25000.0)
     trading_cfg.setdefault("max_open_positions", 3)
-    trading_cfg.setdefault("min_cash_per_trade", 15.0)
+    trading_cfg.setdefault("min_cash_per_trade", 10.0)
+    trading_cfg.setdefault("trade_confidence_min", 0.5)
     raw_symbols = trading_cfg.get("symbols", [])
     normalised_symbols: list[str] = []
     seen_symbols: set[str] = set()
@@ -144,7 +145,9 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     elif raw_symbols:
         logger.warning("Trading symbols must be a sequence; received %s", type(raw_symbols).__name__)
     trading_cfg["symbols"] = normalised_symbols
+    trading_cfg.setdefault("allow_shorting", False)
     trading_cfg["paper_trading"] = bool(trading_cfg.get("paper_trading", True))
+    trading_cfg["allow_shorting"] = bool(trading_cfg.get("allow_shorting", False))
     trading_cfg["equity_allocation_percent"] = float(
         trading_cfg.get("equity_allocation_percent", 2.0)
     )
@@ -154,9 +157,14 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     trading_cfg["max_open_positions"] = int(
         trading_cfg.get("max_open_positions", 3)
     )
-    trading_cfg["min_cash_per_trade"] = float(
-        trading_cfg.get("min_cash_per_trade", 15.0)
-    )
+    min_cash = float(trading_cfg.get("min_cash_per_trade", 10.0))
+    # Enforce the $10–$20 sizing policy so strategies cannot accidentally
+    # request orders that fall outside the broker-compliant range. Values
+    # outside the bounds are clamped rather than rejected to keep the bot
+    # resilient to misconfiguration during live deployments.
+    trading_cfg["min_cash_per_trade"] = max(10.0, min(20.0, min_cash))
+    confidence_floor = float(trading_cfg.get("trade_confidence_min", 0.5))
+    trading_cfg["trade_confidence_min"] = max(0.0, min(1.0, confidence_floor))
     normalised["trading"] = trading_cfg
 
     risk_cfg = dict(normalised.get("risk", {}))

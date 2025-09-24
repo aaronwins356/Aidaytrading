@@ -60,6 +60,10 @@ class KrakenClient:
     def is_paper_trading(self) -> bool:
         return self._paper_trading
 
+    @property
+    def base_currency(self) -> str:
+        return self._base_currency
+
     async def load_markets(self) -> None:
         markets = await self._with_retries(
             self._exchange.load_markets, description="load_markets"

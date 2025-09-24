@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime
 import json
 from dataclasses import dataclass
+import logging
 import types
 from typing import Any, Callable
 
@@ -24,16 +25,21 @@ from ai_trader.workers.base import BaseWorker
 class _DummyBroker:
     starting_equity: float = 10_000.0
     is_paper_trading: bool = True
+    base_currency: str = "USD"
 
     def __post_init__(self) -> None:
         self.orders: list[tuple[str, str, float]] = []
         self.reduce_only: list[bool | None] = []
+        self.cash_balance: float = float(self.starting_equity)
 
     async def load_markets(self) -> None:  # pragma: no cover - trivial
         return None
 
     async def compute_equity(self, prices: dict[str, float]) -> tuple[float, dict[str, float]]:
-        return self.starting_equity, {"USD": self.starting_equity}
+        return self.cash_balance, {self.base_currency: self.cash_balance}
+
+    async def fetch_balances(self) -> dict[str, float]:
+        return {self.base_currency: self.cash_balance}
 
     async def place_order(
         self,
@@ -47,6 +53,10 @@ class _DummyBroker:
         quantity = float(cash_spent) / price
         self.orders.append((symbol, side, float(cash_spent)))
         self.reduce_only.append(reduce_only)
+        if side == "buy":
+            self.cash_balance = max(0.0, self.cash_balance - float(cash_spent))
+        else:
+            self.cash_balance += float(cash_spent)
         return price, quantity
 
     async def close_position(self, symbol: str, side: str, amount: float) -> tuple[float, float]:
@@ -311,7 +321,7 @@ def test_rehydrate_open_positions(tmp_path) -> None:
     assert len(list(trade_log.fetch_trades())) == len(trades)
 
 
-async def _run_short_trade_engine(tmp_path) -> None:
+async def _run_short_trade_engine(tmp_path, *, ml_enabled: bool = False) -> None:
     """Ensure short entries do not mark reduce_only on brokers allowing shorts."""
 
     db_path = tmp_path / "engine_short.db"
@@ -321,6 +331,8 @@ async def _run_short_trade_engine(tmp_path) -> None:
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
     risk_manager = RiskManager({"max_drawdown_percent": 50, "daily_loss_limit_percent": 50, "max_position_duration_minutes": 5})
     worker = _ShortWorker("ETH/USD", trade_log)
+    if ml_enabled:
+        worker._ml_service = object()  # type: ignore[attr-defined]
 
     engine = TradeEngine(
         broker=broker,
@@ -341,20 +353,31 @@ async def _run_short_trade_engine(tmp_path) -> None:
     await engine.stop()
     await run_task
 
-    assert broker.orders, "Short broker should record the open order"
-    assert broker.reduce_only[-1] is False
+    assert not broker.orders, "Short trades should be blocked in long-only mode"
 
 
-def test_trade_engine_short_sell_without_reduce_only(tmp_path) -> None:
+def test_trade_engine_short_sell_blocked(tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO)
     asyncio.run(_run_short_trade_engine(tmp_path))
+    assert "Short trade blocked" in caplog.text
 
 
-async def _run_string_cash_trade(tmp_path) -> tuple[list[tuple[str, str, float]], list[Any]]:
+def test_trade_engine_short_sell_logs_ml_block(tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO)
+    asyncio.run(_run_short_trade_engine(tmp_path, ml_enabled=True))
+    assert "[RISK] Short trade blocked by policy" in caplog.text
+
+
+async def _run_string_cash_trade(
+    tmp_path,
+    starting_equity: float = 10_000.0,
+) -> tuple[list[tuple[str, str, float]], list[Any]]:
     """Run the engine with a worker submitting string cash sizes."""
 
     db_path = tmp_path / "string_cash.db"
     trade_log = TradeLog(db_path)
-    broker = _DummyBroker()
+    broker = _DummyBroker(starting_equity=starting_equity)
+    broker.cash_balance = starting_equity
     websocket_manager = _DummyWebsocketManager("BTC/USD")
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
     risk_manager = RiskManager({
@@ -391,13 +414,21 @@ def test_trade_engine_casts_string_cash_from_workers(tmp_path) -> None:
     orders, trades = asyncio.run(_run_string_cash_trade(tmp_path))
     assert orders, "Engine should execute at least one order"
     _, _, cash_value = orders[-1]
-    assert cash_value == pytest.approx(15.0)
+    assert cash_value == pytest.approx(10.0)
 
     assert trades, "Trade log should capture the executed order"
     metadata = json.loads(trades[0]["metadata_json"])
     assert metadata.get("cash_floor_applied") is True
     assert metadata.get("original_cash_spent") == pytest.approx(3.59)
-    assert metadata.get("min_cash_per_trade") == pytest.approx(15.0)
+    assert metadata.get("min_cash_per_trade") == pytest.approx(10.0)
+
+
+def test_trade_engine_skips_trades_with_insufficient_balance(tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO)
+    orders, trades = asyncio.run(_run_string_cash_trade(tmp_path, starting_equity=5.0))
+    assert orders == []
+    assert trades == []
+    assert "[RISK] Skipped trade for BTC/USD – insufficient funds" in caplog.text
 
 
 async def _place_short_order_with_client() -> dict[str, Any]:
