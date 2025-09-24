@@ -229,6 +229,80 @@ class _StringCashWorker(BaseWorker):
         )
 
 
+class _LargeCashWorker(BaseWorker):
+    """Worker that requests oversized trades to trigger the $20 cap."""
+
+    name = "LargeCashWorker"
+
+    def __init__(self, symbol: str, trade_log: TradeLog) -> None:
+        super().__init__([symbol], lookback=3, trade_log=trade_log)
+        self._submitted = False
+
+    async def evaluate_signal(self, snapshot: MarketSnapshot) -> dict[str, str]:
+        self.update_history(snapshot)
+        return {self.symbols[0]: "buy"}
+
+    async def generate_trade(
+        self,
+        symbol: str,
+        signal: str | None,
+        snapshot: MarketSnapshot,
+        equity_per_trade: float,
+        existing_position: OpenPosition | None = None,
+    ) -> TradeIntent | None:
+        if existing_position is not None or self._submitted or signal != "buy":
+            return None
+        self._submitted = True
+        price = snapshot.prices[symbol]
+        return TradeIntent(
+            worker=self.name,
+            action="OPEN",
+            symbol=symbol,
+            side="buy",
+            cash_spent=50.0,
+            entry_price=price,
+            confidence=0.9,
+        )
+
+
+class _LowConfidenceMLWorker(BaseWorker):
+    """ML-style worker that should be skipped below the confidence floor."""
+
+    name = "LowConfidenceMLWorker"
+
+    def __init__(self, symbol: str, trade_log: TradeLog) -> None:
+        super().__init__([symbol], lookback=3, trade_log=trade_log)
+        self._submitted = False
+        # Flag as ML worker so the trade engine applies ML-specific risk rules.
+        self._ml_service = object()  # type: ignore[attr-defined]
+
+    async def evaluate_signal(self, snapshot: MarketSnapshot) -> dict[str, str]:
+        self.update_history(snapshot)
+        return {self.symbols[0]: "buy"}
+
+    async def generate_trade(
+        self,
+        symbol: str,
+        signal: str | None,
+        snapshot: MarketSnapshot,
+        equity_per_trade: float,
+        existing_position: OpenPosition | None = None,
+    ) -> TradeIntent | None:
+        if existing_position is not None or self._submitted or signal != "buy":
+            return None
+        self._submitted = True
+        price = snapshot.prices[symbol]
+        return TradeIntent(
+            worker=self.name,
+            action="OPEN",
+            symbol=symbol,
+            side="buy",
+            cash_spent=equity_per_trade,
+            entry_price=price,
+            confidence=0.2,
+        )
+
+
 async def _run_trade_engine(tmp_path) -> None:
     """The trade engine should execute a simple open/close cycle in paper mode."""
 
@@ -365,17 +439,20 @@ def test_trade_engine_short_sell_blocked(tmp_path, caplog) -> None:
 def test_trade_engine_short_sell_logs_ml_block(tmp_path, caplog) -> None:
     caplog.set_level(logging.INFO)
     asyncio.run(_run_short_trade_engine(tmp_path, ml_enabled=True))
-    assert "[RISK] Short trade blocked by policy" in caplog.text
+    assert "[RISK] Short signal blocked (symbol=ETH/USD, confidence=0.500)" in caplog.text
 
 
-async def _run_string_cash_trade(
+async def _run_engine_with_worker(
     tmp_path,
+    worker_factory: Callable[[TradeLog], BaseWorker],
+    *,
     starting_equity: float = 10_000.0,
 ) -> tuple[list[tuple[str, str, float]], list[Any]]:
-    """Run the engine with a worker submitting string cash sizes."""
+    """Run the trade engine with a supplied worker factory and return broker orders."""
 
-    db_path = tmp_path / "string_cash.db"
+    db_path = tmp_path / "engine_worker.db"
     trade_log = TradeLog(db_path)
+    worker = worker_factory(trade_log)
     broker = _DummyBroker(starting_equity=starting_equity)
     broker.cash_balance = starting_equity
     websocket_manager = _DummyWebsocketManager("BTC/USD")
@@ -385,8 +462,6 @@ async def _run_string_cash_trade(
         "daily_loss_limit_percent": 50,
         "max_position_duration_minutes": 5,
     })
-    worker = _StringCashWorker("BTC/USD", trade_log)
-
     engine = TradeEngine(
         broker=broker,
         websocket_manager=websocket_manager,
@@ -410,6 +485,17 @@ async def _run_string_cash_trade(
     return broker.orders, trades
 
 
+async def _run_string_cash_trade(
+    tmp_path,
+    starting_equity: float = 10_000.0,
+) -> tuple[list[tuple[str, str, float]], list[Any]]:
+    return await _run_engine_with_worker(
+        tmp_path,
+        lambda trade_log: _StringCashWorker("BTC/USD", trade_log),
+        starting_equity=starting_equity,
+    )
+
+
 def test_trade_engine_casts_string_cash_from_workers(tmp_path) -> None:
     orders, trades = asyncio.run(_run_string_cash_trade(tmp_path))
     assert orders, "Engine should execute at least one order"
@@ -423,12 +509,46 @@ def test_trade_engine_casts_string_cash_from_workers(tmp_path) -> None:
     assert metadata.get("min_cash_per_trade") == pytest.approx(10.0)
 
 
+def test_trade_engine_caps_trade_size_to_policy_ceiling(tmp_path) -> None:
+    orders, trades = asyncio.run(
+        _run_engine_with_worker(
+            tmp_path,
+            lambda trade_log: _LargeCashWorker("BTC/USD", trade_log),
+        )
+    )
+    assert orders, "Engine should submit capped orders"
+    _, _, cash_value = orders[-1]
+    assert cash_value == pytest.approx(20.0)
+
+    assert trades, "Trade log should record capped fills"
+    metadata = json.loads(trades[0]["metadata_json"])
+    assert metadata.get("cash_cap_applied") is True
+    assert metadata.get("max_cash_per_trade") == pytest.approx(20.0)
+    assert metadata.get("original_cash_spent") == pytest.approx(50.0)
+
+
 def test_trade_engine_skips_trades_with_insufficient_balance(tmp_path, caplog) -> None:
     caplog.set_level(logging.INFO)
     orders, trades = asyncio.run(_run_string_cash_trade(tmp_path, starting_equity=5.0))
     assert orders == []
     assert trades == []
     assert "[RISK] Skipped trade for BTC/USD – insufficient funds" in caplog.text
+
+
+def test_trade_engine_skips_low_confidence_ml_trades(tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO)
+    orders, trades = asyncio.run(
+        _run_engine_with_worker(
+            tmp_path,
+            lambda trade_log: _LowConfidenceMLWorker("BTC/USD", trade_log),
+        )
+    )
+    assert orders == []
+    assert trades == []
+    assert (
+        "[ML] Skipped low-confidence trade (symbol=BTC/USD, confidence=0.200 < threshold=0.500)"
+        in caplog.text
+    )
 
 
 async def _place_short_order_with_client() -> dict[str, Any]:
@@ -460,6 +580,6 @@ async def _place_short_order_with_client() -> dict[str, Any]:
     return exchange.order_calls[-1]
 
 
-def test_kraken_client_sell_order_omits_reduce_only_when_shorting_allowed() -> None:
+def test_kraken_client_sell_order_enforces_reduce_only_flag() -> None:
     order_payload = asyncio.run(_place_short_order_with_client())
-    assert order_payload["params"] == {}
+    assert order_payload["params"] == {"reduce_only": True}

@@ -36,3 +36,14 @@ def test_normalize_config_sanitises_symbols() -> None:
 
     assert normalised["trading"]["symbols"] == ["BTC/USD", "SOL/USD", "ETH/USD"]
     assert normalised["trading"]["trade_confidence_min"] == 0.5
+    assert normalised["trading"]["max_cash_per_trade"] == 20.0
+
+
+def test_normalize_config_clamps_trade_size_band() -> None:
+    config = {"trading": {"min_cash_per_trade": 2.5, "max_cash_per_trade": 50.0}}
+
+    normalised = normalize_config(config)
+    trading = normalised["trading"]
+
+    assert trading["min_cash_per_trade"] == 10.0
+    assert trading["max_cash_per_trade"] == 20.0

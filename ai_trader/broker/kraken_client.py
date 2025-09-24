@@ -174,15 +174,15 @@ class KrakenClient:
             return float(price), float(amount)
 
         should_reduce_only = False
-        if reduce_only is None:
-            should_reduce_only = side == "sell" and not self._allow_shorting
-        else:
-            # Always enforce reduce_only when shorting is disabled even if explicitly
-            # overridden. This prevents accidental naked short exposure when the
-            # deployment configuration disallows it.
-            should_reduce_only = reduce_only or (
-                side == "sell" and not self._allow_shorting
-            )
+        if side == "sell":
+            should_reduce_only = True
+            if reduce_only is False:
+                self._logger.debug(
+                    "Ignoring explicit reduce_only=False for %s sell order; enforcing long-only exit.",
+                    symbol,
+                )
+        elif reduce_only is not None:
+            should_reduce_only = bool(reduce_only)
 
         order_params: Dict[str, Any] = {}
         if should_reduce_only:
