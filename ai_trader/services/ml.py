@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import pickle
 import sqlite3
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
+from typing import Any, DefaultDict, Deque, Dict, Iterable, Iterator, Mapping, Optional, Tuple
 
 try:  # pragma: no cover - import guard for optional forest backend
     from river import forest
@@ -105,6 +106,17 @@ class _ModelBundle:
         return [name for name, _ in ranked[:limit]]
 
 
+@dataclass(slots=True)
+class _PendingTradeSample:
+    """Cache of trade metadata awaiting realised outcomes for training."""
+
+    trade_id: int
+    features: Dict[str, float]
+    confidence: float
+    entry_price: float
+    entry_timestamp: datetime
+
+
 class MLService:
     """Stateful online learning engine shared across workers."""
 
@@ -140,6 +152,10 @@ class MLService:
         self._models: Dict[str, _ModelBundle] = {}
         self._latest_features: Dict[str, Dict[str, float]] = {}
         self._latest_confidence: Dict[Tuple[str, str], float] = {}
+        self._pending_trades: DefaultDict[tuple[str, str], Deque[_PendingTradeSample]] = defaultdict(
+            lambda: deque(maxlen=25)
+        )
+        self._pending_trade_warnings: Dict[tuple[str, str], bool] = {}
         self._warmup_target = max(1, int(warmup_target))
         self._minimum_warmup_samples = max(1, int(warmup_samples))
         self._warmup_required = max(self._warmup_target, self._minimum_warmup_samples)
@@ -518,6 +534,131 @@ class MLService:
         """Return the last seen feature vector for a symbol."""
 
         return self._latest_features.get(symbol)
+
+    # ------------------------------------------------------------------
+    # Trade outcome feedback loop
+    # ------------------------------------------------------------------
+    def register_trade_open(
+        self,
+        *,
+        worker: str,
+        symbol: str,
+        confidence: float,
+        entry_price: float,
+        quantity: float | None = None,
+        features: Mapping[str, float] | None = None,
+        metadata: Mapping[str, object] | None = None,
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Record a filled trade so the service can learn once it resolves."""
+
+        if features is None:
+            self._logger.debug(
+                "[ML] Missing features for %s (%s) trade open – skipping registration",
+                worker,
+                symbol,
+            )
+            return
+        cleaned = self._sanitize_features(features)
+        trade_time = timestamp or datetime.utcnow()
+        payload_meta = dict(metadata or {})
+        payload_meta.setdefault("confidence", float(confidence))
+        payload_meta.setdefault("entry_price", float(entry_price))
+        if quantity is not None:
+            payload_meta.setdefault("quantity", float(quantity))
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO ml_trade_outcomes(
+                    worker, symbol, entry_timestamp, confidence, entry_price, quantity, features_json, metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    worker,
+                    symbol,
+                    trade_time.isoformat(),
+                    float(confidence),
+                    float(entry_price),
+                    float(quantity) if quantity is not None else None,
+                    json.dumps(cleaned),
+                    json.dumps(payload_meta, default=str),
+                ),
+            )
+            conn.commit()
+            trade_id = int(cursor.lastrowid or 0)
+        key = (worker, symbol)
+        queue = self._pending_trades[key]
+        queue.append(
+            _PendingTradeSample(
+                trade_id=trade_id,
+                features=cleaned,
+                confidence=float(confidence),
+                entry_price=float(entry_price),
+                entry_timestamp=trade_time,
+            )
+        )
+        self._pending_trade_warnings.pop(key, None)
+
+    def register_trade_close(
+        self,
+        *,
+        worker: str,
+        symbol: str,
+        exit_price: float,
+        pnl: float,
+        pnl_percent: float,
+        metadata: Mapping[str, object] | None = None,
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Feed realised trade outcomes back into the online learners."""
+
+        key = (worker, symbol)
+        queue = self._pending_trades.get(key)
+        if not queue:
+            if not self._pending_trade_warnings.get(key):
+                self._logger.info(
+                    "[ML] No pending trade sample for %s on %s – skipping outcome registration",
+                    worker,
+                    symbol,
+                )
+                self._pending_trade_warnings[key] = True
+            return
+        sample = queue.popleft()
+        exit_time = timestamp or datetime.utcnow()
+        label = 1 if pnl > 0 else 0
+        payload_meta = dict(metadata or {})
+        payload_meta.setdefault("pnl_usd", float(pnl))
+        payload_meta.setdefault("pnl_percent", float(pnl_percent))
+        payload_meta.setdefault("exit_price", float(exit_price))
+        payload_meta.setdefault("entry_timestamp", sample.entry_timestamp.isoformat())
+        payload_meta.setdefault("exit_timestamp", exit_time.isoformat())
+        try:
+            self.update(symbol, sample.features, label=label, persist=True, timestamp=exit_time)
+        except Exception as exc:  # noqa: BLE001 - learning must not impact execution
+            self._logger.exception(
+                "[ML] Failed to learn from trade outcome for %s on %s: %s",
+                worker,
+                symbol,
+                exc,
+            )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE ml_trade_outcomes
+                SET exit_timestamp = ?, exit_price = ?, pnl_usd = ?, pnl_percent = ?, label = ?, metadata_json = ?
+                WHERE id = ?
+                """,
+                (
+                    exit_time.isoformat(),
+                    float(exit_price),
+                    float(pnl),
+                    float(pnl_percent),
+                    int(label),
+                    json.dumps(payload_meta, default=str),
+                    sample.trade_id,
+                ),
+            )
+            conn.commit()
 
     def warmup_counts(self, symbol: str) -> tuple[int, int]:
         """Return (label_count, required_count) for dashboard insights."""

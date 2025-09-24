@@ -125,6 +125,24 @@ ML_TABLES: Dict[str, str] = OrderedDict(
                 support INTEGER
             )
         """,
+        "ml_trade_outcomes": """
+            CREATE TABLE IF NOT EXISTS ml_trade_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                worker TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                entry_timestamp TEXT NOT NULL,
+                exit_timestamp TEXT,
+                confidence REAL,
+                entry_price REAL,
+                exit_price REAL,
+                quantity REAL,
+                pnl_usd REAL,
+                pnl_percent REAL,
+                label INTEGER,
+                features_json TEXT NOT NULL,
+                metadata_json TEXT
+            )
+        """,
     }
 )
 

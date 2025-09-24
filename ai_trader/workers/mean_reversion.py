@@ -16,10 +16,14 @@ from ai_trader.workers.base import BaseWorker
 
 
 class MeanReversionWorker(BaseWorker):
-    """Trade deviations from a simple moving average."""
+    """Trade deviations from a simple moving average using long-only entries."""
 
     name = "Mean Reverter"
     emoji = "🔄"
+    long_only = True
+    strategy_brief = (
+        "Accumulating during pullbacks below the average and exiting as price mean-reverts upward."
+    )
 
     def __init__(
         self,
@@ -43,17 +47,32 @@ class MeanReversionWorker(BaseWorker):
         signals: Dict[str, str] = {}
         for symbol in self.symbols:
             history = list(self.price_history.get(symbol, []))
+            signal: Optional[str] = None
             if len(history) < self.window:
+                self.update_signal_state(symbol, signal, {"status": "warmup"})
                 continue
             mean_price = statistics.fmean(history[-self.window :])
             current = history[-1]
             deviation = (current - mean_price) / mean_price
-            if deviation > self.threshold:
-                signals[symbol] = "sell"
-            elif deviation < -self.threshold:
-                signals[symbol] = "buy"
+            if deviation < -self.threshold:
+                signal = "buy"
+            elif deviation > self.threshold and deviation < self.threshold * 2:
+                signal = "exit"
             elif abs(deviation) < self.threshold / 3:
-                signals[symbol] = "flat"
+                signal = "hold"
+            indicators = {
+                "mean_price": mean_price,
+                "last_price": current,
+                "deviation": deviation,
+                "threshold": self.threshold,
+            }
+            if self._ml_service is not None:
+                indicators["ml_confidence"] = self._ml_service.latest_confidence(
+                    symbol, self.name
+                )
+            self.update_signal_state(symbol, signal, indicators)
+            if signal:
+                signals[symbol] = signal
         return signals
 
     async def generate_trade(
@@ -64,7 +83,7 @@ class MeanReversionWorker(BaseWorker):
         equity_per_trade: float,
         existing_position: Optional[OpenPosition] = None,
     ) -> Optional[TradeIntent]:
-        if signal is None:
+        if signal is None or signal == "hold":
             return None
         price = snapshot.prices.get(symbol)
         if price is None or price <= 0:
@@ -90,7 +109,7 @@ class MeanReversionWorker(BaseWorker):
                     metadata=payload,
                 )
 
-        if signal in {"buy", "sell"} and existing_position is None:
+        if signal == "buy" and existing_position is None:
             allowed, confidence = self.ml_confirmation(symbol)
             if not allowed:
                 self.update_signal_state(symbol, "ml-block", {"ml_confidence": confidence})
@@ -109,16 +128,12 @@ class MeanReversionWorker(BaseWorker):
                 metadata=metadata,
             )
 
-        if signal == "flat" and existing_position is not None:
-            pnl = (
-                (price - existing_position.entry_price)
-                if existing_position.side == "buy"
-                else (existing_position.entry_price - price)
-            ) * existing_position.quantity
+        if signal in {"exit", "sell"} and existing_position is not None and existing_position.side == "buy":
+            pnl = (price - existing_position.entry_price) * existing_position.quantity
             base_cash = float(existing_position.cash_spent)
             pnl_percent = pnl / base_cash * 100 if base_cash else 0.0
             self.record_trade_event(
-                "close_mean_revert",
+                "close_mean_revert_long",
                 symbol,
                 {
                     "pnl": pnl,
@@ -132,14 +147,14 @@ class MeanReversionWorker(BaseWorker):
                 worker=self.name,
                 action="CLOSE",
                 symbol=symbol,
-                side="sell" if existing_position.side == "buy" else "buy",
+                side="sell",
                 cash_spent=existing_position.cash_spent,
                 entry_price=existing_position.entry_price,
                 exit_price=price,
                 pnl_percent=pnl_percent,
                 pnl_usd=pnl,
                 win_loss="win" if pnl > 0 else "loss",
-                reason="mean-revert",
+                reason="mean-revert-exit",
                 metadata={
                     "signal": signal,
                     "pnl": pnl,

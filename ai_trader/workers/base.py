@@ -22,6 +22,8 @@ class BaseWorker(ABC):
     name: str = "BaseWorker"
     emoji: str = "🤖"
     is_researcher: bool = False
+    long_only: bool = False
+    strategy_brief: str = "Generic trading strategy."
 
     def __init__(
         self,
@@ -102,8 +104,14 @@ class BaseWorker(ABC):
         self._latest_signals[symbol] = signal
         state = self._state.setdefault(symbol, {})
         state["last_signal"] = signal
+        indicator_snapshot = state.setdefault("indicators", {})
         if indicators:
-            state.setdefault("indicators", {}).update(indicators)
+            indicator_snapshot.update(indicators)
+        indicator_snapshot.setdefault("strategy_brief", self.strategy_brief)
+        indicator_snapshot.setdefault("long_only", self.long_only)
+        if self._ml_service is not None:
+            threshold_hint = self._ml_threshold_override or self._ml_service.default_threshold
+            indicator_snapshot.setdefault("ml_threshold", threshold_hint)
         state["leverage"] = self.leverage
         state["position_size_pct"] = self.position_size_pct
         state["stop_loss_pct"] = self.stop_loss_pct

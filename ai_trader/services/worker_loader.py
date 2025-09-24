@@ -68,6 +68,12 @@ class WorkerLoader:
                 self._logger.exception("Failed to load worker %s (%s): %s", worker_name, dotted_path, exc)
                 continue
             is_researcher = force_researcher or getattr(worker, "is_researcher", False)
+            display_name = str(definition.get("display_name", "")).strip()
+            if display_name:
+                setattr(worker, "name", display_name)
+            emoji = str(definition.get("emoji", "")).strip()
+            if emoji:
+                setattr(worker, "emoji", emoji)
             target = researchers if is_researcher else workers
             target.append(worker)
             self._logger.info("Worker %s loaded (%s)", worker.name, dotted_path)

@@ -9,6 +9,11 @@ import math
 from datetime import datetime, timedelta
 from typing import DefaultDict, Dict, Iterable, List, Tuple
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - imported for static type checking only
+    from ai_trader.services.ml import MLService
+
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.broker.websocket_manager import KrakenWebsocketManager
 from ai_trader.services.equity import EquityEngine
@@ -37,11 +42,15 @@ class TradeEngine:
         min_cash_per_trade: float = 10.0,
         max_cash_per_trade: float = 20.0,
         trade_confidence_min: float = 0.5,
+        ml_service: "MLService" | None = None,
     ) -> None:
         self._broker = broker
         self._websocket_manager = websocket_manager
         self._workers = list(workers)
         self._researchers = list(researchers)
+        self._worker_lookup: Dict[str, object] = {
+            getattr(worker, "name", worker.__class__.__name__): worker for worker in self._workers
+        }
         self._equity_engine = equity_engine
         self._risk_manager = risk_manager
         self._trade_log = trade_log
@@ -57,6 +66,7 @@ class TradeEngine:
         self._signal_only_mode = False
         self._signal_only_reason = ""
         self._paper_trading = paper_trading
+        self._ml_service = ml_service
         # Kraken rejects orders whose notional value is below the exchange minimum (~$10).
         # Enforcing a configurable floor here keeps all strategies broker-compliant even
         # when their internal position sizing logic suggests smaller allocations.
@@ -402,8 +412,15 @@ class TradeEngine:
         else:
             self._logger.debug("Ignoring trade intent %s", intent)
 
-    def _is_ml_worker(self, worker: object) -> bool:
-        return getattr(worker, "_ml_service", None) is not None
+    def _is_ml_worker(self, worker: object | None = None, *, name: str | None = None) -> bool:
+        if worker is not None:
+            return getattr(worker, "_ml_service", None) is not None
+        if name is not None:
+            target = self._worker_lookup.get(name)
+            if target is None:
+                return False
+            return getattr(target, "_ml_service", None) is not None
+        return False
 
     def _violates_long_only(
         self,
@@ -411,19 +428,22 @@ class TradeEngine:
         intent: TradeIntent,
         existing_position: OpenPosition | None,
     ) -> bool:
+        worker_name = getattr(worker, "name", worker.__class__.__name__)
         if intent.action == "OPEN" and intent.side == "sell":
             confidence = float(intent.confidence)
             if self._is_ml_worker(worker):
                 self._logger.info(
-                    "[RISK] Short signal blocked (symbol=%s, confidence=%.3f)",
+                    "[RISK] Short signal blocked (symbol=%s, confidence=%.3f) [worker=%s]",
                     intent.symbol,
                     confidence,
+                    worker_name,
                 )
             else:
                 self._logger.info(
-                    "Short trade blocked by long-only policy (%s -> %s)",
-                    getattr(worker, "name", worker.__class__.__name__),
+                    "Short trade blocked by long-only policy (%s -> %s) [worker=%s]",
+                    worker_name,
                     intent.symbol,
+                    worker_name,
                 )
             return True
         if intent.action == "CLOSE" and intent.side == "sell":
@@ -587,6 +607,7 @@ class TradeEngine:
                 "mode": mode,
             },
         )
+        self._record_ml_trade_open(recorded_intent, price, quantity)
         self._logger.info(
             "[TRADE] %s opened %s %s @ %.2f qty=%.6f cash=%.2f",
             intent.worker,
@@ -660,6 +681,7 @@ class TradeEngine:
             details=metadata,
         )
         self._open_positions.pop(key, None)
+        self._record_ml_trade_close(recorded_intent, position, price, pnl, pnl_percent, reason)
         self._logger.info(
             "[TRADE] %s closed %s %s @ %.2f | PnL %.2f USD (%.2f%%) reason=%s",
             intent.worker,
@@ -676,6 +698,85 @@ class TradeEngine:
                 intent.worker,
                 intent.symbol,
                 reason,
+            )
+
+    def _record_ml_trade_open(
+        self,
+        intent: TradeIntent,
+        fill_price: float,
+        quantity: float,
+    ) -> None:
+        if self._ml_service is None or not self._is_ml_worker(name=intent.worker):
+            return
+        features = self._ml_service.latest_features(intent.symbol)
+        if not features:
+            self._logger.debug(
+                "[ML] Skipping trade registration for %s on %s – no features available",
+                intent.worker,
+                intent.symbol,
+            )
+            return
+        metadata = dict(intent.metadata or {})
+        metadata.update(
+            {
+                "fill_price": fill_price,
+                "fill_quantity": quantity,
+                "mode": "paper" if self._paper_trading else "live",
+            }
+        )
+        try:
+            self._ml_service.register_trade_open(
+                worker=intent.worker,
+                symbol=intent.symbol,
+                confidence=float(intent.confidence),
+                entry_price=fill_price,
+                quantity=quantity,
+                features=features,
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 - ML feedback must remain resilient
+            self._logger.exception(
+                "Failed to register ML trade open for %s on %s: %s",
+                intent.worker,
+                intent.symbol,
+                exc,
+            )
+
+    def _record_ml_trade_close(
+        self,
+        intent: TradeIntent,
+        position: OpenPosition,
+        exit_price: float,
+        pnl: float,
+        pnl_percent: float,
+        reason: str,
+    ) -> None:
+        if self._ml_service is None or not self._is_ml_worker(name=intent.worker):
+            return
+        metadata = dict(intent.metadata or {})
+        metadata.update(
+            {
+                "entry_price": position.entry_price,
+                "cash_spent": position.cash_spent,
+                "quantity": position.quantity,
+                "reason": reason,
+            }
+        )
+        try:
+            self._ml_service.register_trade_close(
+                worker=intent.worker,
+                symbol=intent.symbol,
+                exit_price=exit_price,
+                pnl=pnl,
+                pnl_percent=pnl_percent,
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 - logging only
+            self._logger.exception(
+                "Failed to register ML trade close for %s on %s: %s",
+                intent.worker,
+                intent.symbol,
+                exc,
             )
 
     async def _enforce_position_duration(self, snapshot: MarketSnapshot) -> None:

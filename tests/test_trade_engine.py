@@ -326,6 +326,7 @@ async def _run_trade_engine(tmp_path) -> None:
         max_open_positions=1,
         refresh_interval=0.01,
         paper_trading=True,
+        ml_service=None,
     )
 
     run_task = asyncio.create_task(engine.start())
@@ -367,6 +368,7 @@ def test_rehydrate_open_positions(tmp_path) -> None:
         max_open_positions=2,
         refresh_interval=0.01,
         paper_trading=True,
+        ml_service=None,
     )
 
     broker_position = OpenPosition(
@@ -420,6 +422,7 @@ async def _run_short_trade_engine(tmp_path, *, ml_enabled: bool = False) -> None
         max_open_positions=1,
         refresh_interval=0.01,
         paper_trading=True,
+        ml_service=None,
     )
 
     run_task = asyncio.create_task(engine.start())
@@ -474,6 +477,7 @@ async def _run_engine_with_worker(
         max_open_positions=1,
         refresh_interval=0.01,
         paper_trading=True,
+        ml_service=None,
     )
 
     run_task = asyncio.create_task(engine.start())

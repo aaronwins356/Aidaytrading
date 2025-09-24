@@ -58,3 +58,19 @@ def test_apply_precision_accepts_decimal_digits() -> None:
 
     # Precision values represented as strings should be treated as digit counts.
     assert client._apply_precision(0.123456789, "5") == pytest.approx(0.12345)
+
+
+def test_place_order_blocks_shorts_in_long_only_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = DummyKrakenClient()
+    client._paper_balances["BTC"] = 1.0  # seed inventory to avoid insufficient asset path
+
+    async def fake_price(symbol: str) -> float:
+        return 100.0
+
+    monkeypatch.setattr(client, "fetch_price", fake_price)
+
+    async def attempt_short() -> None:
+        await client.place_order("BTC/USD", "sell", 25.0)
+
+    with pytest.raises(RuntimeError, match="Long-only mode forbids opening sell orders"):
+        asyncio.run(attempt_short())

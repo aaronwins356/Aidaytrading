@@ -6,7 +6,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -37,9 +37,8 @@ if not st.session_state.get("_page_configured", False):
 DB_PATH = BASE_DIR / "data" / "trades.db"
 CONFIG_PATH = BASE_DIR / "config.yaml"
 MODULE_DISPLAY_NAMES = {
-    "ai_trader.workers.short_momentum.ShortMomentumWorker": "Velocity Short",
-    "ai_trader.workers.short_mean_reversion.ShortMeanReversionWorker": "Reversion Raider",
-    "ai_trader.workers.ml_short.MLShortWorker": "ML Short Alpha",
+    "ai_trader.workers.momentum.MomentumWorker": "Momentum Scout",
+    "ai_trader.workers.mean_reversion.MeanReversionWorker": "Mean Reverter",
     "ai_trader.workers.researcher.MarketResearchWorker": "Research Sentinel",
 }
 
@@ -92,6 +91,34 @@ def _auto_refresh_script(interval_seconds: int) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def _display_name_for_definition(definition: Dict[str, Any]) -> str:
+    module_path = str(definition.get("module", ""))
+    fallback = module_path.split(".")[-1] if module_path else "Worker"
+    return str(definition.get("display_name") or MODULE_DISPLAY_NAMES.get(module_path, fallback))
+
+
+def _strategy_summary(module_path: str) -> str:
+    if "momentum" in module_path:
+        return "Tracks fast versus slow EMAs to ride bullish momentum while staying long-only."
+    if "mean_reversion" in module_path:
+        return "Buys pullbacks toward the average and exits once price snaps back."
+    if module_path.endswith("researcher.MarketResearchWorker"):
+        return "Captures market features and updates the ML gate for every symbol."
+    return "Long-only strategy with ML-guided confidence gates."
+
+
+def _human_signal(signal: Optional[str]) -> str:
+    mapping = {
+        None: "Idle and monitoring conditions.",
+        "buy": "Looking for a long entry.",
+        "exit": "Preparing to lock in profits.",
+        "sell": "Closing an existing long position.",
+        "hold": "Holding steady; no action required.",
+        "ml-block": "Waiting for ML confidence to exceed the gate.",
+    }
+    return mapping.get(signal, signal.capitalize())
 
 
 @st.cache_data(ttl=5)
@@ -441,6 +468,7 @@ def render_runtime_status(config: Dict, bot_states: pd.DataFrame, ml_service: ML
     mode_label = "Live Trading" if trading_mode == "live" else "Paper Trading"
     badge = "🟢" if trading_mode == "live" else "🧪"
     st.markdown(f"**Mode:** {badge} {mode_label}")
+    st.markdown("**Long-only policy:** ✅ Strategies and broker reject shorts by design.")
 
     symbols = config.get("trading", {}).get("symbols", [])
     if symbols:
@@ -451,6 +479,18 @@ def render_runtime_status(config: Dict, bot_states: pd.DataFrame, ml_service: ML
             cols[idx % len(cols)].progress(progress, text)
     else:
         st.caption("No trading symbols configured.")
+
+    definitions = config.get("workers", {}).get("definitions", {})
+    research_names = [
+        _display_name_for_definition(definition)
+        for definition in definitions.values()
+        if str(definition.get("module", "")).endswith("researcher.MarketResearchWorker")
+    ]
+    if research_names:
+        st.caption(
+            "Research bots streaming features: "
+            + ", ".join(sorted(set(research_names)))
+        )
 
     if not bot_states.empty:
         warming = bot_states[bot_states["ml_warming_up"].notnull()]
@@ -470,47 +510,79 @@ def render_runtime_status(config: Dict, bot_states: pd.DataFrame, ml_service: ML
                 )
 
 
-def render_signal_monitor(bot_states: pd.DataFrame) -> None:
-    st.subheader("Signal Monitor")
+def render_strategy_pulse(config: Dict, bot_states: pd.DataFrame, ml_service: MLService) -> None:
+    st.subheader("Strategy Pulse")
     if bot_states.empty:
         st.info("Signals will populate once workers publish state.")
         return
+
+    definitions = config.get("workers", {}).get("definitions", {})
+    name_lookup = {
+        _display_name_for_definition(definition): definition
+        for definition in definitions.values()
+    }
+
     rows: List[Dict[str, object]] = []
-    for row in bot_states.sort_values("updated_at", ascending=False).itertuples():
+    ordered = bot_states.sort_values("updated_at", ascending=False)
+    for row in ordered.itertuples():
+        definition = name_lookup.get(row.worker, {})
+        module_path = str(definition.get("module", ""))
+        warmup_state = getattr(row, "ml_warming_up", None)
+        warmup_label = "warming" if warmup_state else "ready"
         indicators: Dict[str, object] = row.indicators or {}
         confidence = indicators.get("ml_confidence")
-        warmup_state = getattr(row, "ml_warming_up", None)
-        if warmup_state is None:
-            warmup_label = "n/a"
-        else:
-            warmup_label = "warming" if warmup_state else "ready"
+        threshold = indicators.get("ml_threshold") or definition.get("parameters", {}).get("ml_threshold")
+        if confidence is None and row.symbol:
+            confidence = ml_service.latest_confidence(row.symbol, worker=row.worker)
+        posture = (
+            "Research feed"
+            if module_path.endswith("researcher.MarketResearchWorker")
+            else "Long-only"
+        )
+        status_text = str(row.status or "unknown").lower()
+        status_label = {
+            "ready": "Ready to trade",
+            "warmup": "Warming up",
+            "paused": "Paused",
+        }.get(status_text, str(row.status or "unknown").capitalize())
         rows.append(
             {
                 "Worker": row.worker,
                 "Symbol": row.symbol,
-                "Status": row.status or "unknown",
-                "Last Signal": row.last_signal or "–",
-                "ML Confidence": round(float(confidence), 3) if isinstance(confidence, (int, float)) else None,
-                "ML Warmup": warmup_label,
+                "Status": status_label,
+                "Decision": _human_signal(row.last_signal),
+                "ML Confidence": f"{float(confidence):.3f}" if isinstance(confidence, (int, float)) else "–",
+                "ML Gate": f"> {float(threshold):.2f}" if isinstance(threshold, (int, float)) else "auto",
+                "Warmup": warmup_label if warmup_state is not None else "n/a",
                 "Updated": row.updated_at.strftime("%H:%M:%S"),
+                "Posture": posture,
             }
         )
     signal_df = pd.DataFrame(rows)
-    st.dataframe(signal_df, use_container_width=True)
+    display_cols = [
+        "Worker",
+        "Symbol",
+        "Decision",
+        "ML Confidence",
+        "ML Gate",
+        "Warmup",
+        "Status",
+        "Posture",
+        "Updated",
+    ]
+    st.dataframe(signal_df[display_cols], use_container_width=True)
 
 
 def render_bot_cards(config: Dict, bot_states: pd.DataFrame, ml_service: MLService) -> None:
     st.subheader("Strategy Stack")
-    _ = ml_service  # clarity: cards already include ML stats via stored indicators
     if bot_states.empty:
         st.info("Workers will appear once the engine publishes their state.")
         return
 
-    descriptions = {
-        "Velocity Short": "Momentum-driven short seller that fades breakdown accelerations.",
-        "Reversion Raider": "Contrarian short scalper targeting mean reversions after euphoric spikes.",
-        "ML Short Alpha": "Machine learning assisted signal combiner focusing on asymmetric short setups.",
-        "Research Sentinel": "Market researcher that constantly engineers features for models and traders.",
+    definitions = config.get("workers", {}).get("definitions", {})
+    name_lookup = {
+        _display_name_for_definition(definition): definition
+        for definition in definitions.values()
     }
 
     grouped = bot_states.groupby("worker")
@@ -519,22 +591,73 @@ def render_bot_cards(config: Dict, bot_states: pd.DataFrame, ml_service: MLServi
         card_placeholder = cols[idx % 2].container()
         with card_placeholder:
             st.markdown(f"### {worker}")
-            st.caption(descriptions.get(worker, ""))
-            latest = df.sort_values("updated_at", ascending=False).iloc[0]
+            definition = name_lookup.get(worker, {})
+            module_path = str(definition.get("module", ""))
+            indicators_frame = df.sort_values("updated_at", ascending=False).iloc[0]
+            indicators = indicators_frame.get("indicators", {}) or {}
+            strategy_brief = indicators.get("strategy_brief") or _strategy_summary(module_path)
+            st.caption(strategy_brief)
+            latest = indicators_frame
             status = latest.get("status", "unknown")
-            last_signal = latest.get("last_signal") or "–"
-            st.markdown(f"**Status:** `{status}` | **Last Signal:** `{last_signal}`")
-            indicators = latest.get("indicators", {}) or {}
+            last_signal = latest.get("last_signal")
+            st.markdown(
+                f"**Status:** `{status}` · **Symbol:** `{latest.get('symbol', 'n/a')}`"
+            )
             risk = latest.get("risk", {}) or {}
             ml_confidence = indicators.get("ml_confidence")
-            if indicators:
-                pretty = {k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in indicators.items()}
-                st.json({"indicators": pretty})
-            if risk:
-                st.json({"risk": risk})
-            if ml_confidence is not None:
-                st.metric("ML Confidence", f"{ml_confidence:.3f}")
-            st.markdown(f"_Last update: {latest['updated_at'].strftime('%H:%M:%S UTC')}_")
+            threshold = (
+                indicators.get("ml_threshold")
+                or definition.get("parameters", {}).get("ml_threshold")
+                or ml_service.default_threshold
+            )
+            decision_text = _human_signal(last_signal)
+            st.markdown(f"**Active decision:** {decision_text}")
+            if module_path.endswith("researcher.MarketResearchWorker"):
+                feature_snapshot = indicators.get("features")
+                feature_count = len(feature_snapshot) if isinstance(feature_snapshot, dict) else 0
+                ml_ready = bool(indicators.get("ml_ready"))
+                st.markdown(
+                    "**Research stream:** Captured {count} features this cycle; ML gate {state}.".format(
+                        count=feature_count,
+                        state="ready" if ml_ready else "is warming up",
+                    )
+                )
+                if ml_confidence is not None:
+                    st.markdown(
+                        f"**ML broadcast:** confidence {float(ml_confidence):.3f} vs gate {float(threshold):.2f}."
+                    )
+            else:
+                long_only = bool(indicators.get("long_only", False))
+                posture_sentence = (
+                    "Long-only guard enforced; shorts are blocked at worker and broker layers."
+                    if long_only
+                    else "Mixed positioning configured."
+                )
+                st.markdown(f"**Posture:** {posture_sentence}")
+                if ml_confidence is None and latest.get("symbol"):
+                    ml_confidence = ml_service.latest_confidence(
+                        latest.get("symbol"), worker=worker
+                    )
+                if ml_confidence is not None:
+                    st.markdown(
+                        f"**ML confidence:** {float(ml_confidence):.3f} (gate {float(threshold):.2f})."
+                    )
+                else:
+                    st.markdown("**ML confidence:** Waiting for features from the researcher.")
+                if risk:
+                    position_pct = float(risk.get("position_size_pct", 100.0))
+                    stop_loss = float(risk.get("stop_loss_pct", 0.0))
+                    take_profit = float(risk.get("take_profit_pct", 0.0))
+                    trailing = float(risk.get("trailing_stop_pct", 0.0))
+                    st.markdown(
+                        "**Risk controls:** {alloc:.0f}% allocation · stop {sl:.2f}% · target {tp:.2f}% · trail {tr:.2f}%".format(
+                            alloc=position_pct,
+                            sl=stop_loss,
+                            tp=take_profit,
+                            tr=trailing,
+                        )
+                    )
+            st.caption(f"Last update: {latest['updated_at'].strftime('%H:%M:%S UTC')}")
 
 
 def build_market_figure(
@@ -564,16 +687,24 @@ def build_market_figure(
         row=1,
         col=1,
     )
-    entries = trades[(trades["symbol"] == symbol) & trades["exit_price"].isna()]
-    exits = trades[(trades["symbol"] == symbol) & trades["exit_price"].notna()]
+    entries = trades[
+        (trades["symbol"] == symbol)
+        & trades["exit_price"].isna()
+        & (trades["side"].str.lower() == "buy")
+    ]
+    exits = trades[
+        (trades["symbol"] == symbol)
+        & trades["exit_price"].notna()
+        & (trades["side"].str.lower() == "sell")
+    ]
     if not entries.empty:
         fig.add_trace(
             go.Scatter(
                 x=entries["timestamp"],
                 y=entries["entry_price"],
                 mode="markers",
-                marker=dict(symbol="triangle-down", size=12, color="#ff4d4d"),
-                name="Short entries",
+                marker=dict(symbol="triangle-up", size=12, color="#00ffb3"),
+                name="Long entries",
             ),
             row=1,
             col=1,
@@ -584,8 +715,8 @@ def build_market_figure(
                 x=exits["timestamp"],
                 y=exits["exit_price"],
                 mode="markers",
-                marker=dict(symbol="triangle-up", size=12, color="#00ffb3"),
-                name="Covers",
+                marker=dict(symbol="circle", size=10, color="#ff4d4d"),
+                name="Exits",
             ),
             row=1,
             col=1,
@@ -622,6 +753,16 @@ def render_market_view(symbol: str, trades: pd.DataFrame, ml_service: MLService)
         st.info("Waiting for market data snapshots from the researcher bot.")
         return
     st.plotly_chart(fig, use_container_width=True)
+    st.caption("Markers show ▲ long entries and ● exits. The lower panel charts ML confidence feeding each strategy.")
+    if not confidence_df.empty:
+        latest_conf = confidence_df.sort_values("timestamp").iloc[-1]
+        st.markdown(
+            "**Latest ML reading:** {worker} confidence {conf:.3f} vs gate {thr:.2f}.".format(
+                worker=latest_conf["worker"],
+                conf=float(latest_conf["confidence"]),
+                thr=float(latest_conf.get("threshold", ml_service.default_threshold)),
+            )
+        )
 
     if not feature_df.empty:
         latest = feature_df.iloc[-1]
@@ -895,7 +1036,7 @@ def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> No
         cols = st.columns(min(3, len(gating_workers)))
         for idx, (worker_key, definition) in enumerate(gating_workers):
             module_path = definition.get("module", worker_key)
-            worker_label = MODULE_DISPLAY_NAMES.get(module_path, module_path.split(".")[-1])
+            worker_label = _display_name_for_definition(definition)
             flag_key = f"ml::{worker_label}"
             enabled = control_flags.get(flag_key, "on").lower() not in {"off", "false", "0", "disabled"}
             toggle_key = f"ml_gate_{worker_key}"
@@ -984,6 +1125,11 @@ def render_sidebar(config: Dict) -> str:
         set_control_flag("kill_switch", "true" if kill_toggle else "false")
         st.sidebar.success("Kill switch state updated.")
 
+    st.sidebar.info(
+        "Long-only mode: sell orders automatically close longs; shorts are "
+        "blocked at the strategy and broker layers."
+    )
+
     st.sidebar.markdown("---")
     st.sidebar.subheader("Per-Bot Overrides")
     definitions = config.get("workers", {}).get("definitions", {})
@@ -991,7 +1137,7 @@ def render_sidebar(config: Dict) -> str:
         module_path = definition.get("module", worker_key)
         if module_path.endswith("researcher.MarketResearchWorker"):
             continue
-        worker_label = MODULE_DISPLAY_NAMES.get(module_path, module_path.split(".")[-1])
+        worker_label = _display_name_for_definition(definition)
         flag_key = f"bot::{worker_label}"
         paused = control_flags.get(flag_key, "active") in {"paused", "disabled"}
         toggle_key = f"bot_toggle_{worker_key}"
@@ -1033,7 +1179,7 @@ def main() -> None:
     render_account_overview(config, equity, trades, account_snapshot)
     render_equity_curve(equity)
     render_runtime_status(config, bot_states, ml_service)
-    render_signal_monitor(bot_states)
+    render_strategy_pulse(config, bot_states, ml_service)
     render_bot_cards(config, bot_states, ml_service)
     render_market_view(symbol, trades, ml_service)
     render_ml_debug_panel(config, ml_service, bot_states)

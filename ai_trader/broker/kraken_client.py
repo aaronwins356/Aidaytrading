@@ -169,6 +169,12 @@ class KrakenClient:
 
         base, quote = symbol.split("/")
 
+        if side == "sell" and not self._allow_shorting and not reduce_only:
+            self._logger.info(
+                "Long-only mode rejected sell order for %s – shorts are disabled.", symbol
+            )
+            raise RuntimeError("Long-only mode forbids opening sell orders")
+
         if self._paper_trading:
             self._simulate_fill(base, quote, side, amount, price)
             return float(price), float(amount)
@@ -178,7 +184,7 @@ class KrakenClient:
             should_reduce_only = True
             if reduce_only is False:
                 self._logger.debug(
-                    "Ignoring explicit reduce_only=False for %s sell order; enforcing long-only exit.",
+                    "Ignoring explicit reduce_only=False for %s sell order; enforcing reduce-only execution.",
                     symbol,
                 )
         elif reduce_only is not None:
