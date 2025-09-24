@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import types
 from typing import Any, Callable
 
+import pytest
+
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.services.equity import EquityEngine
 from ai_trader.services.risk import RiskManager
@@ -180,6 +182,42 @@ class _StubExchange:
         return {"amount": amount, "average": 100.0}
 
 
+class _StringCashWorker(BaseWorker):
+    """Worker that deliberately returns string cash sizes to test coercion."""
+
+    name = "StringCashWorker"
+
+    def __init__(self, symbol: str, trade_log: TradeLog) -> None:
+        super().__init__([symbol], lookback=3, trade_log=trade_log)
+        self._submitted = False
+
+    async def evaluate_signal(self, snapshot: MarketSnapshot) -> dict[str, str]:
+        self.update_history(snapshot)
+        return {self.symbols[0]: "buy"}
+
+    async def generate_trade(
+        self,
+        symbol: str,
+        signal: str | None,
+        snapshot: MarketSnapshot,
+        equity_per_trade: float,
+        existing_position: OpenPosition | None = None,
+    ) -> TradeIntent | None:
+        if existing_position is not None or self._submitted or signal != "buy":
+            return None
+        self._submitted = True
+        price = snapshot.prices[symbol]
+        return TradeIntent(
+            worker=self.name,
+            action="OPEN",
+            symbol=symbol,
+            side="buy",
+            cash_spent="3.59",
+            entry_price=price,
+            confidence=0.9,
+        )
+
+
 async def _run_trade_engine(tmp_path) -> None:
     """The trade engine should execute a simple open/close cycle in paper mode."""
 
@@ -308,6 +346,50 @@ async def _run_short_trade_engine(tmp_path) -> None:
 
 def test_trade_engine_short_sell_without_reduce_only(tmp_path) -> None:
     asyncio.run(_run_short_trade_engine(tmp_path))
+
+
+async def _run_string_cash_trade(tmp_path) -> list[tuple[str, str, float]]:
+    """Run the engine with a worker submitting string cash sizes."""
+
+    db_path = tmp_path / "string_cash.db"
+    trade_log = TradeLog(db_path)
+    broker = _DummyBroker()
+    websocket_manager = _DummyWebsocketManager("BTC/USD")
+    equity_engine = EquityEngine(trade_log, broker.starting_equity)
+    risk_manager = RiskManager({
+        "max_drawdown_percent": 50,
+        "daily_loss_limit_percent": 50,
+        "max_position_duration_minutes": 5,
+    })
+    worker = _StringCashWorker("BTC/USD", trade_log)
+
+    engine = TradeEngine(
+        broker=broker,
+        websocket_manager=websocket_manager,
+        workers=[worker],
+        researchers=[],
+        equity_engine=equity_engine,
+        risk_manager=risk_manager,
+        trade_log=trade_log,
+        equity_allocation_percent=10.0,
+        max_open_positions=1,
+        refresh_interval=0.01,
+        paper_trading=True,
+    )
+
+    run_task = asyncio.create_task(engine.start())
+    await asyncio.sleep(0.1)
+    await engine.stop()
+    await run_task
+
+    return broker.orders
+
+
+def test_trade_engine_casts_string_cash_from_workers(tmp_path) -> None:
+    orders = asyncio.run(_run_string_cash_trade(tmp_path))
+    assert orders, "Engine should execute at least one order"
+    _, _, cash_value = orders[-1]
+    assert cash_value == pytest.approx(3.59)
 
 
 async def _place_short_order_with_client() -> dict[str, Any]:

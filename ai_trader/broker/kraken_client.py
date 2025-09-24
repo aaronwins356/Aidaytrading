@@ -63,7 +63,13 @@ class KrakenClient:
         markets = await self._with_retries(
             self._exchange.load_markets, description="load_markets"
         )
-        self._markets = markets or {}
+        normalised_markets: Dict[str, dict] = {}
+        for symbol, payload in (markets or {}).items():
+            canonical = self._normalise_market_symbol(symbol)
+            if not canonical:
+                continue
+            normalised_markets[canonical] = payload
+        self._markets = normalised_markets
 
     async def fetch_price(self, symbol: str) -> Optional[float]:
         ticker = await self._with_retries(
@@ -134,6 +140,12 @@ class KrakenClient:
         Returns a tuple of (price, quantity).
         """
 
+        if isinstance(cash_spent, str):
+            try:
+                cash_spent = float(cash_spent)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("cash_spent must be numeric") from exc
+
         assert isinstance(
             cash_spent, (int, float)
         ), f"cash_spent must be float, got {type(cash_spent)}"
@@ -186,10 +198,18 @@ class KrakenClient:
             self._logger.warning("Kraken rejected order for %s: %s", symbol, exc)
             raise RuntimeError(str(exc)) from exc
         filled = float(order.get("amount", amount))
-        avg_price = order.get("average") or price
-        return float(avg_price), float(filled)
+        avg_price = float(order.get("average") or price)
+        return avg_price, filled
 
     async def close_position(self, symbol: str, side: str, amount: float) -> Tuple[float, float]:
+        if isinstance(amount, str):
+            try:
+                amount = float(amount)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("amount must be numeric") from exc
+        if not isinstance(amount, (int, float)):
+            raise TypeError("amount must be numeric")
+        assert isinstance(amount, (int, float)), "amount must be numeric"
         amount = float(amount)
         exit_side = "sell" if side == "buy" else "buy"
         if self._paper_trading:
@@ -216,13 +236,14 @@ class KrakenClient:
             self._logger.warning("Kraken rejected close order for %s: %s", symbol, exc)
             raise RuntimeError(str(exc)) from exc
         filled = float(order.get("amount", amount))
-        avg_price = order.get("average") or order.get("price")
+        avg_price_raw = order.get("average") or order.get("price")
+        avg_price = float(avg_price_raw) if avg_price_raw is not None else None
         if avg_price is None:
             market_price = await self.fetch_price(symbol)
             if market_price is None:
                 raise RuntimeError("Unable to determine fill price")
-            avg_price = market_price
-        return float(avg_price), float(filled)
+            avg_price = float(market_price)
+        return avg_price, filled
 
     async def compute_equity(self, prices: Dict[str, float]) -> tuple[float, Dict[str, float]]:
         """Return the total account equity alongside the raw balances."""
@@ -265,7 +286,21 @@ class KrakenClient:
             base, suffix = normalised.split(".", 1)
             if suffix in {"F", "S"}:
                 normalised = base
-        return normalised
+        alias_map = {"XBT": "BTC"}
+        return alias_map.get(normalised, normalised)
+
+    def _normalise_market_symbol(self, symbol: str) -> str:
+        """Return a canonical market symbol for Kraken listings."""
+
+        text = str(symbol or "").strip().upper()
+        if "/" not in text:
+            return ""
+        base, quote = text.split("/", 1)
+        base = self._normalise_balance_asset(base)
+        quote = self._normalise_balance_asset(quote)
+        if not base or not quote:
+            return ""
+        return f"{base}/{quote}"
 
     def _adjust_amount(self, symbol: str, amount: float) -> float:
         market = self._markets.get(symbol)
@@ -391,6 +426,7 @@ class KrakenClient:
             or payload.get("info", {}).get("pair")
             or ""
         ).upper()
+        symbol = self._normalise_market_symbol(symbol)
         if not symbol:
             return None
 
