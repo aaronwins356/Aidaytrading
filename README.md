@@ -24,43 +24,25 @@ ai_trader/
 └── data/               # SQLite database and generated artefacts
 ```
 
-## Quick Start
 
-1. **Clone & install**
+1. **Run the bot**
 
    ```bash
-   python3.11 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-
-   On Windows PowerShell use:
-
-   ```powershell
-   py -3.11 -m venv .venv
    .venv\\Scripts\\Activate.ps1
-   pip install -r requirements.txt
-   ```
-
-2. **Configure**
-
-   Edit `ai_trader/config.yaml` with Kraken API keys, symbols, and risk preferences. Set `paper_trading: false` only when ready for live trading.
-
-3. **Run the bot**
-
-   ```bash
    python -m ai_trader.main
    ```
 
-4. **Launch the dashboard** (in a new terminal)
+2. **Launch the dashboard** (in a new terminal)
 
    ```bash
+   .venv\\Scripts\\Activate.ps1
    streamlit run ai_trader/dashboard/app.py
    ```
 
-5. **Run automated tests**
+3. **Run automated tests**
 
    ```bash
+   .venv\\Scripts\\Activate.ps1
    pytest
    ```
 
