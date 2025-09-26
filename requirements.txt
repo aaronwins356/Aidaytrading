@@ -1,14 +1,2 @@
-ccxt>=4.2
-fastapi>=0.110
-uvicorn[standard]>=0.30
-streamlit>=1.32
-python-telegram-bot>=21.0
-scikit-learn>=1.4
-numpy
-pandas
-matplotlib
-pyyaml
-sqlalchemy
-websockets>=12.0
-river>=0.17.0
-torch>=2.2
+-r requirements-core.txt
+-r requirements-ml.txt
