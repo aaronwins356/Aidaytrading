@@ -12,3 +12,6 @@ pytest==8.2.0
 scikit-learn==1.4.2
 torch==2.2.1
 python-telegram-bot==20.8
+fastapi==0.110.2
+uvicorn==0.29.0
+httpx==0.26.0

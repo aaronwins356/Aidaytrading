@@ -16,6 +16,7 @@ from logging import Logger
 from pathlib import Path
 from typing import Any, Dict, Iterable, Sequence
 
+from ai_trader.api_service import attach_services, get_runtime_state
 from ai_trader.backtester import Backtester, BacktestResult
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.broker.websocket_manager import KrakenWebsocketManager
@@ -453,9 +454,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["live", "backtest"],
+        choices=["live", "backtest", "api"],
         default="live",
-        help="Execution mode: live trading or historical backtest",
+        help="Execution mode: live trading, API service, or historical backtest",
     )
     parser.add_argument(
         "--dryrun",
@@ -720,6 +721,11 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
     )
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
     risk_manager = RiskManager(risk_cfg)
+    runtime_state = get_runtime_state()
+    runtime_state.set_base_currency(broker.base_currency)
+    runtime_state.set_starting_equity(broker.starting_equity)
+    runtime_state.update_risk_settings(risk_manager.config_dict())
+    attach_services(trade_log=trade_log, runtime_state=runtime_state, risk_manager=risk_manager)
 
     symbols = trading_cfg.get("symbols", [])
     websocket_manager = KrakenWebsocketManager(symbols)
@@ -760,6 +766,7 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         trade_confidence_min=float(trading_cfg.get("trade_confidence_min", 0.5)),
         ml_service=ml_service,
         notifier=notifier,
+        runtime_state=runtime_state,
     )
 
     try:
@@ -801,6 +808,45 @@ def _resolve_path(value: str | None) -> Path | None:
     if not value:
         return None
     return Path(value).expanduser().resolve()
+
+
+def run_api_server(config: Dict[str, Any]) -> None:
+    """Start the FastAPI service for monitoring and risk controls."""
+
+    runtime_config = copy.deepcopy(config)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    trading_cfg = runtime_config.get("trading", {})
+    risk_cfg = runtime_config.get("risk", {})
+    runtime_state = get_runtime_state()
+    runtime_state.set_base_currency(trading_cfg.get("base_currency", "USD"))
+    starting_equity = trading_cfg.get("paper_starting_equity") or trading_cfg.get(
+        "starting_equity"
+    )
+    try:
+        if starting_equity is not None:
+            runtime_state.set_starting_equity(float(starting_equity))
+    except (TypeError, ValueError):
+        pass
+    risk_manager = RiskManager(risk_cfg)
+    trade_log = TradeLog(DB_PATH)
+    attach_services(trade_log=trade_log, runtime_state=runtime_state, risk_manager=risk_manager)
+
+    host = os.getenv("AI_TRADER_API_HOST", "0.0.0.0")
+    port_value = os.getenv("AI_TRADER_API_PORT", "8000")
+    try:
+        port = int(port_value)
+    except ValueError:
+        port = 8000
+    reload_flag = os.getenv("AI_TRADER_API_RELOAD", "0").lower() in {"1", "true", "on"}
+
+    logger = get_logger(__name__)
+    logger.info("Starting API server on %s:%d", host, port)
+
+    import uvicorn
+
+    from ai_trader.api_service import app as api_app
+
+    uvicorn.run(api_app, host=host, port=port, reload=reload_flag)
 
 
 def _parse_date(value: str | None, field_name: str) -> datetime:
@@ -925,6 +971,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     try:
         if args.mode == "backtest":
             run_backtest_cli(args, config)
+        elif args.mode == "api":
+            run_api_server(config)
         else:
             _spawn_parallel_backtest(args, config)
             asyncio.run(start_trading(args, config))

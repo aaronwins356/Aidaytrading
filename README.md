@@ -89,6 +89,29 @@ When `--parallel-backtest` is enabled, a daemon thread replays historical data w
    pytest
    ```
 
+4. **Start the REST API**
+
+   Launch the monitoring API without the trading loop:
+
+   ```bash
+   python -m ai_trader.main --mode api
+   ```
+
+   Or run the ASGI app directly with uvicorn while developing:
+
+   ```bash
+   uvicorn ai_trader.api_service:app --reload --port 8000
+   ```
+
+   Common requests:
+
+   ```bash
+   curl http://localhost:8000/status
+   curl http://localhost:8000/profit
+   curl http://localhost:8000/trades?limit=20
+   curl -X POST http://localhost:8000/config -H "Content-Type: application/json" -d '{"risk_per_trade":0.02}'
+   ```
+
 ## Dummy Trade Test
 
 Before pointing at a live account, keep `paper_trading: true` and verify that:
