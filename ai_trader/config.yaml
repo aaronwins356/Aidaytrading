@@ -1,6 +1,7 @@
 kraken:
-  api_key: ''
-  api_secret: ''
+  
+       api_key: ''
+         api_secret: ''
   rest_rate_limit: 0.5
 trading:
   base_currency: USD
@@ -13,13 +14,13 @@ trading:
   paper_trading: false
   paper_starting_equity: 200.0
   allow_shorting: false
-  min_cash_per_trade: 5.0.0
-  max_cash_per_trade: 10.0.0
+min_cash_per_trade: 5.0
+ max_cash_per_trade: 10.0
   trade_confidence_min:   0.6
   mode: live
 risk:
-  max_drawdown_p:ercent 20.0
-  daily_loss_limit_p:ercent 5.0
+  max_drawdown_percent: 20.0
+    daily_loss_limit_percent: 5.0
     max_position_duration_minutes: 240
 ml:
   feature_keys:
