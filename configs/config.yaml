@@ -40,7 +40,9 @@ risk:
   max_position_duration_minutes: 240
   risk_per_trade: 0.02
   max_open_positions: 3
-  min_trades_per_day: 30
+  min_trades_per_day:
+    default: 10
+    ETH/USD: 5
   confidence_relax_percent: 0.1
   atr_stop_loss_multiplier: 1.5
   atr_take_profit_multiplier: 2.5
@@ -140,6 +142,19 @@ workers:
         stop_loss_pct: 1.4
         take_profit_pct: 2.4
         trailing_stop_pct: 0.95
+    ensemble_shadow:
+      module: ai_trader.workers.ml_ensemble_worker.EnsembleMLWorker
+      enabled: false
+      display_name: ML Ensemble Shadow
+      emoji: "🧪"
+      symbols:
+        - BTC/USD
+        - ETH/USD
+      parameters:
+        shadow_mode: true
+        validation_min_accuracy: 0.55
+        validation_min_reward: 0.0
+        validation_min_support: 30
 
 researcher:
   module: ai_trader.workers.researcher.MarketResearchWorker

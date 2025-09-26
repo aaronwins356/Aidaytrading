@@ -114,9 +114,12 @@ class MomentumWorker(BaseWorker):
 
         if signal == "buy" and existing_position is None:
             cash = float(equity_per_trade)
-            allowed, confidence = self.ml_confirmation(symbol)
+            allowed, confidence, validation = self.ml_confirmation(symbol)
             if not allowed:
-                self.update_signal_state(symbol, "ml-block", {"ml_confidence": confidence})
+                indicators = {"ml_confidence": confidence}
+                if validation:
+                    indicators["validation_reward"] = validation.get("reward")
+                self.update_signal_state(symbol, "ml-block", indicators)
                 return None
             risk_meta = self.prepare_entry_risk(symbol, signal, price)
             metadata = {
@@ -124,6 +127,8 @@ class MomentumWorker(BaseWorker):
                 "price": price,
                 **{k: v for k, v in risk_meta.items() if v is not None},
             }
+            if validation:
+                metadata["validation_metrics"] = validation
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
@@ -133,6 +138,7 @@ class MomentumWorker(BaseWorker):
                 entry_price=price,
                 confidence=confidence,
                 metadata=metadata,
+                validation_score=validation.get("reward") if validation else None,
             )
 
         if signal in {"sell", "exit"} and existing_position and existing_position.side == "buy":

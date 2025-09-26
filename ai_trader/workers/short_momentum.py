@@ -150,12 +150,17 @@ class ShortMomentumWorker(BaseWorker):
             cash = max(float(cash), 0.0)
             if cash == 0:
                 return None
-            allowed, ml_confidence = self.ml_confirmation(symbol)
+            allowed, ml_confidence, validation = self.ml_confirmation(symbol)
             if not allowed:
-                self.update_signal_state(symbol, "ml-block", {"ml_confidence": ml_confidence})
+                indicators = {"ml_confidence": ml_confidence}
+                if validation:
+                    indicators["validation_reward"] = validation.get("reward")
+                self.update_signal_state(symbol, "ml-block", indicators)
                 return None
             risk_meta = self.prepare_entry_risk(symbol, "sell", price)
             metadata = {k: v for k, v in risk_meta.items() if v is not None}
+            if validation:
+                metadata["validation_metrics"] = validation
             fallback_confidence = 0.0
             stop_hint = risk_meta.get("stop_price")
             if stop_hint is not None:
@@ -172,6 +177,7 @@ class ShortMomentumWorker(BaseWorker):
                 entry_price=price,
                 confidence=confidence,
                 metadata=metadata,
+                validation_score=validation.get("reward") if validation else None,
             )
 
         close_signal = False

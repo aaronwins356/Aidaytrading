@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping
@@ -24,6 +25,7 @@ app = FastAPI(title="AI Trader Control API", version="1.0.0")
 _RUNTIME_STATE: RuntimeStateStore = RuntimeStateStore(STATE_PATH)
 _TRADE_LOG: TradeLog | MemoryTradeLog | None = None
 _RISK_MANAGER: RiskManager | None = None
+_ML_SERVICE: Any | None = None
 
 
 class RiskUpdate(BaseModel):
@@ -37,7 +39,7 @@ class RiskUpdate(BaseModel):
     max_open_positions: int | None = None
     max_position_duration_minutes: float | None = None
     confidence_relax_percent: float | None = None
-    min_trades_per_day: int | None = None
+    min_trades_per_day: int | Dict[str, int] | None = None
     atr_stop_loss_multiplier: float | None = None
     atr_take_profit_multiplier: float | None = None
     min_stop_buffer: float | None = None
@@ -54,23 +56,26 @@ def attach_services(
     trade_log: TradeLog | MemoryTradeLog,
     runtime_state: RuntimeStateStore,
     risk_manager: RiskManager,
+    ml_service: Any | None = None,
 ) -> None:
     """Attach live service instances provided by the trading runtime."""
 
-    global _TRADE_LOG, _RISK_MANAGER, _RUNTIME_STATE
+    global _TRADE_LOG, _RISK_MANAGER, _RUNTIME_STATE, _ML_SERVICE
     _TRADE_LOG = trade_log
     _RISK_MANAGER = risk_manager
     _RUNTIME_STATE = runtime_state
+    _ML_SERVICE = ml_service
     _RUNTIME_STATE.update_risk_settings(risk_manager.config_dict())
 
 
 def reset_services(*, state_file: Path | None = STATE_PATH) -> None:
     """Reset service singletons – useful for test isolation."""
 
-    global _TRADE_LOG, _RISK_MANAGER, _RUNTIME_STATE
+    global _TRADE_LOG, _RISK_MANAGER, _RUNTIME_STATE, _ML_SERVICE
     _TRADE_LOG = None
     _RISK_MANAGER = None
     _RUNTIME_STATE = RuntimeStateStore(state_file)
+    _ML_SERVICE = None
 
 
 def _ensure_services() -> tuple[TradeLog | MemoryTradeLog, RuntimeStateStore, RiskManager]:
@@ -81,6 +86,45 @@ def _ensure_services() -> tuple[TradeLog | MemoryTradeLog, RuntimeStateStore, Ri
     if _RISK_MANAGER is None:
         _RISK_MANAGER = RiskManager()
     return _TRADE_LOG, _RUNTIME_STATE, _RISK_MANAGER
+
+
+def _load_validation_metrics_from_db() -> Dict[str, Dict[str, Any]]:
+    if not DB_PATH.exists():
+        return {}
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT symbol, precision, recall, win_rate, support, accuracy, f1_score,
+                   reward, avg_confidence, threshold, trades, window, timestamp
+            FROM ml_metrics
+            WHERE mode = 'validation'
+            ORDER BY timestamp DESC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    metrics: Dict[str, Dict[str, float]] = {}
+    for row in rows:
+        symbol = str(row["symbol"])
+        if symbol in metrics:
+            continue
+        metrics[symbol] = {
+            "precision": float(row["precision"] or 0.0),
+            "recall": float(row["recall"] or 0.0),
+            "win_rate": float(row["win_rate"] or 0.0),
+            "support": float(row["support"] or 0.0),
+            "accuracy": float(row["accuracy"] or 0.0),
+            "f1_score": float(row["f1_score"] or 0.0),
+            "reward": float(row["reward"] or 0.0),
+            "avg_confidence": float(row["avg_confidence"] or 0.0),
+            "threshold": float(row["threshold"] or 0.0),
+            "trades": float(row["trades"] or 0.0),
+            "window": float(row["window"] or 0.0),
+            "timestamp": row["timestamp"],
+        }
+    return metrics
 
 
 def _row_to_dict(row: Mapping[str, Any] | Iterable[Any]) -> Dict[str, Any]:
@@ -183,6 +227,21 @@ async def get_trades(limit: int = Query(10, ge=1, le=200)) -> Dict[str, Any]:
         "trades": [_format_trade(row) for row in trimmed],
         "count": len(trimmed),
     }
+
+
+@app.get("/ml-metrics")
+async def get_ml_metrics() -> Dict[str, Any]:
+    metrics: Dict[str, Any]
+    if _ML_SERVICE is not None and hasattr(_ML_SERVICE, "latest_validation_metrics"):
+        try:
+            metrics = _ML_SERVICE.latest_validation_metrics()  # type: ignore[attr-defined]
+        except Exception:
+            metrics = {}
+    else:
+        metrics = {}
+    if not metrics:
+        metrics = _load_validation_metrics_from_db()
+    return {"metrics": metrics}
 
 
 @app.get("/risk")

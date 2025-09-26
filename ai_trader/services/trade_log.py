@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional
 
 from ai_trader.services.schema import TRADE_LOG_TABLES
 from ai_trader.services.types import TradeIntent
@@ -42,14 +42,27 @@ class TradeLog:
     def record_trade(self, trade: TradeIntent) -> None:
         """Persist a trade intent to the database."""
 
+        metadata = dict(trade.metadata or {})
+        stop_price = self._coerce_float(metadata.get("stop_price"), trade.atr_stop)
+        target_price = self._coerce_float(metadata.get("target_price"), trade.atr_target)
+        atr_value = self._coerce_float(metadata.get("atr"), trade.atr_value)
+        validation_snapshot = metadata.get("validation_metrics") or metadata.get("validation")
+        validation_value = self._coerce_float(
+            metadata.get("validation_score"),
+            trade.validation_score,
+        )
+        if validation_value is None and isinstance(validation_snapshot, Mapping):
+            validation_value = self._coerce_float(validation_snapshot.get("reward"))
+
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO trades (
                     timestamp, worker, symbol, side, cash_spent,
                     entry_price, exit_price, pnl_percent, pnl_usd, win_loss,
-                    reason, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reason, metadata_json, confidence, atr_stop, atr_target,
+                    atr_value, validation_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade.created_at.isoformat(),
@@ -63,7 +76,12 @@ class TradeLog:
                     trade.pnl_usd,
                     trade.win_loss,
                     trade.reason,
-                    json.dumps(trade.metadata or {}),
+                    json.dumps(metadata),
+                    trade.confidence,
+                    stop_price,
+                    target_price,
+                    atr_value,
+                    validation_value,
                 ),
             )
             conn.commit()
@@ -237,6 +255,27 @@ class TradeLog:
             conn.execute("ALTER TABLE trades ADD COLUMN reason TEXT")
         if "metadata_json" not in existing:
             conn.execute("ALTER TABLE trades ADD COLUMN metadata_json TEXT")
+        if "confidence" not in existing:
+            conn.execute("ALTER TABLE trades ADD COLUMN confidence REAL")
+        if "atr_stop" not in existing:
+            conn.execute("ALTER TABLE trades ADD COLUMN atr_stop REAL")
+        if "atr_target" not in existing:
+            conn.execute("ALTER TABLE trades ADD COLUMN atr_target REAL")
+        if "atr_value" not in existing:
+            conn.execute("ALTER TABLE trades ADD COLUMN atr_value REAL")
+        if "validation_score" not in existing:
+            conn.execute("ALTER TABLE trades ADD COLUMN validation_score REAL")
+
+    @staticmethod
+    def _coerce_float(*values: object | None) -> float | None:
+        for value in values:
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
 
     def record_bot_state(self, worker: str, symbol: str, state: Dict[str, object]) -> None:
         """Store a bot's runtime state for dashboard consumption."""
@@ -365,6 +404,11 @@ class MemoryTradeLog:
             "win_loss": trade.win_loss,
             "reason": trade.reason,
             "metadata_json": json.dumps(trade.metadata or {}),
+            "confidence": trade.confidence,
+            "atr_stop": trade.atr_stop,
+            "atr_target": trade.atr_target,
+            "atr_value": trade.atr_value,
+            "validation_score": trade.validation_score,
         }
         self._trades.append(payload)
 

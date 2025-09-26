@@ -20,7 +20,9 @@ from ai_trader.services.types import MarketSnapshot
 _NATIVE_TO_DISPLAY: dict[str, str] = {
     "XBT": "BTC",
 }
-_DISPLAY_TO_NATIVE: dict[str, str] = {display: native for native, display in _NATIVE_TO_DISPLAY.items()}
+_DISPLAY_TO_NATIVE: dict[str, str] = {
+    display: native for native, display in _NATIVE_TO_DISPLAY.items()
+}
 
 
 class KrakenWebsocketManager:
@@ -40,12 +42,8 @@ class KrakenWebsocketManager:
         if not normalised:
             raise ValueError("At least one valid Kraken symbol must be provided")
         self._symbols = normalised
-        self._display_to_kraken = {
-            symbol: self._map_to_kraken(symbol) for symbol in self._symbols
-        }
-        self._kraken_to_display = {
-            value: key for key, value in self._display_to_kraken.items()
-        }
+        self._display_to_kraken = {symbol: self._map_to_kraken(symbol) for symbol in self._symbols}
+        self._kraken_to_display = {value: key for key, value in self._display_to_kraken.items()}
         self._history = history
         self._url = "wss://ws.kraken.com/"
         self._latest_prices: Dict[str, float] = {}
