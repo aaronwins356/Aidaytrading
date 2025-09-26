@@ -4,6 +4,9 @@ A modular crypto trading bot for Kraken that runs multiple strategy workers, enf
 
 ## Key Features
 
+*The new FastAPI backend lives in `backend/`; see that directory for API docs and setup.*
+
+
 - **Unified configuration** – all runtime settings (exchange credentials, risk, workers, notifications, dashboard) live in [`configs/config.yaml`](configs/config.yaml).
 - **Paper + live trading** – flip `trading.paper_trading` to simulate fills or submit orders to Kraken with the same runtime.
 - **Streamlit operations hub** – monitor equity, trades, and worker status with live control flags plus on-demand backtesting.
@@ -25,6 +28,8 @@ ai_trader/
 └── data/               # SQLite database and generated artefacts
 configs/
 └── config.yaml         # Unified runtime configuration
+backend/
+└── README.md         # FastAPI backend (see backend/README.md for details)
 ```
 
 ## Configuration
