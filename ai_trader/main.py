@@ -629,6 +629,7 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         paper_trading=paper_mode,
         paper_starting_equity=float(trading_cfg.get("paper_starting_equity", 10000.0)),
         allow_shorting=bool(trading_cfg.get("allow_shorting", False)),
+        fee_rate=float(trading_cfg.get("trade_fee_percent", 0.0)),
     )
 
     trade_log = TradeLog(DB_PATH)
@@ -740,6 +741,7 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         min_cash_per_trade=float(trading_cfg.get("min_cash_per_trade", 10.0)),
         max_cash_per_trade=float(trading_cfg.get("max_cash_per_trade", 20.0)),
         trade_confidence_min=float(trading_cfg.get("trade_confidence_min", 0.5)),
+        trade_fee_percent=float(trading_cfg.get("trade_fee_percent", 0.0)),
         ml_service=ml_service,
         notifier=notifier,
         runtime_state=runtime_state,

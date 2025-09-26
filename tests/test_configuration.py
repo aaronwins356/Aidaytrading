@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from ai_trader.services.configuration import normalize_config
 
 
@@ -32,7 +34,7 @@ def test_normalize_config_sanitises_symbols() -> None:
 
     assert normalised["trading"]["symbols"] == ["BTC/USD", "SOL/USD", "ETH/USD"]
     assert normalised["trading"]["trade_confidence_min"] == 0.5
-    assert normalised["trading"]["max_cash_per_trade"] == 20.0
+    assert normalised["trading"]["max_cash_per_trade"] == 0.0
 
 
 def test_normalize_config_clamps_trade_size_band() -> None:
@@ -41,8 +43,8 @@ def test_normalize_config_clamps_trade_size_band() -> None:
     normalised = normalize_config(config)
     trading = normalised["trading"]
 
-    assert trading["min_cash_per_trade"] == 10.0
-    assert trading["max_cash_per_trade"] == 20.0
+    assert trading["min_cash_per_trade"] == pytest.approx(2.5)
+    assert trading["max_cash_per_trade"] == pytest.approx(50.0)
 
 
 def test_normalize_config_sets_trading_mode_and_worker_symbols() -> None:

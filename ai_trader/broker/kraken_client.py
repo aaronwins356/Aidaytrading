@@ -34,6 +34,7 @@ class KrakenClient:
         paper_trading: bool = False,
         paper_starting_equity: float = 10000.0,
         allow_shorting: bool = False,
+        fee_rate: float = 0.0,
     ) -> None:
         self._logger = get_logger(__name__)
         self._paper_trading = paper_trading
@@ -41,6 +42,7 @@ class KrakenClient:
         self._rest_rate_limit = rest_rate_limit
         self._paper_balances: Dict[str, float] = {base_currency: paper_starting_equity}
         self._allow_shorting = allow_shorting
+        self._fee_rate = max(0.0, float(fee_rate))
         self._exchange = ccxt.kraken(
             {
                 "apiKey": api_key,
@@ -75,6 +77,18 @@ class KrakenClient:
                 continue
             normalised_markets[canonical] = payload
         self._markets = normalised_markets
+
+    def min_order_value(self, symbol: str) -> float:
+        market = self._markets.get(symbol)
+        if not market:
+            return 0.0
+        limits = market.get("limits", {}) or {}
+        cost_limits = limits.get("cost") or {}
+        min_cost = cost_limits.get("min")
+        try:
+            return float(min_cost) if min_cost is not None else 0.0
+        except (TypeError, ValueError):  # pragma: no cover - defensive guard
+            return 0.0
 
     async def fetch_price(self, symbol: str) -> Optional[float]:
         ticker = await self._with_retries(
@@ -377,19 +391,20 @@ class KrakenClient:
         amount = float(amount)
         price = float(price)
         cost = float(amount) * float(price)
+        fee = cost * self._fee_rate
         balances = self._paper_balances
         balances.setdefault(base, 0.0)
         balances.setdefault(quote, 0.0)
         if side == "buy":
             if balances[quote] < cost:
                 raise RuntimeError("Insufficient paper balance")
-            balances[quote] -= cost
+            balances[quote] -= cost + fee
             balances[base] += amount
         else:
             if balances[base] < amount and not self._allow_shorting:
                 raise RuntimeError("Insufficient asset for paper sell")
             balances[base] -= amount
-            balances[quote] += cost
+            balances[quote] += max(0.0, cost - fee)
 
     async def ensure_market(self, symbol: str) -> None:
         if symbol not in self._markets:

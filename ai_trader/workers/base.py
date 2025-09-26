@@ -222,6 +222,36 @@ class BaseWorker(ABC):
         if target is not None:
             tracker["target_price"] = target
 
+    def apply_global_risk_overrides(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        *,
+        stop: float | None = None,
+        target: float | None = None,
+        trailing: float | None = None,
+    ) -> None:
+        tracker = self._risk_trackers.setdefault(symbol, {})
+        tracker.setdefault("side", side)
+        tracker.setdefault("entry_price", entry_price)
+        tracker.setdefault("best_price", entry_price)
+
+        if stop is not None:
+            existing_stop = tracker.get("stop_price")
+            if existing_stop is None or self._is_tighter_stop(side, stop, existing_stop):
+                tracker["stop_price"] = stop
+
+        if target is not None:
+            existing_target = tracker.get("target_price")
+            if existing_target is None or self._is_tighter_target(side, target, existing_target):
+                tracker["target_price"] = target
+
+        if trailing is not None:
+            existing_trailing = tracker.get("trailing_price")
+            if existing_trailing is None or self._is_tighter_stop(side, trailing, existing_trailing):
+                tracker["trailing_price"] = trailing
+
     def check_risk_exit(
         self, symbol: str, price: float
     ) -> tuple[bool, Optional[str], Dict[str, float | None]]:
@@ -380,3 +410,15 @@ class BaseWorker(ABC):
             )
         except Exception as exc:  # noqa: BLE001 - keep workers resilient
             self._logger.debug("Failed to record trade event %s for %s: %s", event, symbol, exc)
+
+    @staticmethod
+    def _is_tighter_stop(side: str, candidate: float, existing: float) -> bool:
+        if side == "buy":
+            return candidate > existing
+        return candidate < existing
+
+    @staticmethod
+    def _is_tighter_target(side: str, candidate: float, existing: float) -> bool:
+        if side == "buy":
+            return candidate < existing
+        return candidate > existing

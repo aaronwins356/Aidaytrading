@@ -185,8 +185,8 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     trading_cfg.setdefault("equity_allocation_percent", 2.0)
     trading_cfg.setdefault("paper_starting_equity", 25000.0)
     trading_cfg.setdefault("max_open_positions", 3)
-    trading_cfg.setdefault("min_cash_per_trade", 10.0)
-    trading_cfg.setdefault("max_cash_per_trade", 20.0)
+    trading_cfg.setdefault("min_cash_per_trade", 0.0)
+    trading_cfg.setdefault("max_cash_per_trade", 0.0)
     trading_cfg.setdefault("trade_confidence_min", 0.5)
     raw_symbols = trading_cfg.get("symbols", [])
     normalised_symbols = _normalise_symbol_sequence(raw_symbols)
@@ -203,16 +203,12 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     )
     trading_cfg["paper_starting_equity"] = float(trading_cfg.get("paper_starting_equity", 25000.0))
     trading_cfg["max_open_positions"] = int(trading_cfg.get("max_open_positions", 3))
-    min_cash = float(trading_cfg.get("min_cash_per_trade", 10.0))
-    max_cash = float(trading_cfg.get("max_cash_per_trade", 20.0))
-    # Enforce the $10–$20 sizing policy so strategies cannot accidentally
-    # request orders that fall outside the broker-compliant range. Values
-    # outside the bounds are clamped rather than rejected to keep the bot
-    # resilient to misconfiguration during live deployments.
-    min_cash = max(10.0, min(20.0, min_cash))
-    max_cash = max(min_cash, min(20.0, max_cash))
+    min_cash = max(0.0, float(trading_cfg.get("min_cash_per_trade", 0.0)))
+    max_cash_raw = float(trading_cfg.get("max_cash_per_trade", 0.0))
+    max_cash = max(min_cash, max_cash_raw) if max_cash_raw > 0 else max_cash_raw
     trading_cfg["min_cash_per_trade"] = min_cash
     trading_cfg["max_cash_per_trade"] = max_cash
+    trading_cfg["trade_fee_percent"] = float(trading_cfg.get("trade_fee_percent", 0.0))
     confidence_floor = float(trading_cfg.get("trade_confidence_min", 0.5))
     trading_cfg["trade_confidence_min"] = max(0.0, min(1.0, confidence_floor))
     normalised["trading"] = trading_cfg
