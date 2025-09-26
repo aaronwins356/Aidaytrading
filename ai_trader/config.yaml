@@ -1,7 +1,6 @@
 kraken:
-  
-   api_key: ''
-     api_secret: ''
+  api_key: ''
+  api_secret: ''
   rest_rate_limit: 0.5
 trading:
   base_currency: USD
