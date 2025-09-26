@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - imported for static type checking only
     from ai_trader.services.ml import MLService
+    from ai_trader.notifier import Notifier
 
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.broker.websocket_manager import KrakenWebsocketManager
@@ -43,6 +44,7 @@ class TradeEngine:
         max_cash_per_trade: float = 20.0,
         trade_confidence_min: float = 0.5,
         ml_service: "MLService" | None = None,
+        notifier: "Notifier" | None = None,
     ) -> None:
         self._broker = broker
         self._websocket_manager = websocket_manager
@@ -67,6 +69,7 @@ class TradeEngine:
         self._signal_only_reason = ""
         self._paper_trading = paper_trading
         self._ml_service = ml_service
+        self._notifier = notifier
         # Kraken rejects orders whose notional value is below the exchange minimum (~$10).
         # Enforcing a configurable floor here keeps all strategies broker-compliant even
         # when their internal position sizing logic suggests smaller allocations.
@@ -335,6 +338,10 @@ class TradeEngine:
                             symbol,
                             reason,
                         )
+                        if reason in {"max_drawdown", "daily_loss_limit"}:
+                            await self._notify_error(
+                                f"Risk engine halted {worker.name} on {symbol}: {reason.replace('_', ' ')}"
+                            )
                         continue
                     if assessment.adjustments:
                         self._logger.info(
@@ -598,6 +605,9 @@ class TradeEngine:
                 exc,
             )
             self._logger.debug("Failed intent payload: %s", intent, exc_info=True)
+            await self._notify_error(
+                f"Order rejected for {intent.symbol} ({intent.side}) — {exc}"
+            )
             return
         price = float(price)
         quantity = float(quantity)
@@ -647,6 +657,7 @@ class TradeEngine:
             quantity,
             cost,
         )
+        await self._notify_trade(recorded_intent)
 
     async def _close_trade(self, intent: TradeIntent, key: Tuple[str, str], position: OpenPosition) -> None:
         mode = "paper" if self._paper_trading else "live"
@@ -670,6 +681,9 @@ class TradeEngine:
                 exc,
             )
             self._logger.debug("Close intent payload: %s", intent, exc_info=True)
+            await self._notify_error(
+                f"Close order failed for {intent.symbol} ({position.side}) — {exc}"
+            )
             return
         price = float(price)
         quantity = float(quantity)
@@ -730,6 +744,23 @@ class TradeEngine:
                 intent.symbol,
                 reason,
             )
+        await self._notify_trade(recorded_intent)
+
+    async def _notify_trade(self, intent: TradeIntent) -> None:
+        if self._notifier is None:
+            return
+        try:
+            await self._notifier.send_trade_alert(intent)
+        except Exception:  # pragma: no cover - best-effort logging only
+            self._logger.debug("Failed to push trade alert to notifier", exc_info=True)
+
+    async def _notify_error(self, message: str) -> None:
+        if self._notifier is None:
+            return
+        try:
+            await self._notifier.send_error(message)
+        except Exception:  # pragma: no cover - best-effort logging only
+            self._logger.debug("Failed to push error alert to notifier", exc_info=True)
 
     def _record_ml_trade_open(
         self,

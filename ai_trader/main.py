@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, Sequence
 from ai_trader.backtester import Backtester, BacktestResult
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.broker.websocket_manager import KrakenWebsocketManager
+from ai_trader.notifier import Notifier
 from ai_trader.services.configuration import normalize_config, read_config_file
 from ai_trader.services.equity import EquityEngine
 from ai_trader.services.logging import configure_logging, get_logger
@@ -660,6 +661,21 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         trade_log = MemoryTradeLog()
     else:
         trade_log = TradeLog(DB_PATH)
+
+    notifier: Notifier | None = None
+    telegram_token = os.getenv("TELEGRAM_TOKEN", "").strip()
+    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if telegram_token and telegram_chat_id:
+        try:
+            notifier = Notifier(token=telegram_token, chat_id=telegram_chat_id)
+            await notifier.start()
+        except Exception as exc:  # noqa: BLE001 - network/setup issues should not abort startup
+            logger.warning("Failed to initialise Telegram notifier: %s", exc)
+            notifier = None
+        else:
+            logger.info("Telegram notifier enabled for chat %s", telegram_chat_id)
+    else:
+        logger.info("Telegram notifier disabled – TELEGRAM_TOKEN/TELEGRAM_CHAT_ID not provided")
     ml_cfg = runtime_config.get("ml", {})
     feature_keys = ml_cfg.get(
         "feature_keys",
@@ -743,6 +759,7 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         max_cash_per_trade=float(trading_cfg.get("max_cash_per_trade", 20.0)),
         trade_confidence_min=float(trading_cfg.get("trade_confidence_min", 0.5)),
         ml_service=ml_service,
+        notifier=notifier,
     )
 
     try:
@@ -771,8 +788,12 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
     if dryrun:
         engine.enable_signal_only_mode("dry-run")
     bot_task = asyncio.create_task(engine.start())
-    await stop_event.wait()
-    await engine.stop()
+    try:
+        await stop_event.wait()
+    finally:
+        await engine.stop()
+        if notifier is not None:
+            await notifier.stop()
     await bot_task
 
 
