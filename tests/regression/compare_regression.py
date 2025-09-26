@@ -35,6 +35,7 @@ class RegressionScenario:
     start: datetime
     end: datetime
     csv_path: Path
+    fee_rate: float
     tolerance: float
     config: Dict[str, Any]
     baseline_metrics: Dict[str, Any]
@@ -48,6 +49,7 @@ class RegressionScenario:
         metrics = baseline.get("metrics", {})
         equity = baseline.get("equity_curve", [])
         tolerance = float(payload.get("tolerance", DEFAULT_TOLERANCE))
+        fee_rate = float(payload.get("fee_rate", 0.0))
         return cls(
             name=path.stem,
             pair=str(payload["pair"]),
@@ -55,6 +57,7 @@ class RegressionScenario:
             start=_parse_datetime(str(payload["start"])),
             end=_parse_datetime(str(payload["end"])),
             csv_path=(path.parent / payload["csv"]).resolve(),
+            fee_rate=fee_rate,
             tolerance=tolerance,
             config=dict(config or {}),
             baseline_metrics=dict(metrics),
@@ -78,7 +81,7 @@ async def _run_backtest_for_scenario(scenario: RegressionScenario) -> Regression
         scenario.end,
         timeframe=scenario.timeframe,
         csv_path=scenario.csv_path,
-        fee_rate=0.0,
+        fee_rate=scenario.fee_rate,
         slippage_bps=0.0,
     )
     return RegressionResult(
@@ -126,6 +129,8 @@ def _compare_equity_curves(
     baseline: Sequence[Mapping[str, Any]],
     candidate: Sequence[Mapping[str, Any]],
     tolerance: float,
+    *,
+    extra_margin: float = 0.0,
 ) -> List[str]:
     messages: List[str] = []
     if len(baseline) != len(candidate):
@@ -139,7 +144,8 @@ def _compare_equity_curves(
         if base_equity == 0.0 and cand_equity == 0.0:
             continue
         diff = abs(cand_equity - base_equity)
-        limit = max(abs(base_equity) * tolerance, 1e-6)
+        effective_tolerance = tolerance + max(extra_margin, 0.0)
+        limit = max(abs(base_equity) * effective_tolerance, 1e-6)
         if diff > limit:
             messages.append(
                 (
@@ -163,7 +169,12 @@ def run_regression_scenario(scenario: RegressionScenario) -> None:
     candidate = asyncio.run(_run_backtest_for_scenario(scenario))
     errors = _compare_metric_drift(scenario.baseline_metrics, candidate.metrics, scenario.tolerance)
     errors.extend(
-        _compare_equity_curves(scenario.baseline_equity, candidate.equity_curve, scenario.tolerance)
+        _compare_equity_curves(
+            scenario.baseline_equity,
+            candidate.equity_curve,
+            scenario.tolerance,
+            extra_margin=scenario.fee_rate,
+        )
     )
 
     if errors:
