@@ -10,6 +10,7 @@ A streamlined, modular crypto trading bot that connects to Kraken, executes mult
 - **Equity engine** – tracks live account equity (paper or live), stores history, and calculates total P/L.
 - **Dashboard** – Streamlit UI with overview metrics, equity curve, trade log, worker cards, and adjustable risk controls.
 - **Paper + live trading** – toggle via `config.yaml`. Paper mode simulates balances; live mode submits real orders.
+- **Historical backtesting** – simulate strategies against Kraken OHLCV data or local CSVs with configurable fees/slippage.
 
 ## Project Layout
 
@@ -49,6 +50,30 @@ Risk parameters such as `risk_per_trade`, `max_drawdown_percent`, and the ML ens
 ```bash
 python -m ai_trader.main --risk-per-trade 0.015 --risk-max-drawdown 12 --ml-window-size 200
 ```
+
+**Run a historical backtest and export reports**
+
+```bash
+python -m ai_trader.main \
+  --mode backtest \
+  --config ai_trader/config.yaml \
+  --pair BTC/USDT \
+  --start 2022-01-01 \
+  --end 2022-12-31 \
+  --timeframe 1h \
+  --backtest-fee 0.0026 \
+  --backtest-slippage-bps 1.0
+```
+
+Backtest runs stream performance metrics to the console and persists CSV/JSON/PNG artefacts under `reports/` (override with `--reports-dir`).
+
+**Shadow backtest alongside live trading**
+
+```bash
+python -m ai_trader.main --mode live --parallel-backtest --parallel-backtest-start 2023-01-01 --parallel-backtest-end 2023-03-01
+```
+
+When `--parallel-backtest` is enabled, a daemon thread replays historical data with alternate parameters while the live engine keeps trading. Results land in the same `reports/` directory using the label provided by `--parallel-backtest-label` (default `parallel`).
 
 2. **Launch the dashboard** (in a new terminal)
 
