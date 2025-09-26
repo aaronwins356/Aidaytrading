@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Deque, Dict, List
+from typing import Callable, Deque, Dict, List
 
 import websockets
 
 from ai_trader.services.logging import get_logger
+from ai_trader.services.monitoring import get_monitoring_center
 from ai_trader.services.types import MarketSnapshot
 
 # Kraken retains legacy asset tickers (e.g. ``XBT`` for ``BTC``) across both
@@ -29,7 +31,14 @@ class KrakenWebsocketManager:
     """Maintain live price snapshots from Kraken's public WebSocket."""
 
     def __init__(
-        self, symbols: List[str], history: int = 120, candle_interval_seconds: int = 60
+        self,
+        symbols: List[str],
+        history: int = 120,
+        candle_interval_seconds: int = 60,
+        *,
+        connector: Callable[..., websockets.WebSocketClientProtocol] | None = None,
+        reconnect_base_delay: float = 1.0,
+        reconnect_max_delay: float = 30.0,
     ) -> None:
         normalised: list[str] = []
         seen: set[str] = set()
@@ -57,8 +66,13 @@ class KrakenWebsocketManager:
         self._bar_interval = timedelta(seconds=max(1, candle_interval_seconds))
         self._last_volume_totals: Dict[str, float] = {}
         self._logger = get_logger(__name__)
+        self._monitoring = get_monitoring_center()
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        self._connector = connector or websockets.connect
+        self._base_retry_delay = max(0.1, float(reconnect_base_delay))
+        self._max_retry_delay = max(self._base_retry_delay, float(reconnect_max_delay))
+        self._reconnect_attempts = 0
 
     @property
     def symbols(self) -> list[str]:
@@ -80,15 +94,56 @@ class KrakenWebsocketManager:
     async def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
-                async with websockets.connect(self._url, ping_interval=20) as websocket:
+                async with self._connector(self._url, ping_interval=20) as websocket:
+                    if self._reconnect_attempts:
+                        self._monitoring.record_event(
+                            "websocket_connected",
+                            "INFO",
+                            "Kraken WebSocket reconnected",
+                            metadata={
+                                "attempt": self._reconnect_attempts,
+                                "symbols": list(self._symbols),
+                            },
+                        )
+                    else:
+                        self._monitoring.record_event(
+                            "websocket_connected",
+                            "INFO",
+                            "Kraken WebSocket connected",
+                            metadata={"symbols": list(self._symbols)},
+                        )
+                    self._reconnect_attempts = 0
                     await self._subscribe(websocket)
                     async for message in websocket:
                         if self._stop_event.is_set():
                             break
                         self._handle_message(message)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 self._logger.warning("WebSocket reconnect due to %s", exc)
-                await asyncio.sleep(3)
+                if self._stop_event.is_set():
+                    break
+                self._reconnect_attempts += 1
+                delay = self._compute_backoff_delay(self._reconnect_attempts)
+                self._monitoring.record_event(
+                    "websocket_reconnect",
+                    "WARNING",
+                    "Kraken WebSocket reconnect scheduled",
+                    metadata={
+                        "attempt": self._reconnect_attempts,
+                        "delay_seconds": delay,
+                        "error": str(exc),
+                    },
+                )
+                self._current_bars.clear()
+                await asyncio.sleep(delay)
+        self._monitoring.record_event(
+            "websocket_stopped",
+            "INFO",
+            "Kraken WebSocket manager stopped",
+            metadata={"symbols": list(self._symbols)},
+        )
 
     async def _subscribe(self, websocket: websockets.WebSocketClientProtocol) -> None:
         payload = {
@@ -124,17 +179,21 @@ class KrakenWebsocketManager:
         price_raw = payload.get("c", [None])[0]
         if price_raw is None:
             return
-        price = float(price_raw)
+        try:
+            price = float(price_raw)
+        except (TypeError, ValueError):
+            return
         self._latest_prices[pair] = price
         history = self._price_history.setdefault(pair, deque(maxlen=self._history))
         history.append(price)
         now = datetime.utcnow()
         volume_fields = payload.get("v", [None, None])
-        volume_total = (
-            float(volume_fields[1])
-            if isinstance(volume_fields, list) and len(volume_fields) > 1
-            else 0.0
-        )
+        volume_total = 0.0
+        if isinstance(volume_fields, list) and len(volume_fields) > 1:
+            try:
+                volume_total = float(volume_fields[1])
+            except (TypeError, ValueError):
+                volume_total = 0.0
         previous_total = self._last_volume_totals.get(pair)
         volume_delta = (
             max(0.0, volume_total - previous_total) if previous_total is not None else 0.0
@@ -153,13 +212,17 @@ class KrakenWebsocketManager:
     # ------------------------------------------------------------------
     def _update_candle(self, symbol: str, price: float, volume: float, timestamp: datetime) -> None:
         bar = self._current_bars.get(symbol)
+        try:
+            volume_value = float(volume)
+        except (TypeError, ValueError):
+            volume_value = 0.0
         if bar is None:
             bar = {
                 "open": price,
                 "high": price,
                 "low": price,
                 "close": price,
-                "volume": volume,
+                "volume": volume_value,
                 "start": timestamp,
             }
             self._current_bars[symbol] = bar
@@ -175,7 +238,7 @@ class KrakenWebsocketManager:
                 "high": price,
                 "low": price,
                 "close": price,
-                "volume": volume,
+                "volume": volume_value,
                 "start": timestamp,
             }
             self._current_bars[symbol] = bar
@@ -184,7 +247,7 @@ class KrakenWebsocketManager:
         bar["high"] = max(bar["high"], price)
         bar["low"] = min(bar["low"], price)
         bar["close"] = price
-        bar["volume"] = bar.get("volume", 0.0) + volume
+        bar["volume"] = float(bar.get("volume", 0.0)) + volume_value
 
     def _finalize_stale_bars(self) -> None:
         now = datetime.utcnow()
@@ -220,3 +283,9 @@ class KrakenWebsocketManager:
         base = _DISPLAY_TO_NATIVE.get(base, base)
         quote = _DISPLAY_TO_NATIVE.get(quote, quote)
         return f"{base}/{quote}"
+
+    def _compute_backoff_delay(self, attempt: int) -> float:
+        exponent = max(0, attempt - 1)
+        base_delay = min(self._max_retry_delay, self._base_retry_delay * (2**exponent))
+        jitter = random.uniform(0, self._base_retry_delay)
+        return min(self._max_retry_delay, base_delay + jitter)

@@ -39,6 +39,7 @@ The bot loads settings from [`configs/config.yaml`](configs/config.yaml). Key se
 - `researcher` / `ml`: market feature extraction and ML ensemble configuration.
 - `notifications.telegram`: bot token, chat ID, and heartbeat cadence. Credentials can also be supplied via `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID`.
 - `streamlit` and `api`: dashboard refresh cadence, theme, and FastAPI host/port overrides.
+- `watchdog_timeout_seconds`: optional override for the runtime stall watchdog (defaults to 60 seconds).
 
 Symbols are normalised so Kraken aliases like `XBT/USD` resolve to `BTC/USD`. Update `trading.symbols` and the corresponding worker symbol lists together.
 
@@ -94,6 +95,27 @@ python -m ai_trader.main --mode api --config configs/config.yaml
 Use `AI_TRADER_API_HOST`, `AI_TRADER_API_PORT`, and `AI_TRADER_API_RELOAD` to customise the server without editing YAML.
 
 The API exposes `/ml-metrics` to retrieve the latest walk-forward validation snapshot (accuracy, reward, support, and confidence) for each symbol.
+
+### Runtime watchdog & telemetry
+
+- **Watchdog** – a background thread inspects the shared runtime state and raises a warning if no updates occur within `watchdog_timeout_seconds`. When a stall is detected the `/status` endpoint returns `"runtime_degraded": true` and a Telegram alert (`⚠️ Bot stalled: ...`) is dispatched.
+- **Startup heartbeat** – Telegram notifications emit an immediate startup summary (mode, equity, open positions) before the scheduled heartbeat cycle starts.
+- **/monitoring endpoint** – `GET /monitoring` returns the 50 most recent monitoring events (watchdog, notifier, WebSocket reconnects) in structured JSON. Example payload:
+
+```json
+{
+  "count": 3,
+  "events": [
+    {
+      "timestamp": "2024-05-15T18:42:10.123456+00:00",
+      "event_type": "websocket_reconnect",
+      "severity": "WARNING",
+      "message": "Kraken WebSocket reconnect scheduled",
+      "metadata": {"attempt": 2, "delay_seconds": 3.5, "error": "connection dropped"}
+    }
+  ]
+}
+```
 
 ## Streamlit Dashboard Backtesting
 

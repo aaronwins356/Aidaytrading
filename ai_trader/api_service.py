@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, Mapping
 from fastapi import FastAPI, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
 
+from ai_trader.services.monitoring import get_monitoring_center
 from ai_trader.services.risk import RiskManager
 from ai_trader.services.runtime_state import RuntimeStateStore
 from ai_trader.services.trade_log import MemoryTradeLog, TradeLog
@@ -202,6 +203,9 @@ async def get_status() -> Dict[str, Any]:
     snapshot = runtime_state.status_snapshot()
     if snapshot.get("last_trade_timestamp") is None:
         snapshot["last_trade_timestamp"] = _latest_trade_timestamp(trade_log)
+    monitoring = get_monitoring_center()
+    snapshot["runtime_degraded"] = monitoring.runtime_degraded
+    snapshot["runtime_degraded_reason"] = monitoring.degraded_reason
     return snapshot
 
 
@@ -242,6 +246,13 @@ async def get_ml_metrics() -> Dict[str, Any]:
     if not metrics:
         metrics = _load_validation_metrics_from_db()
     return {"metrics": metrics}
+
+
+@app.get("/monitoring")
+async def get_monitoring_events(limit: int = Query(50, ge=1, le=200)) -> Dict[str, Any]:
+    center = get_monitoring_center()
+    events = center.recent_events(limit)
+    return {"events": events, "count": len(events)}
 
 
 @app.get("/risk")

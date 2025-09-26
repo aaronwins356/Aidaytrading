@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Dict, Iterable, List, Mapping, Optional
@@ -69,6 +69,7 @@ class RuntimeStateStore:
         self._base_currency: str = "USD"
         self._open_positions: List[PositionSnapshot] = []
         self._last_trade_timestamp: datetime | None = None
+        self._last_update_time: datetime | None = None
         self._realized_pnl_usd: float = 0.0
         self._realized_pnl_percent: float = 0.0
         self._unrealized_pnl_usd: float = 0.0
@@ -85,12 +86,14 @@ class RuntimeStateStore:
             if currency:
                 self._base_currency = currency.upper()
             self._persist_locked()
+            self._mark_updated_locked()
 
     def set_starting_equity(self, value: float | None) -> None:
         with self._lock:
             if value is not None and value > 0:
                 self._starting_equity = float(value)
             self._persist_locked()
+            self._mark_updated_locked()
 
     def update_account(
         self,
@@ -121,6 +124,7 @@ class RuntimeStateStore:
             # We keep the aggregate for completeness even though the API exposes
             # the breakdown separately.
             self._persist_locked()
+            self._mark_updated_locked()
 
     def update_open_positions(
         self,
@@ -136,6 +140,7 @@ class RuntimeStateStore:
             else:
                 self._unrealized_pnl_percent = 0.0
             self._persist_locked()
+            self._mark_updated_locked()
 
     def record_trade(self, trade: TradeIntent) -> None:
         with self._lock:
@@ -147,6 +152,7 @@ class RuntimeStateStore:
                 if baseline > 0:
                     self._realized_pnl_percent = (self._realized_pnl_usd / baseline) * 100
             self._persist_locked()
+            self._mark_updated_locked()
 
     def update_risk_settings(self, settings: Mapping[str, float | int | None]) -> None:
         with self._lock:
@@ -184,6 +190,11 @@ class RuntimeStateStore:
                 "equity": self._equity,
                 "open_positions": [pos.to_dict() for pos in self._open_positions],
                 "last_trade_timestamp": last_trade,
+                "last_update_time": (
+                    self._last_update_time.isoformat()
+                    if isinstance(self._last_update_time, datetime)
+                    else None
+                ),
             }
 
     def profit_snapshot(self) -> Dict[str, object]:
@@ -229,6 +240,12 @@ class RuntimeStateStore:
                     self._last_trade_timestamp = datetime.fromisoformat(last_trade)
                 except ValueError:
                     self._last_trade_timestamp = None
+            last_update = payload.get("last_update_time")
+            if isinstance(last_update, str):
+                try:
+                    self._last_update_time = datetime.fromisoformat(last_update)
+                except ValueError:
+                    self._last_update_time = None
             realized = payload.get("realized")
             if isinstance(realized, Mapping):
                 self._realized_pnl_usd = float(realized.get("usd", self._realized_pnl_usd))
@@ -327,6 +344,11 @@ class RuntimeStateStore:
                 if isinstance(self._last_trade_timestamp, datetime)
                 else None
             ),
+            "last_update_time": (
+                self._last_update_time.isoformat()
+                if isinstance(self._last_update_time, datetime)
+                else None
+            ),
             "realized": {
                 "usd": self._realized_pnl_usd,
                 "percent": self._realized_pnl_percent,
@@ -355,6 +377,19 @@ class RuntimeStateStore:
             return float(value)
         except (TypeError, ValueError):
             return fallback
+
+    def mark_runtime_update(self) -> None:
+        """Record a manual runtime heartbeat timestamp."""
+
+        with self._lock:
+            self._mark_updated_locked()
+
+    def last_update_time(self) -> datetime | None:
+        with self._lock:
+            return self._last_update_time
+
+    def _mark_updated_locked(self) -> None:
+        self._last_update_time = datetime.now(timezone.utc)
 
 
 __all__ = ["RuntimeStateStore", "PositionSnapshot"]
