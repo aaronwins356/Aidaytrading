@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from dataclasses import dataclass
 import json
 import math
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - imported for static type checking only
     from ai_trader.services.ml import MLService
     from ai_trader.notifier import Notifier
+    from ai_trader.workers.base import BaseWorker
 
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.broker.websocket_manager import KrakenWebsocketManager
@@ -23,6 +25,15 @@ from ai_trader.services.risk import RiskManager
 from ai_trader.services.runtime_state import RuntimeStateStore
 from ai_trader.services.trade_log import TradeLog
 from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
+
+
+@dataclass(slots=True)
+class _WorkerSignalResult:
+    """Container for asynchronous worker signal evaluation results."""
+
+    worker: object
+    signals: Mapping[str, object] | None
+    error: BaseException | None
 
 
 class TradeEngine:
@@ -237,6 +248,26 @@ class TradeEngine:
         self._stop_event.set()
         await self._websocket_manager.stop()
 
+    async def _collect_worker_signals(
+        self,
+        worker: "BaseWorker",
+        snapshot: MarketSnapshot,
+        timeout: float,
+    ) -> _WorkerSignalResult:
+        """Resolve a worker's signals with a timeout guard."""
+
+        try:
+            signals = await asyncio.wait_for(worker.evaluate_signal(snapshot), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            self._logger.warning(
+                "Worker %s signal evaluation timed out after %.2fs", worker.name, timeout
+            )
+            return _WorkerSignalResult(worker=worker, signals=None, error=exc)
+        except Exception as exc:  # noqa: BLE001 - defensive against strategy bugs
+            self._logger.error("Worker %s evaluate failed: %s", worker.name, exc)
+            return _WorkerSignalResult(worker=worker, signals=None, error=exc)
+        return _WorkerSignalResult(worker=worker, signals=signals, error=None)
+
     async def _run(self) -> None:
         while not self._stop_event.is_set():
             snapshot = self._websocket_manager.latest_snapshot()
@@ -280,6 +311,7 @@ class TradeEngine:
             await self._run_researchers(snapshot, equity_metrics)
             self._update_control_flags()
 
+            eligible_workers: list["BaseWorker"] = []
             for worker in self._workers:
                 if not getattr(worker, "active", True):
                     continue
@@ -287,11 +319,25 @@ class TradeEngine:
                 if status_flag in {"paused", "disabled"}:
                     self._logger.debug("Worker %s paused via control flag", worker.name)
                     continue
-                try:
-                    signals = await worker.evaluate_signal(snapshot)
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.error("Worker %s evaluate failed: %s", worker.name, exc)
+                eligible_workers.append(worker)
+
+            signal_results: list[_WorkerSignalResult] = []
+            if eligible_workers:
+                timeout = max(self._refresh_interval, 0.1)
+                tasks = [
+                    asyncio.create_task(
+                        self._collect_worker_signals(worker, snapshot, timeout),
+                        name=f"signals::{worker.name}",
+                    )
+                    for worker in eligible_workers
+                ]
+                signal_results = await asyncio.gather(*tasks)
+
+            for result in signal_results:
+                worker = result.worker  # original object preserved for sequential processing
+                if result.error is not None or result.signals is None:
                     continue
+                signals = dict(result.signals)
                 for symbol in worker.symbols:
                     signal = signals.get(symbol)
                     key = (worker.name, symbol)
@@ -317,7 +363,7 @@ class TradeEngine:
                             equity_per_trade,
                             open_position,
                         )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001 - guard strategy failures
                         self._logger.error(
                             "Worker %s trade generation failed: %s", worker.name, exc
                         )

@@ -195,6 +195,29 @@ class _ShortWorker(BaseWorker):
         return None
 
 
+class _SlowWorker(BaseWorker):
+    name = "SlowWorker"
+
+    def __init__(self, symbol: str, trade_log: TradeLog, delay: float) -> None:
+        super().__init__([symbol], lookback=3, trade_log=trade_log)
+        self._delay = float(delay)
+
+    async def evaluate_signal(self, snapshot: MarketSnapshot) -> dict[str, str | None]:
+        self.update_history(snapshot)
+        await asyncio.sleep(self._delay)
+        return {self.symbols[0]: None}
+
+    async def generate_trade(
+        self,
+        symbol: str,
+        signal: str | None,
+        snapshot: MarketSnapshot,
+        equity_per_trade: float,
+        existing_position: OpenPosition | None = None,
+    ) -> TradeIntent | None:
+        return None
+
+
 class _StubExchange:
     """Minimal ccxt-like stub capturing reduce_only usage."""
 
@@ -440,6 +463,48 @@ async def _run_trade_engine(tmp_path) -> None:
 
 def test_trade_engine_paper_mode(tmp_path) -> None:
     asyncio.run(_run_trade_engine(tmp_path))
+
+
+def test_trade_engine_handles_slow_worker(tmp_path) -> None:
+    """Slow workers should not block other strategies from trading."""
+
+    async def runner() -> _DummyBroker:
+        db_path = tmp_path / "slow_worker.db"
+        trade_log = TradeLog(db_path)
+        broker = _DummyBroker()
+        websocket_manager = _DummyWebsocketManager("BTC/USD")
+        equity_engine = EquityEngine(trade_log, broker.starting_equity)
+        risk_manager = RiskManager(
+            {
+                "max_drawdown_percent": 50,
+                "daily_loss_limit_percent": 50,
+            }
+        )
+        slow_worker = _SlowWorker("BTC/USD", trade_log, delay=0.5)
+        fast_worker = _TestWorker("BTC/USD", trade_log)
+        engine = TradeEngine(
+            broker=broker,
+            websocket_manager=websocket_manager,
+            workers=[slow_worker, fast_worker],
+            researchers=[],
+            equity_engine=equity_engine,
+            risk_manager=risk_manager,
+            trade_log=trade_log,
+            equity_allocation_percent=10.0,
+            max_open_positions=1,
+            refresh_interval=0.05,
+            paper_trading=True,
+            ml_service=None,
+        )
+
+        run_task = asyncio.create_task(engine.start())
+        await asyncio.sleep(0.2)
+        await engine.stop()
+        await run_task
+        return broker
+
+    broker = asyncio.run(runner())
+    assert broker.orders, "Fast worker should execute trades despite slow peer"
 
 
 def test_rehydrate_open_positions(tmp_path) -> None:
