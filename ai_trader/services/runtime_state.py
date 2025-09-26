@@ -75,6 +75,7 @@ class RuntimeStateStore:
         self._unrealized_pnl_usd: float = 0.0
         self._unrealized_pnl_percent: float = 0.0
         self._risk_settings: Dict[str, float | int] = {}
+        self._risk_revision: int = 0
         if state_file and state_file.exists():
             self.refresh_from_disk()
 
@@ -154,7 +155,9 @@ class RuntimeStateStore:
             self._persist_locked()
             self._mark_updated_locked()
 
-    def update_risk_settings(self, settings: Mapping[str, float | int | None]) -> None:
+    def update_risk_settings(
+        self, settings: Mapping[str, float | int | None], *, revision: int | None = None
+    ) -> None:
         with self._lock:
             cleaned: Dict[str, float | int] = {}
             for key, value in settings.items():
@@ -167,9 +170,18 @@ class RuntimeStateStore:
                         cleaned[key] = float(value)  # type: ignore[assignment]
                     except (TypeError, ValueError):
                         continue
+            changed = False
             if cleaned:
-                self._risk_settings.update(cleaned)
-            self._persist_locked()
+                for key, value in cleaned.items():
+                    if self._risk_settings.get(key) != value:
+                        changed = True
+                    self._risk_settings[key] = value
+            if revision is not None and int(revision) != self._risk_revision:
+                self._risk_revision = int(revision)
+                changed = True
+            if changed:
+                self._persist_locked()
+                self._mark_updated_locked()
 
     # ------------------------------------------------------------------
     # Public accessors
@@ -195,6 +207,7 @@ class RuntimeStateStore:
                     if isinstance(self._last_update_time, datetime)
                     else None
                 ),
+                "risk_revision": self._risk_revision,
             }
 
     def profit_snapshot(self) -> Dict[str, object]:
@@ -216,7 +229,9 @@ class RuntimeStateStore:
 
     def risk_snapshot(self) -> Dict[str, float | int]:
         with self._lock:
-            return dict(self._risk_settings)
+            snapshot = dict(self._risk_settings)
+            snapshot["revision"] = self._risk_revision
+            return snapshot
 
     def refresh_from_disk(self) -> None:
         if not self._state_file or not self._state_file.exists():
@@ -258,19 +273,31 @@ class RuntimeStateStore:
                 self._unrealized_pnl_percent = float(
                     unrealized.get("percent", self._unrealized_pnl_percent)
                 )
+            risk_settings = payload.get("risk_settings")
+            if isinstance(risk_settings, Mapping):
+                cleaned: Dict[str, float | int] = {}
+                for key, value in risk_settings.items():
+                    name = str(key)
+                    if isinstance(value, (int, float)):
+                        cleaned[name] = float(value)
+                        continue
+                    try:
+                        cleaned[name] = float(value)  # type: ignore[assignment]
+                    except (TypeError, ValueError):
+                        continue
+                if cleaned:
+                    self._risk_settings = cleaned
+            revision = payload.get("risk_revision")
+            if isinstance(revision, int):
+                self._risk_revision = revision
+            elif isinstance(revision, str):
+                try:
+                    self._risk_revision = int(revision)
+                except ValueError:
+                    pass
             base_currency = payload.get("base_currency")
             if isinstance(base_currency, str) and base_currency:
                 self._base_currency = base_currency.upper()
-            risk_settings = payload.get("risk_settings")
-            if isinstance(risk_settings, Mapping):
-                self._risk_settings = {
-                    str(key): (
-                        float(value)
-                        if isinstance(value, (int, float))
-                        else self._risk_settings.get(str(key), 0.0)
-                    )
-                    for key, value in risk_settings.items()
-                }
             positions = payload.get("open_positions")
             if isinstance(positions, list):
                 self._open_positions = [
@@ -358,6 +385,7 @@ class RuntimeStateStore:
                 "percent": self._unrealized_pnl_percent,
             },
             "risk_settings": dict(self._risk_settings),
+            "risk_revision": self._risk_revision,
         }
         try:
             if self._state_file.parent:

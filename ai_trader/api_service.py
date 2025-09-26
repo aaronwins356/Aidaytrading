@@ -67,7 +67,19 @@ def attach_services(
     _RISK_MANAGER = risk_manager
     _RUNTIME_STATE = runtime_state
     _ML_SERVICE = ml_service
-    _RUNTIME_STATE.update_risk_settings(risk_manager.config_dict())
+    revision: int | None = None
+    fetch_latest = getattr(trade_log, "fetch_latest_risk_settings", None)
+    if callable(fetch_latest):
+        try:
+            latest = fetch_latest()
+        except Exception:  # noqa: BLE001 - API must remain resilient to DB errors
+            latest = None
+        if latest:
+            revision, persisted_settings = latest
+            current_config = risk_manager.config_dict()
+            if any(current_config.get(key) != value for key, value in persisted_settings.items()):
+                risk_manager.update_config(persisted_settings)
+    _RUNTIME_STATE.update_risk_settings(risk_manager.config_dict(), revision=revision)
 
 
 def reset_services(*, state_file: Path | None = STATE_PATH) -> None:
@@ -267,13 +279,20 @@ async def get_risk() -> Dict[str, Any]:
 
 @app.post("/config")
 async def update_config(payload: RiskUpdate) -> Dict[str, Any]:
-    _, runtime_state, risk_manager = _ensure_services()
+    trade_log, runtime_state, risk_manager = _ensure_services()
     updates = payload.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No settings provided")
     config = risk_manager.update_config(updates)
-    runtime_state.update_risk_settings(config)
-    return {"status": "ok", "config": config}
+    try:
+        revision = trade_log.record_risk_settings(config)
+    except Exception as exc:  # noqa: BLE001 - surface persistence issues to clients
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to persist risk settings: {exc}",
+        ) from exc
+    runtime_state.update_risk_settings(config, revision=revision)
+    return {"status": "ok", "config": config, "revision": revision}
 
 
 def _extract_equity_value(row: Mapping[str, Any] | Sequence[Any]) -> float:

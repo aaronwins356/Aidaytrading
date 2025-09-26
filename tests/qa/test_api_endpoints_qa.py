@@ -106,6 +106,7 @@ def test_trades_and_risk_endpoints(api_client: TestClient, tmp_path: Path) -> No
     assert risk_response.status_code == 200
     risk_payload = risk_response.json()
     assert "risk_per_trade" in risk_payload
+    assert "revision" in risk_payload
 
 
 def test_update_config_endpoint(api_client: TestClient, tmp_path: Path) -> None:
@@ -121,7 +122,9 @@ def test_update_config_endpoint(api_client: TestClient, tmp_path: Path) -> None:
     payload = response.json()
     assert payload["config"]["risk_per_trade"] == pytest.approx(0.05)
     assert payload["config"]["max_open_positions"] == 4
+    assert payload["revision"] >= 1
 
     # ensure runtime state persisted the update
     latest = runtime_state.risk_snapshot()
     assert latest["risk_per_trade"] == pytest.approx(0.05)
+    assert latest["revision"] == payload["revision"]

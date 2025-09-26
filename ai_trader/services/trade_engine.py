@@ -93,10 +93,12 @@ class TradeEngine:
         self._trade_fee_rate = max(0.0, float(trade_fee_percent))
         self._base_currency = getattr(broker, "base_currency", "USD")
         self._latest_allocation_cap: float | None = None
+        self._risk_revision: int = 0
         if self._runtime_state is not None:
             self._runtime_state.set_base_currency(self._base_currency)
             self._runtime_state.set_starting_equity(broker.starting_equity)
             self._runtime_state.update_risk_settings(self._risk_manager.config_dict())
+        self._initialise_risk_settings_from_store()
 
     async def rehydrate_open_positions(self, positions: Iterable[OpenPosition]) -> None:
         """Reconcile broker open positions with the in-memory engine state."""
@@ -275,6 +277,7 @@ class TradeEngine:
                 await asyncio.sleep(1.0)
                 continue
 
+            self._maybe_refresh_risk_settings()
             equity, balances = await self._broker.compute_equity(snapshot.prices)
             equity = float(equity)
             normalized_balances = {asset: float(amount) for asset, amount in balances.items()}
@@ -1064,3 +1067,71 @@ class TradeEngine:
         if self._runtime_state is None:
             return
         self._runtime_state.update_open_positions(self._open_positions.values(), prices)
+
+    def _initialise_risk_settings_from_store(self) -> None:
+        fetch_latest = getattr(self._trade_log, "fetch_latest_risk_settings", None)
+        if not callable(fetch_latest):
+            return
+        try:
+            latest = fetch_latest()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Failed to load persisted risk settings: %s", exc)
+            return
+        if not latest:
+            return
+        revision, settings = latest
+        current = self._risk_manager.config_dict()
+        if all(current.get(key) == value for key, value in settings.items()):
+            self._risk_revision = revision
+            if self._runtime_state is not None:
+                self._runtime_state.update_risk_settings(current, revision=revision)
+            return
+        try:
+            updated = self._risk_manager.update_config(settings)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failed to apply persisted risk settings during startup (revision=%s): %s",
+                revision,
+                exc,
+            )
+            return
+        self._risk_revision = revision
+        if self._runtime_state is not None:
+            self._runtime_state.update_risk_settings(updated, revision=revision)
+        self._logger.info(
+            "Risk configuration initialised from persisted settings (revision=%d)", revision
+        )
+
+    def _maybe_refresh_risk_settings(self) -> None:
+        fetch_latest = getattr(self._trade_log, "fetch_latest_risk_settings", None)
+        if not callable(fetch_latest):
+            return
+        try:
+            latest = fetch_latest()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to poll persisted risk settings: %s", exc)
+            return
+        if not latest:
+            return
+        revision, settings = latest
+        if revision <= self._risk_revision:
+            return
+        current = self._risk_manager.config_dict()
+        if all(current.get(key) == value for key, value in settings.items()):
+            self._risk_revision = revision
+            if self._runtime_state is not None:
+                self._runtime_state.update_risk_settings(current, revision=revision)
+            return
+        try:
+            updated = self._risk_manager.update_config(settings)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failed to apply persisted risk settings revision %s: %s", revision, exc
+            )
+            return
+        self._risk_revision = revision
+        if self._runtime_state is not None:
+            self._runtime_state.update_risk_settings(updated, revision=revision)
+        self._logger.info(
+            "Risk configuration refreshed from persisted settings (revision=%d)", revision
+        )

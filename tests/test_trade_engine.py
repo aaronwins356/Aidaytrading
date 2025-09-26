@@ -11,12 +11,15 @@ import types
 from typing import Any, Callable
 
 import pytest
+from fastapi.testclient import TestClient
 
+from ai_trader.api_service import app, attach_services, reset_services
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.services.equity import EquityEngine
 from ai_trader.services.risk import RiskManager
 from ai_trader.services.trade_engine import TradeEngine
 from ai_trader.services.trade_log import TradeLog
+from ai_trader.services.runtime_state import RuntimeStateStore
 from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
 from ai_trader.workers.base import BaseWorker
 
@@ -862,6 +865,58 @@ def test_trade_engine_skips_low_confidence_ml_trades(tmp_path, caplog) -> None:
         "[ML] Skipped low-confidence trade (symbol=BTC/USD, confidence=0.200 < threshold=0.500)"
         in caplog.text
     )
+
+
+def test_trade_engine_applies_persisted_risk_updates(tmp_path) -> None:
+    """Risk changes persisted via the API should reach the live engine."""
+
+    asyncio.run(_run_risk_update_flow(tmp_path))
+
+
+async def _run_risk_update_flow(tmp_path) -> None:
+    reset_services(state_file=None)
+    db_path = tmp_path / "risk_updates.db"
+    trade_log = TradeLog(db_path)
+    runtime_state = RuntimeStateStore(state_file=None)
+    api_risk_manager = RiskManager({"risk_per_trade": 0.02})
+    attach_services(trade_log=trade_log, runtime_state=runtime_state, risk_manager=api_risk_manager)
+
+    engine_risk_manager = RiskManager({"risk_per_trade": 0.02})
+    broker = _DummyBroker()
+    websocket_manager = _DummyWebsocketManager("BTC/USD")
+    equity_engine = EquityEngine(trade_log, broker.starting_equity)
+    engine = TradeEngine(
+        broker=broker,
+        websocket_manager=websocket_manager,
+        workers=[],
+        researchers=[],
+        equity_engine=equity_engine,
+        risk_manager=engine_risk_manager,
+        trade_log=trade_log,
+        equity_allocation_percent=10.0,
+        max_open_positions=1,
+        refresh_interval=0.05,
+        paper_trading=True,
+        runtime_state=runtime_state,
+    )
+
+    task = asyncio.create_task(engine.start())
+    try:
+        await asyncio.sleep(0.1)
+        with TestClient(app) as client:
+            response = client.post("/config", json={"risk_per_trade": 0.05})
+            assert response.status_code == 200
+            revision = response.json()["revision"]
+
+        await asyncio.sleep(0.3)
+        config = engine_risk_manager.config_dict()
+        assert pytest.approx(config["risk_per_trade"], rel=1e-6) == 0.05
+        snapshot = runtime_state.risk_snapshot()
+        assert snapshot["revision"] == revision
+    finally:
+        await engine.stop()
+        await task
+        reset_services(state_file=None)
 
 
 async def _place_short_order_with_client() -> dict[str, Any]:
