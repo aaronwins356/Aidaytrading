@@ -41,9 +41,10 @@ class TradeEngine:
         max_open_positions: int,
         refresh_interval: float,
         paper_trading: bool,
-        min_cash_per_trade: float = 10.0,
-        max_cash_per_trade: float = 20.0,
+        min_cash_per_trade: float = 0.0,
+        max_cash_per_trade: float = 0.0,
         trade_confidence_min: float = 0.5,
+        trade_fee_percent: float = 0.0,
         ml_service: "MLService" | None = None,
         notifier: "Notifier" | None = None,
         runtime_state: RuntimeStateStore | None = None,
@@ -73,14 +74,14 @@ class TradeEngine:
         self._ml_service = ml_service
         self._notifier = notifier
         self._runtime_state = runtime_state
-        # Kraken rejects orders whose notional value is below the exchange minimum (~$10).
-        # Enforcing a configurable floor here keeps all strategies broker-compliant even
-        # when their internal position sizing logic suggests smaller allocations.
         self._min_cash_per_trade = max(0.0, float(min_cash_per_trade))
-        self._max_cash_per_trade = max(self._min_cash_per_trade, float(max_cash_per_trade))
+        max_cash_value = float(max_cash_per_trade)
+        self._max_cash_per_trade = max_cash_value if max_cash_value > 0 else 0.0
         self._trade_confidence_min = max(0.0, min(1.0, float(trade_confidence_min)))
         self._effective_confidence_min: float = self._trade_confidence_min
+        self._trade_fee_rate = max(0.0, float(trade_fee_percent))
         self._base_currency = getattr(broker, "base_currency", "USD")
+        self._latest_allocation_cap: float | None = None
         if self._runtime_state is not None:
             self._runtime_state.set_base_currency(self._base_currency)
             self._runtime_state.set_starting_equity(broker.starting_equity)
@@ -260,6 +261,7 @@ class TradeEngine:
                 )
             self._trade_log.record_account_snapshot(normalized_balances, equity)
             equity_per_trade = equity * (self._equity_allocation_percent / 100.0)
+            self._latest_allocation_cap = equity_per_trade
             self._effective_confidence_min, relaxed = (
                 self._risk_manager.effective_confidence_threshold(self._trade_confidence_min)
             )
@@ -372,7 +374,10 @@ class TradeEngine:
                             symbol,
                             assessment.adjustments,
                         )
-                    intent = self._apply_trade_size_bounds(intent)
+                    self._apply_global_risk_overrides(worker, intent)
+                    intent = await self._apply_trade_sizing(intent)
+                    if intent is None:
+                        continue
                     await self._execute_intent(intent, key, open_position)
 
             await self._enforce_position_duration(snapshot)
@@ -521,7 +526,15 @@ class TradeEngine:
             return None
         available = float(balances.get(self._base_currency, 0.0))
         required = float(intent.cash_spent)
-        if available < self._min_cash_per_trade:
+        min_notional = self._min_cash_per_trade
+        try:
+            await self._broker.ensure_market(intent.symbol)
+            broker_floor = self._resolve_min_notional(intent.symbol)
+            if broker_floor > min_notional:
+                min_notional = broker_floor
+        except Exception:  # pragma: no cover - defensive guard
+            self._logger.debug("Failed to resolve min notional for %s", intent.symbol, exc_info=True)
+        if available < min_notional:
             self._logger.info(
                 "[RISK] Skipped trade for %s – insufficient funds",
                 intent.symbol,
@@ -545,44 +558,28 @@ class TradeEngine:
             intent.cash_spent = available
         return intent
 
-    def _apply_trade_size_bounds(self, intent: TradeIntent) -> TradeIntent:
-        """Clamp open order cash sizing to the configured $10–$20 policy band."""
-
-        if intent.action != "OPEN" or self._min_cash_per_trade <= 0:
+    async def _apply_trade_sizing(self, intent: TradeIntent) -> TradeIntent | None:
+        if intent.action != "OPEN":
             return intent
 
         requested_cash = float(intent.cash_spent)
         metadata = dict(intent.metadata or {})
-        original_cash = requested_cash
         adjusted = False
 
-        if requested_cash < self._min_cash_per_trade:
-            self._logger.info(
-                "Applying $%.2f cash floor to %s order from %s for %s (requested $%.2f)",
-                self._min_cash_per_trade,
-                intent.side.upper(),
-                intent.worker,
-                intent.symbol,
-                requested_cash,
-            )
+        allocation_cap = self._latest_allocation_cap or 0.0
+        if allocation_cap > 0.0 and requested_cash > allocation_cap:
+            metadata.setdefault("original_cash_spent", requested_cash)
             metadata.update(
                 {
-                    "cash_floor_applied": True,
-                    "original_cash_spent": original_cash,
-                    "min_cash_per_trade": self._min_cash_per_trade,
+                    "allocation_cap_applied": True,
+                    "equity_allocation_cap": allocation_cap,
                 }
             )
-            requested_cash = self._min_cash_per_trade
+            requested_cash = allocation_cap
             adjusted = True
 
-        if requested_cash > self._max_cash_per_trade:
-            self._logger.info(
-                "[RISK] Capping %s order size to $%.2f (requested $%.2f exceeds ceiling)",
-                intent.symbol,
-                self._max_cash_per_trade,
-                requested_cash,
-            )
-            metadata.setdefault("original_cash_spent", original_cash)
+        if self._max_cash_per_trade > 0.0 and requested_cash > self._max_cash_per_trade:
+            metadata.setdefault("original_cash_spent", float(intent.cash_spent))
             metadata.update(
                 {
                     "cash_cap_applied": True,
@@ -592,10 +589,80 @@ class TradeEngine:
             requested_cash = self._max_cash_per_trade
             adjusted = True
 
+        try:
+            await self._broker.ensure_market(intent.symbol)
+        except Exception:  # pragma: no cover - non-critical hint
+            self._logger.debug(
+                "Unable to ensure market metadata for %s before sizing", intent.symbol, exc_info=True
+            )
+        min_notional = self._resolve_min_notional(intent.symbol)
+
+        if min_notional > 0.0 and requested_cash < min_notional:
+            self._logger.info(
+                "[RISK] Skipping %s order from %s – notional %.2f below minimum %.2f",
+                intent.symbol,
+                intent.worker,
+                requested_cash,
+                min_notional,
+            )
+            return None
+
         if adjusted:
             intent.metadata = metadata
             intent.cash_spent = requested_cash
         return intent
+
+    def _apply_global_risk_overrides(self, worker: object, intent: TradeIntent) -> None:
+        if intent.action != "OPEN":
+            return
+        applier = getattr(worker, "apply_global_risk_overrides", None)
+        if not callable(applier):
+            return
+        metadata = intent.metadata or {}
+        stop = self._coerce_float(metadata.get("stop_price"))
+        target = self._coerce_float(metadata.get("target_price"))
+        trailing = self._coerce_float(metadata.get("trailing_price"))
+        try:
+            applier(
+                intent.symbol,
+                intent.side,
+                float(intent.entry_price),
+                stop=stop,
+                target=target,
+                trailing=trailing,
+            )
+        except Exception:  # pragma: no cover - risk overrides must never crash the loop
+            self._logger.debug(
+                "Failed to apply global risk overrides for %s via %s",
+                intent.symbol,
+                getattr(worker, "name", worker.__class__.__name__),
+                exc_info=True,
+            )
+
+    def _resolve_min_notional(self, symbol: str) -> float:
+        broker_floor = 0.0
+        getter = getattr(self._broker, "min_order_value", None)
+        if callable(getter):
+            try:
+                broker_floor = float(getter(symbol) or 0.0)
+            except Exception:  # pragma: no cover - defensive guard
+                broker_floor = 0.0
+        configured = self._min_cash_per_trade
+        if broker_floor > 0.0 and configured > 0.0:
+            return max(broker_floor, configured)
+        return broker_floor or configured
+
+    @staticmethod
+    def _coerce_float(value: object | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            coerced = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(coerced) or math.isinf(coerced):
+            return None
+        return coerced
 
     async def _open_trade(self, intent: TradeIntent, key: Tuple[str, str]) -> None:
         mode = "paper" if self._paper_trading else "live"
@@ -632,29 +699,41 @@ class TradeEngine:
         price = float(price)
         quantity = float(quantity)
         cost = float(price * quantity)
+        entry_fee = cost * self._trade_fee_rate
+        total_cost = cost + entry_fee
         position = OpenPosition(
             worker=intent.worker,
             symbol=intent.symbol,
             side=intent.side,
             quantity=quantity,
             entry_price=price,
-            cash_spent=cost,
+            cash_spent=total_cost,
+            fees_paid=entry_fee,
         )
         self._open_positions[key] = position
         self._sync_runtime_positions()
         metadata = dict(intent.metadata or {})
-        metadata.update({"fill_price": price, "fill_quantity": quantity, "mode": mode})
+        metadata.update(
+            {
+                "fill_price": price,
+                "fill_quantity": quantity,
+                "mode": mode,
+                "entry_fee": entry_fee,
+                "fees_total": entry_fee,
+            }
+        )
         recorded_intent = TradeIntent(
             worker=intent.worker,
             action="OPEN",
             symbol=intent.symbol,
             side=intent.side,
-            cash_spent=cost,
+            cash_spent=total_cost,
             entry_price=price,
             confidence=confidence,
             reason=intent.reason or "entry",
             metadata=metadata,
         )
+        intent.cash_spent = total_cost
         self._trade_log.record_trade(recorded_intent)
         self._trade_log.record_trade_event(
             worker=intent.worker,
@@ -665,6 +744,7 @@ class TradeEngine:
                 "quantity": quantity,
                 "confidence": confidence,
                 "mode": mode,
+                "entry_fee": entry_fee,
             },
         )
         self._risk_manager.on_trade_executed(recorded_intent)
@@ -672,13 +752,14 @@ class TradeEngine:
             self._runtime_state.record_trade(recorded_intent)
         self._record_ml_trade_open(recorded_intent, price, quantity)
         self._logger.info(
-            "[TRADE] %s opened %s %s @ %.2f qty=%.6f cash=%.2f",
+            "[TRADE] %s opened %s %s @ %.2f qty=%.6f cash=%.2f fees=%.4f",
             intent.worker,
             intent.side.upper(),
             intent.symbol,
             price,
             quantity,
-            cost,
+            total_cost,
+            entry_fee,
         )
         await self._notify_trade(recorded_intent)
 
@@ -712,11 +793,14 @@ class TradeEngine:
             return
         price = float(price)
         quantity = float(quantity)
-        pnl = (
+        gross_pnl = (
             (price - position.entry_price) * position.quantity
             if position.side == "buy"
             else (position.entry_price - price) * position.quantity
         )
+        exit_fee = price * quantity * self._trade_fee_rate
+        total_fees = position.fees_paid + exit_fee
+        pnl = gross_pnl - total_fees
         pnl_percent = pnl / position.cash_spent * 100 if position.cash_spent else 0.0
         reason = intent.reason or "exit"
         metadata = dict(intent.metadata or {})
@@ -728,6 +812,8 @@ class TradeEngine:
                 "pnl_usd": pnl,
                 "pnl_percent": pnl_percent,
                 "reason": reason,
+                "exit_fee": exit_fee,
+                "fees_total": total_fees,
             }
         )
         recorded_intent = TradeIntent(
@@ -755,13 +841,14 @@ class TradeEngine:
         self._sync_runtime_positions()
         self._record_ml_trade_close(recorded_intent, position, price, pnl, pnl_percent, reason)
         self._logger.info(
-            "[TRADE] %s closed %s %s @ %.2f | PnL %.2f USD (%.2f%%) reason=%s",
+            "[TRADE] %s closed %s %s @ %.2f | PnL %.2f USD (%.2f%%) fees=%.4f reason=%s",
             intent.worker,
             intent.side.upper(),
             intent.symbol,
             price,
             pnl,
             pnl_percent,
+            total_fees,
             reason,
         )
         self._risk_manager.on_trade_executed(recorded_intent)

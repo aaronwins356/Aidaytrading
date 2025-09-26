@@ -59,6 +59,7 @@ class OpenPosition:
     quantity: float
     entry_price: float
     cash_spent: float
+    fees_paid: float = 0.0
     opened_at: datetime = field(default_factory=datetime.utcnow)
 
     def __post_init__(self) -> None:
@@ -67,13 +68,16 @@ class OpenPosition:
         self.quantity = float(self.quantity)
         self.entry_price = float(self.entry_price)
         self.cash_spent = float(self.cash_spent)
+        self.fees_paid = float(self.fees_paid)
 
     def unrealized_pnl(self, last_price: float) -> float:
         """Return the unrealized profit/loss for the position."""
 
         if self.side == "buy":
-            return (last_price - self.entry_price) * self.quantity
-        return (self.entry_price - last_price) * self.quantity
+            gross = (last_price - self.entry_price) * self.quantity
+        else:
+            gross = (self.entry_price - last_price) * self.quantity
+        return gross - self.fees_paid
 
 
 @dataclass(slots=True)

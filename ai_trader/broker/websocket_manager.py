@@ -13,6 +13,15 @@ import websockets
 from ai_trader.services.logging import get_logger
 from ai_trader.services.types import MarketSnapshot
 
+# Kraken retains legacy asset tickers (e.g. ``XBT`` for ``BTC``) across both
+# REST and WebSocket endpoints. Centralising these aliases keeps the
+# normalisation logic consistent and simplifies future extensions if Kraken
+# introduces additional legacy codes.
+_NATIVE_TO_DISPLAY: dict[str, str] = {
+    "XBT": "BTC",
+}
+_DISPLAY_TO_NATIVE: dict[str, str] = {display: native for native, display in _NATIVE_TO_DISPLAY.items()}
+
 
 class KrakenWebsocketManager:
     """Maintain live price snapshots from Kraken's public WebSocket."""
@@ -31,6 +40,12 @@ class KrakenWebsocketManager:
         if not normalised:
             raise ValueError("At least one valid Kraken symbol must be provided")
         self._symbols = normalised
+        self._display_to_kraken = {
+            symbol: self._map_to_kraken(symbol) for symbol in self._symbols
+        }
+        self._kraken_to_display = {
+            value: key for key, value in self._display_to_kraken.items()
+        }
         self._history = history
         self._url = "wss://ws.kraken.com/"
         self._latest_prices: Dict[str, float] = {}
@@ -80,7 +95,7 @@ class KrakenWebsocketManager:
     async def _subscribe(self, websocket: websockets.WebSocketClientProtocol) -> None:
         payload = {
             "event": "subscribe",
-            "pair": self._symbols,
+            "pair": [self._display_to_kraken[symbol] for symbol in self._symbols],
             "subscription": {"name": "ticker"},
         }
         await websocket.send(json.dumps(payload))
@@ -98,7 +113,14 @@ class KrakenWebsocketManager:
         payload = data[1]
         if not isinstance(payload, dict):
             return
-        pair = self._normalize_symbol(data[-1])
+        raw_pair = str(data[-1]).strip().upper()
+        pair = self._kraken_to_display.get(raw_pair)
+        if pair is None:
+            pair = self._normalize_symbol(raw_pair)
+            if pair and pair in self._display_to_kraken:
+                self._kraken_to_display[raw_pair] = pair
+            else:
+                return
         if not pair:
             return
         price_raw = payload.get("c", [None])[0]
@@ -190,6 +212,13 @@ class KrakenWebsocketManager:
         if not text or "/" not in text:
             return None
         base, quote = text.split("/", 1)
-        if base == "XBT":
-            base = "BTC"
+        base = _NATIVE_TO_DISPLAY.get(base, base)
+        quote = _NATIVE_TO_DISPLAY.get(quote, quote)
+        return f"{base}/{quote}"
+
+    @staticmethod
+    def _map_to_kraken(symbol: str) -> str:
+        base, quote = symbol.split("/", 1)
+        base = _DISPLAY_TO_NATIVE.get(base, base)
+        quote = _DISPLAY_TO_NATIVE.get(quote, quote)
         return f"{base}/{quote}"
