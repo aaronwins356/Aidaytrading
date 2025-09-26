@@ -8,9 +8,9 @@ trading:
   - BTC/USD
   - ETH/USD
   - SOL/USD
-  eequity_allocation_percent: 10.0
+  equity_allocation_percent: 10.0
   max_open_positions: 2
-  paper_trading: false
+  paper_trading: true
   paper_starting_equity: 200.0
   allow_shorting: false
 min_cash_per_trade: 5.0
