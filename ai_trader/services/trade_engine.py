@@ -7,7 +7,7 @@ from collections import defaultdict
 import json
 import math
 from datetime import datetime, timedelta
-from typing import DefaultDict, Dict, Iterable, List, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Mapping, Tuple
 
 from typing import TYPE_CHECKING
 
@@ -20,6 +20,7 @@ from ai_trader.broker.websocket_manager import KrakenWebsocketManager
 from ai_trader.services.equity import EquityEngine
 from ai_trader.services.logging import get_logger
 from ai_trader.services.risk import RiskManager
+from ai_trader.services.runtime_state import RuntimeStateStore
 from ai_trader.services.trade_log import TradeLog
 from ai_trader.services.types import MarketSnapshot, OpenPosition, TradeIntent
 
@@ -45,6 +46,7 @@ class TradeEngine:
         trade_confidence_min: float = 0.5,
         ml_service: "MLService" | None = None,
         notifier: "Notifier" | None = None,
+        runtime_state: RuntimeStateStore | None = None,
     ) -> None:
         self._broker = broker
         self._websocket_manager = websocket_manager
@@ -70,6 +72,7 @@ class TradeEngine:
         self._paper_trading = paper_trading
         self._ml_service = ml_service
         self._notifier = notifier
+        self._runtime_state = runtime_state
         # Kraken rejects orders whose notional value is below the exchange minimum (~$10).
         # Enforcing a configurable floor here keeps all strategies broker-compliant even
         # when their internal position sizing logic suggests smaller allocations.
@@ -78,6 +81,10 @@ class TradeEngine:
         self._trade_confidence_min = max(0.0, min(1.0, float(trade_confidence_min)))
         self._effective_confidence_min: float = self._trade_confidence_min
         self._base_currency = getattr(broker, "base_currency", "USD")
+        if self._runtime_state is not None:
+            self._runtime_state.set_base_currency(self._base_currency)
+            self._runtime_state.set_starting_equity(broker.starting_equity)
+            self._runtime_state.update_risk_settings(self._risk_manager.config_dict())
 
     async def rehydrate_open_positions(self, positions: Iterable[OpenPosition]) -> None:
         """Reconcile broker open positions with the in-memory engine state."""
@@ -201,6 +208,7 @@ class TradeEngine:
             self._logger.info("Rehydrated %d open position(s) from broker state", reconciled)
         else:
             self._logger.info("No broker open positions were reconciled with active workers")
+        self._sync_runtime_positions()
 
     async def start(self) -> None:
         await self._broker.load_markets()
@@ -240,6 +248,16 @@ class TradeEngine:
             normalized_balances = {asset: float(amount) for asset, amount in balances.items()}
             self._equity_engine.update(equity, self._broker.starting_equity)
             equity_metrics = self._equity_engine.get_latest_metrics()
+            if self._runtime_state is not None:
+                self._runtime_state.update_account(
+                    equity=equity,
+                    balances=normalized_balances,
+                    pnl_percent=float(equity_metrics.get("pnl_percent", 0.0)),
+                    pnl_usd=float(equity_metrics.get("pnl_usd", 0.0)),
+                    open_positions=self._open_positions.values(),
+                    prices=snapshot.prices,
+                    starting_equity=self._broker.starting_equity,
+                )
             self._trade_log.record_account_snapshot(normalized_balances, equity)
             equity_per_trade = equity * (self._equity_allocation_percent / 100.0)
             self._effective_confidence_min, relaxed = self._risk_manager.effective_confidence_threshold(
@@ -621,6 +639,7 @@ class TradeEngine:
             cash_spent=cost,
         )
         self._open_positions[key] = position
+        self._sync_runtime_positions()
         metadata = dict(intent.metadata or {})
         metadata.update({"fill_price": price, "fill_quantity": quantity, "mode": mode})
         recorded_intent = TradeIntent(
@@ -647,6 +666,8 @@ class TradeEngine:
             },
         )
         self._risk_manager.on_trade_executed(recorded_intent)
+        if self._runtime_state is not None:
+            self._runtime_state.record_trade(recorded_intent)
         self._record_ml_trade_open(recorded_intent, price, quantity)
         self._logger.info(
             "[TRADE] %s opened %s %s @ %.2f qty=%.6f cash=%.2f",
@@ -725,6 +746,7 @@ class TradeEngine:
             details=metadata,
         )
         self._open_positions.pop(key, None)
+        self._sync_runtime_positions()
         self._record_ml_trade_close(recorded_intent, position, price, pnl, pnl_percent, reason)
         self._logger.info(
             "[TRADE] %s closed %s %s @ %.2f | PnL %.2f USD (%.2f%%) reason=%s",
@@ -737,6 +759,8 @@ class TradeEngine:
             reason,
         )
         self._risk_manager.on_trade_executed(recorded_intent)
+        if self._runtime_state is not None:
+            self._runtime_state.record_trade(recorded_intent)
         if reason in {"stop", "target", "trail", "mean-hit", "prob-revert", "prob-floor"}:
             self._logger.info(
                 "[TRADE] Risk exit triggered for %s on %s (%s)",
@@ -884,3 +908,8 @@ class TradeEngine:
                 apply = getattr(researcher, "apply_control_flags", None)
                 if callable(apply):
                     apply(self._control_flags)
+
+    def _sync_runtime_positions(self, prices: Mapping[str, float] | None = None) -> None:
+        if self._runtime_state is None:
+            return
+        self._runtime_state.update_open_positions(self._open_positions.values(), prices)

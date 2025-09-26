@@ -53,6 +53,23 @@ class RiskConfig:
             min_stop_buffer=max(0.0005, float(payload.get("min_stop_buffer", 0.005))),
         )
 
+    def to_dict(self) -> Dict[str, float | int]:
+        """Return the configuration as a plain dictionary for serialization."""
+
+        return {
+            "max_drawdown_percent": self.max_drawdown_percent,
+            "daily_loss_limit_percent": self.daily_loss_limit_percent,
+            "max_position_duration_minutes": self.max_position_duration_minutes,
+            "risk_per_trade": self.risk_per_trade,
+            "max_open_positions": self.max_open_positions,
+            "atr_stop_loss_multiplier": self.atr_stop_loss_multiplier,
+            "atr_take_profit_multiplier": self.atr_take_profit_multiplier,
+            "min_trades_per_day": self.min_trades_per_day,
+            "confidence_relax_percent": self.confidence_relax_percent,
+            "atr_period": self.atr_period,
+            "min_stop_buffer": self.min_stop_buffer,
+        }
+
 
 @dataclass(slots=True)
 class RiskState:
@@ -98,6 +115,29 @@ class RiskManager:
 
     def set_state(self, state: RiskState) -> None:
         self._state = state.copy()
+
+    def config_dict(self) -> Dict[str, float | int]:
+        """Return the current runtime configuration."""
+
+        return self._config.to_dict()
+
+    def update_config(self, updates: Mapping[str, float | int | None]) -> Dict[str, float | int]:
+        """Apply partial configuration updates and return the new configuration."""
+
+        if not updates:
+            return self.config_dict()
+
+        payload = self._config.to_dict()
+        for key, value in updates.items():
+            if value is None or key not in payload:
+                continue
+            try:
+                payload[key] = type(payload[key])(value)  # type: ignore[call-arg]
+            except (TypeError, ValueError):
+                payload[key] = float(value) if isinstance(value, (int, float)) else payload[key]
+        self._config = RiskConfig.from_mapping(payload)
+        self._logger.info("Risk configuration updated via API: %s", updates)
+        return self._config.to_dict()
 
     def reset_daily_limits(self, *, now: datetime | None = None) -> None:
         self._state = self._refresh_state(self._state, None, now, force_reset=True)
