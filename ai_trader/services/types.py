@@ -33,6 +33,10 @@ class TradeIntent:
     confidence: float = 0.0
     reason: Optional[str] = None
     metadata: Optional[Dict[str, object]] = None
+    atr_stop: Optional[float] = None
+    atr_target: Optional[float] = None
+    atr_value: Optional[float] = None
+    validation_score: Optional[float] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
 
     def __post_init__(self) -> None:
@@ -47,6 +51,14 @@ class TradeIntent:
         if self.pnl_usd is not None:
             self.pnl_usd = float(self.pnl_usd)
         self.confidence = float(self.confidence)
+        if self.atr_stop is not None:
+            self.atr_stop = float(self.atr_stop)
+        if self.atr_target is not None:
+            self.atr_target = float(self.atr_target)
+        if self.atr_value is not None:
+            self.atr_value = float(self.atr_value)
+        if self.validation_score is not None:
+            self.validation_score = float(self.validation_score)
 
 
 @dataclass(slots=True)

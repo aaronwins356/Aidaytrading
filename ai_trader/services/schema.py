@@ -24,7 +24,12 @@ TRADE_LOG_TABLES: Dict[str, str] = OrderedDict(
                 pnl_usd REAL,
                 win_loss TEXT,
                 reason TEXT,
-                metadata_json TEXT
+                metadata_json TEXT,
+                confidence REAL,
+                atr_stop REAL,
+                atr_target REAL,
+                atr_value REAL,
+                validation_score REAL
             )
         """,
         "equity_curve": """
@@ -122,7 +127,14 @@ ML_TABLES: Dict[str, str] = OrderedDict(
                 precision REAL,
                 recall REAL,
                 win_rate REAL,
-                support INTEGER
+                support INTEGER,
+                accuracy REAL,
+                f1_score REAL,
+                reward REAL,
+                avg_confidence REAL,
+                threshold REAL,
+                trades INTEGER,
+                window INTEGER
             )
         """,
         "ml_trade_outcomes": """

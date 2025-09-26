@@ -7,6 +7,8 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import Dict, Mapping, MutableMapping, Sequence
 
+from ai_trader.services.configuration import normalize_symbol
+
 from ai_trader.services.logging import get_logger
 from ai_trader.services.types import TradeIntent
 
@@ -22,10 +24,11 @@ class RiskConfig:
     max_open_positions: int = 3
     atr_stop_loss_multiplier: float = 1.5
     atr_take_profit_multiplier: float = 2.5
-    min_trades_per_day: int = 30
     confidence_relax_percent: float = 0.1
     atr_period: int = 14
     min_stop_buffer: float = 0.005
+    min_trades_per_day_default: int = 10
+    min_trades_per_day_overrides: Dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, float | int | None]) -> "RiskConfig":
@@ -35,6 +38,30 @@ class RiskConfig:
             payload["risk_per_trade"] = payload["risk_percent"]
         if "confidence_relax_percent" not in payload and "throttle_relax_percent" in payload:
             payload["confidence_relax_percent"] = payload["throttle_relax_percent"]
+        min_trades_config = payload.get("min_trades_per_day", 10)
+        min_trades_default = 10
+        min_trades_overrides: Dict[str, int] = {}
+        if isinstance(min_trades_config, Mapping):
+            default_candidate = min_trades_config.get("default")
+            if default_candidate is not None:
+                try:
+                    min_trades_default = max(1, int(default_candidate))
+                except (TypeError, ValueError):
+                    min_trades_default = 10
+            for symbol_key, value in min_trades_config.items():
+                if str(symbol_key).lower() == "default":
+                    continue
+                symbol = normalize_symbol(symbol_key) or str(symbol_key).upper()
+                try:
+                    min_trades_overrides[symbol] = max(1, int(value))
+                except (TypeError, ValueError):
+                    continue
+        else:
+            try:
+                min_trades_default = max(1, int(min_trades_config))
+            except (TypeError, ValueError):
+                min_trades_default = 10
+
         return cls(
             max_drawdown_percent=float(payload.get("max_drawdown_percent", 20.0)),
             daily_loss_limit_percent=float(payload.get("daily_loss_limit_percent", 5.0)),
@@ -43,10 +70,11 @@ class RiskConfig:
             max_open_positions=int(payload.get("max_open_positions", 3)),
             atr_stop_loss_multiplier=float(payload.get("atr_stop_loss_multiplier", 1.5)),
             atr_take_profit_multiplier=float(payload.get("atr_take_profit_multiplier", 2.5)),
-            min_trades_per_day=int(payload.get("min_trades_per_day", 30)),
             confidence_relax_percent=max(0.0, float(payload.get("confidence_relax_percent", 0.1))),
             atr_period=int(payload.get("atr_period", 14)),
             min_stop_buffer=max(0.0005, float(payload.get("min_stop_buffer", 0.005))),
+            min_trades_per_day_default=min_trades_default,
+            min_trades_per_day_overrides=min_trades_overrides,
         )
 
     def to_dict(self) -> Dict[str, float | int]:
@@ -60,11 +88,19 @@ class RiskConfig:
             "max_open_positions": self.max_open_positions,
             "atr_stop_loss_multiplier": self.atr_stop_loss_multiplier,
             "atr_take_profit_multiplier": self.atr_take_profit_multiplier,
-            "min_trades_per_day": self.min_trades_per_day,
             "confidence_relax_percent": self.confidence_relax_percent,
             "atr_period": self.atr_period,
             "min_stop_buffer": self.min_stop_buffer,
+            "min_trades_per_day": self.min_trades_per_day_default,
+            "min_trades_per_day_overrides": dict(self.min_trades_per_day_overrides),
         }
+
+    def min_trades_for(self, symbol: str | None) -> int:
+        if symbol:
+            normalised = normalize_symbol(symbol) or symbol.upper()
+            if normalised in self.min_trades_per_day_overrides:
+                return self.min_trades_per_day_overrides[normalised]
+        return self.min_trades_per_day_default
 
 
 @dataclass(slots=True)
@@ -75,11 +111,14 @@ class RiskState:
     daily_start_equity: float | None = None
     daily_peak_equity: float | None = None
     trades_today: int = 0
+    trades_today_by_symbol: Dict[str, int] = field(default_factory=dict)
     halted: bool = False
     halt_reason: str | None = None
 
     def copy(self) -> "RiskState":
-        return replace(self)
+        clone = replace(self)
+        clone.trades_today_by_symbol = dict(self.trades_today_by_symbol)
+        return clone
 
 
 @dataclass(slots=True)
@@ -112,18 +151,54 @@ class RiskManager:
     def set_state(self, state: RiskState) -> None:
         self._state = state.copy()
 
-    def config_dict(self) -> Dict[str, float | int]:
+    def config_dict(self) -> Dict[str, object]:
         """Return the current runtime configuration."""
 
         return self._config.to_dict()
 
-    def update_config(self, updates: Mapping[str, float | int | None]) -> Dict[str, float | int]:
+    def update_config(self, updates: Mapping[str, float | int | None]) -> Dict[str, object]:
         """Apply partial configuration updates and return the new configuration."""
 
         if not updates:
             return self.config_dict()
 
         payload = self._config.to_dict()
+        overrides = payload.get("min_trades_per_day_overrides", {})
+        if not isinstance(overrides, dict):
+            overrides = {}
+        if "min_trades_per_day" in updates:
+            raw_value = updates.get("min_trades_per_day")
+            if isinstance(raw_value, Mapping):
+                default_candidate = raw_value.get("default")
+                if default_candidate is not None:
+                    try:
+                        payload["min_trades_per_day"] = max(1, int(default_candidate))
+                    except (TypeError, ValueError):
+                        payload["min_trades_per_day"] = self._config.min_trades_per_day_default
+                for key, value in raw_value.items():
+                    if str(key).lower() == "default":
+                        continue
+                    symbol = normalize_symbol(key) or str(key).upper()
+                    try:
+                        overrides[symbol] = max(1, int(value))
+                    except (TypeError, ValueError):
+                        continue
+            else:
+                try:
+                    payload["min_trades_per_day"] = max(1, int(raw_value))
+                except (TypeError, ValueError):
+                    payload["min_trades_per_day"] = self._config.min_trades_per_day_default
+        if "min_trades_per_day_overrides" in updates and isinstance(
+            updates["min_trades_per_day_overrides"], Mapping
+        ):
+            for key, value in updates["min_trades_per_day_overrides"].items():
+                symbol = normalize_symbol(key) or str(key).upper()
+                try:
+                    overrides[symbol] = max(1, int(value))
+                except (TypeError, ValueError):
+                    continue
+        payload["min_trades_per_day_overrides"] = overrides
+
         for key, value in updates.items():
             if value is None or key not in payload:
                 continue
@@ -252,6 +327,7 @@ class RiskManager:
         self,
         base_threshold: float,
         *,
+        symbol: str | None = None,
         state: RiskState | None = None,
         now: datetime | None = None,
     ) -> tuple[float, bool]:
@@ -260,10 +336,16 @@ class RiskManager:
         if base_threshold <= 0.0:
             return base_threshold, False
         working_state = self._prepare_state(state, equity=None, now=now)
-        if (
-            working_state.trades_today == 0
-            or working_state.trades_today >= self._config.min_trades_per_day
-        ):
+        min_trades_required = self._config.min_trades_for(symbol)
+        symbol_key = normalize_symbol(symbol) if symbol else None
+        trades_for_symbol = 0
+        if symbol_key and symbol_key in working_state.trades_today_by_symbol:
+            trades_for_symbol = working_state.trades_today_by_symbol[symbol_key]
+        elif symbol:
+            trades_for_symbol = working_state.trades_today_by_symbol.get(symbol, 0)
+        else:
+            trades_for_symbol = working_state.trades_today
+        if trades_for_symbol == 0 or trades_for_symbol >= min_trades_required:
             return base_threshold, False
         relax_pct = min(0.9, max(0.0, self._config.confidence_relax_percent))
         adjusted = max(0.0, base_threshold * (1.0 - relax_pct))
@@ -277,6 +359,10 @@ class RiskManager:
         working_state = self._prepare_state(state, equity=None, now=now)
         if intent.action == "OPEN":
             working_state.trades_today += 1
+            symbol = normalize_symbol(intent.symbol) or intent.symbol
+            counts = dict(working_state.trades_today_by_symbol)
+            counts[symbol] = counts.get(symbol, 0) + 1
+            working_state.trades_today_by_symbol = counts
         if state is None:
             self._state = working_state
         return working_state
@@ -315,7 +401,9 @@ class RiskManager:
             if equity is not None:
                 new_state.daily_start_equity = equity
                 new_state.daily_peak_equity = equity
+            new_state.trades_today_by_symbol = {}
             return new_state
+        state.trades_today_by_symbol = dict(state.trades_today_by_symbol)
         return state
 
     def _apply_position_sizing(
@@ -364,6 +452,9 @@ class RiskManager:
         )
         intent.cash_spent = cash_spent
         intent.metadata = dict(metadata)
+        intent.atr_stop = stop_price
+        intent.atr_target = target_price
+        intent.atr_value = atr_value
 
         return {
             "cash_spent": cash_spent,

@@ -78,7 +78,7 @@ class TradeEngine:
         max_cash_value = float(max_cash_per_trade)
         self._max_cash_per_trade = max_cash_value if max_cash_value > 0 else 0.0
         self._trade_confidence_min = max(0.0, min(1.0, float(trade_confidence_min)))
-        self._effective_confidence_min: float = self._trade_confidence_min
+        self._effective_confidence_min: Dict[str, float] = {}
         self._trade_fee_rate = max(0.0, float(trade_fee_percent))
         self._base_currency = getattr(broker, "base_currency", "USD")
         self._latest_allocation_cap: float | None = None
@@ -262,15 +262,21 @@ class TradeEngine:
             self._trade_log.record_account_snapshot(normalized_balances, equity)
             equity_per_trade = equity * (self._equity_allocation_percent / 100.0)
             self._latest_allocation_cap = equity_per_trade
-            self._effective_confidence_min, relaxed = (
-                self._risk_manager.effective_confidence_threshold(self._trade_confidence_min)
-            )
-            if relaxed and self._trade_confidence_min > 0:
-                self._logger.debug(
-                    "[RISK] Confidence threshold relaxed from %.3f to %.3f due to low trade count",
-                    self._trade_confidence_min,
-                    self._effective_confidence_min,
+            base_threshold = self._trade_confidence_min
+            updated_thresholds: Dict[str, float] = {}
+            for symbol in self._active_symbols():
+                threshold, relaxed = self._risk_manager.effective_confidence_threshold(
+                    base_threshold, symbol=symbol
                 )
+                updated_thresholds[symbol] = threshold
+                if relaxed and base_threshold > 0:
+                    self._logger.debug(
+                        "[RISK] Confidence threshold relaxed for %s from %.3f to %.3f",
+                        symbol,
+                        base_threshold,
+                        threshold,
+                    )
+            self._effective_confidence_min = updated_thresholds
             await self._run_researchers(snapshot, equity_metrics)
             self._update_control_flags()
 
@@ -320,7 +326,9 @@ class TradeEngine:
                         continue
                     if self._violates_long_only(worker, intent, open_position):
                         continue
-                    threshold = self._effective_confidence_min
+                    threshold = self._effective_confidence_min.get(
+                        intent.symbol, self._trade_confidence_min
+                    )
                     if (
                         intent.action == "OPEN"
                         and threshold > 0.0
@@ -533,7 +541,9 @@ class TradeEngine:
             if broker_floor > min_notional:
                 min_notional = broker_floor
         except Exception:  # pragma: no cover - defensive guard
-            self._logger.debug("Failed to resolve min notional for %s", intent.symbol, exc_info=True)
+            self._logger.debug(
+                "Failed to resolve min notional for %s", intent.symbol, exc_info=True
+            )
         if available < min_notional:
             self._logger.info(
                 "[RISK] Skipped trade for %s – insufficient funds",
@@ -593,7 +603,9 @@ class TradeEngine:
             await self._broker.ensure_market(intent.symbol)
         except Exception:  # pragma: no cover - non-critical hint
             self._logger.debug(
-                "Unable to ensure market metadata for %s before sizing", intent.symbol, exc_info=True
+                "Unable to ensure market metadata for %s before sizing",
+                intent.symbol,
+                exc_info=True,
             )
         min_notional = self._resolve_min_notional(intent.symbol)
 

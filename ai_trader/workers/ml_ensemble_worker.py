@@ -65,6 +65,10 @@ class EnsembleMLWorker(BaseWorker):
         sequence_length: int = 12,
         min_history: int = 80,
         ml_service: Optional[object] = None,
+        shadow_mode: bool = False,
+        validation_min_accuracy: float = 0.55,
+        validation_min_reward: float = 0.0,
+        validation_min_support: int = 30,
     ) -> None:
         super().__init__(symbols=symbols, lookback=window_size, ml_service=ml_service)
         self.window_size = max(window_size, 40)
@@ -79,6 +83,55 @@ class EnsembleMLWorker(BaseWorker):
             symbol: deque(maxlen=self.window_size) for symbol in self.symbols
         }
         self._lstm_feature_cache: Dict[str, deque] = {}
+        self.shadow_mode = bool(shadow_mode)
+        self._validation_min_accuracy = max(0.0, min(1.0, float(validation_min_accuracy)))
+        self._validation_min_reward = float(validation_min_reward)
+        self._validation_min_support = max(0, int(validation_min_support))
+
+    def _validation_snapshot(self, symbol: str) -> Dict[str, float]:
+        if self._ml_service is None or not hasattr(self._ml_service, "latest_validation_metrics"):
+            return {}
+        try:
+            snapshot = self._ml_service.latest_validation_metrics(symbol)  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._logger.debug("Failed to fetch validation metrics for %s: %s", symbol, exc)
+            return {}
+        return dict(snapshot)
+
+    def _validation_allows(self, symbol: str) -> tuple[bool, Dict[str, float]]:
+        if self._ml_service is None:
+            return True, {}
+        metrics = self._validation_snapshot(symbol)
+        if not metrics:
+            return False, {}
+        support = int(metrics.get("support", 0))
+        if support < self._validation_min_support:
+            self._logger.debug(
+                "Validation metrics for %s insufficient support (%d/%d)",
+                symbol,
+                support,
+                self._validation_min_support,
+            )
+            return False, metrics
+        accuracy = float(metrics.get("accuracy", 0.0))
+        reward = float(metrics.get("reward", 0.0))
+        if accuracy < self._validation_min_accuracy:
+            self._logger.info(
+                "Validation gating blocked %s – accuracy %.3f < %.3f",
+                symbol,
+                accuracy,
+                self._validation_min_accuracy,
+            )
+            return False, metrics
+        if reward < self._validation_min_reward:
+            self._logger.info(
+                "Validation gating blocked %s – reward %.3f < %.3f",
+                symbol,
+                reward,
+                self._validation_min_reward,
+            )
+            return False, metrics
+        return True, metrics
 
     async def evaluate_signal(self, snapshot: MarketSnapshot) -> Dict[str, str]:
         self.update_history(snapshot)
@@ -141,11 +194,34 @@ class EnsembleMLWorker(BaseWorker):
             return None
         prob = self._latest_prob.get(symbol, 0.5)
         if signal == "buy" and existing_position is None:
+            allowed, validation = self._validation_allows(symbol)
+            if not allowed:
+                self.update_signal_state(
+                    symbol,
+                    "validation-block",
+                    {"validation_metrics": validation} if validation else {"status": "validation"},
+                )
+                return None
+            if self.shadow_mode:
+                self._logger.info(
+                    "Shadow mode active – suppressing %s order for %s (prob=%.3f)",
+                    self.name,
+                    symbol,
+                    prob,
+                )
+                self.update_signal_state(
+                    symbol,
+                    "shadow",
+                    {"validation_metrics": validation} if validation else {"status": "shadow"},
+                )
+                return None
             metadata = {
                 "signal": signal,
                 "probability": prob,
                 "weights": self._weights.get(symbol, {}),
             }
+            if validation:
+                metadata["validation_metrics"] = validation
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",
@@ -155,17 +231,21 @@ class EnsembleMLWorker(BaseWorker):
                 entry_price=price,
                 confidence=prob,
                 metadata=metadata,
+                validation_score=validation.get("reward") if validation else None,
             )
         if signal == "sell" and existing_position is not None:
             pnl = (price - existing_position.entry_price) * existing_position.quantity
             pnl_percent = (
                 pnl / existing_position.cash_spent * 100 if existing_position.cash_spent else 0.0
             )
+            validation = self._validation_snapshot(symbol)
             metadata = {
                 "signal": signal,
                 "probability": prob,
                 "weights": self._weights.get(symbol, {}),
             }
+            if validation:
+                metadata["validation_metrics"] = validation
             return TradeIntent(
                 worker=self.name,
                 action="CLOSE",
@@ -178,6 +258,7 @@ class EnsembleMLWorker(BaseWorker):
                 pnl_usd=pnl,
                 confidence=prob,
                 metadata=metadata,
+                validation_score=validation.get("reward") if validation else None,
             )
         return None
 

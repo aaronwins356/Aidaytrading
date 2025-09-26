@@ -51,7 +51,7 @@ def test_trading_day_backtest(tmp_path: Path) -> None:
             "daily_loss_limit_percent": 10.0,
             "max_open_positions": 3,
             "confidence_relax_percent": 0.2,
-            "min_trades_per_day": 1,
+            "min_trades_per_day": {"default": 1},
             "min_stop_buffer": 0.001,
         },
         "workers": {

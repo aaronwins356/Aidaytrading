@@ -30,7 +30,7 @@ def sample_config() -> Dict[str, object]:
             "max_drawdown_percent": 90.0,
             "daily_loss_limit_percent": 90.0,
             "max_open_positions": 5,
-            "min_trades_per_day": 1,
+            "min_trades_per_day": {"default": 1},
             "confidence_relax_percent": 0.5,
             "min_stop_buffer": 0.001,
         },

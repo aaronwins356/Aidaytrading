@@ -249,7 +249,9 @@ class BaseWorker(ABC):
 
         if trailing is not None:
             existing_trailing = tracker.get("trailing_price")
-            if existing_trailing is None or self._is_tighter_stop(side, trailing, existing_trailing):
+            if existing_trailing is None or self._is_tighter_stop(
+                side, trailing, existing_trailing
+            ):
                 tracker["trailing_price"] = trailing
 
     def check_risk_exit(
@@ -346,11 +348,11 @@ class BaseWorker(ABC):
         *,
         features: Optional[Mapping[str, float]] = None,
         threshold: Optional[float] = None,
-    ) -> tuple[bool, float]:
+    ) -> tuple[bool, float, Dict[str, float]]:
         """Return whether ML gating approves the trade and the associated confidence."""
 
         if self._ml_service is None or not self._ml_gate_enabled:
-            return True, 0.0
+            return True, 0.0, {}
         feature_payload = features or self._ml_service.latest_features(symbol)
         if feature_payload is None:
             self._ml_warmup_state[symbol] = True
@@ -359,7 +361,7 @@ class BaseWorker(ABC):
                 self.name,
                 symbol,
             )
-            return False, 0.0
+            return False, 0.0, {}
         self._ml_warmup_state[symbol] = False
         gate = (
             threshold
@@ -379,8 +381,9 @@ class BaseWorker(ABC):
                     exc,
                 )
                 self._ml_prediction_failures[symbol] = True
-            return False, 0.0
+            return False, 0.0, {}
         self._ml_prediction_failures.pop(symbol, None)
+        validation_snapshot = self._ml_service.latest_validation_metrics(symbol)
         if not decision:
             self._logger.info(
                 "ML gate blocked %s signal on %s (confidence=%.3f threshold=%.3f)",
@@ -389,7 +392,7 @@ class BaseWorker(ABC):
                 confidence,
                 gate,
             )
-        return decision, confidence
+        return decision, confidence, validation_snapshot
 
     # ------------------------------------------------------------------
     # Trade log helper

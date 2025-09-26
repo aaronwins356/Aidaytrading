@@ -115,6 +115,10 @@ def _prepare_trades(frame: pd.DataFrame) -> pd.DataFrame:
         "pnl_percent",
         "pnl_usd",
         "confidence",
+        "atr_stop",
+        "atr_target",
+        "atr_value",
+        "validation_score",
     ]
     for col in float_cols:
         if col in frame.columns:
@@ -157,6 +161,40 @@ def _prepare_equity(frame: pd.DataFrame) -> pd.DataFrame:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame = frame.dropna(subset=["timestamp"]).sort_values("timestamp")
     frame.set_index("timestamp", inplace=True)
+    return frame
+
+
+@cache_data(ttl=15)
+def load_validation_metrics() -> pd.DataFrame:
+    if not DB_PATH.exists():
+        return pd.DataFrame()
+    with _connect() as conn:
+        if not _table_exists(conn, "ml_metrics"):
+            return pd.DataFrame()
+        frame = pd.read_sql_query(
+            "SELECT * FROM ml_metrics WHERE mode='validation' ORDER BY timestamp DESC",
+            conn,
+        )
+    if frame.empty:
+        return frame
+    frame = frame.drop_duplicates(subset=["symbol"], keep="first")
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    numeric_cols = [
+        "precision",
+        "recall",
+        "win_rate",
+        "support",
+        "accuracy",
+        "f1_score",
+        "reward",
+        "avg_confidence",
+        "threshold",
+        "trades",
+        "window",
+    ]
+    for column in numeric_cols:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame
 
 
@@ -377,6 +415,26 @@ def render_backtest_sidebar(config: Mapping[str, Any]) -> None:
         st.sidebar.success(status)
 
 
+def render_validation_sidebar(metrics: pd.DataFrame) -> None:
+    st.sidebar.markdown("### ML Validation")
+    if metrics.empty:
+        st.sidebar.info("Validation metrics will appear once the models have sufficient history.")
+        return
+    for _, row in metrics.iterrows():
+        symbol = str(row.get("symbol", "?"))
+        accuracy = float(row.get("accuracy", 0.0))
+        reward = float(row.get("reward", 0.0))
+        support = int(row.get("support", 0))
+        win_rate = float(row.get("win_rate", 0.0)) * 100.0
+        avg_conf = float(row.get("avg_confidence", 0.0))
+        col1, col2 = st.sidebar.columns(2)
+        col1.metric(f"{symbol} Accuracy", f"{accuracy:.1%}")
+        col2.metric("Reward", f"{reward:.2f}")
+        st.sidebar.caption(
+            f"Support: {support} • Win rate: {win_rate:.1f}% • Avg confidence: {avg_conf:.2f}"
+        )
+
+
 def render_backtest_results(
     result: Mapping[str, Any] | None,
     status: str | None,
@@ -566,6 +624,10 @@ def render_trades_log(trades: pd.DataFrame) -> None:
         "exit_price",
         "pnl_usd",
         "pnl_percent",
+        "confidence",
+        "atr_stop",
+        "atr_target",
+        "validation_score",
         "reason",
     ]
     available_cols = [col for col in display_cols if col in filtered.columns]
@@ -687,6 +749,8 @@ def render_strategy_manager(
 def render_dashboard() -> None:
     _set_page_style()
     config = load_config()
+    validation_metrics = load_validation_metrics()
+    render_validation_sidebar(validation_metrics)
     render_backtest_sidebar(config)
 
     future: Future | None = st.session_state.get(_BACKTEST_FUTURE_KEY)

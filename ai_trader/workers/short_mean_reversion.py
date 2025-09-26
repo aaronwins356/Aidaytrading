@@ -142,13 +142,18 @@ class ShortMeanReversionWorker(BaseWorker):
             cash = float(equity_per_trade) * (self.position_size_pct / 100)
             if cash <= 0:
                 return None
-            allowed, ml_confidence = self.ml_confirmation(symbol)
+            allowed, ml_confidence, validation = self.ml_confirmation(symbol)
             if not allowed:
-                self.update_signal_state(symbol, "ml-block", {"ml_confidence": ml_confidence})
+                indicators = {"ml_confidence": ml_confidence}
+                if validation:
+                    indicators["validation_reward"] = validation.get("reward")
+                self.update_signal_state(symbol, "ml-block", indicators)
                 return None
             mean_price = indicators.get("mid", price)
             risk_meta = self.prepare_entry_risk(symbol, "sell", price, target=mean_price)
             metadata = {k: v for k, v in risk_meta.items() if v is not None}
+            if validation:
+                metadata["validation_metrics"] = validation
             self.record_trade_event("open_signal", symbol, metadata)
             cash_value = float(cash) * float(self.leverage)
             return TradeIntent(
@@ -160,6 +165,7 @@ class ShortMeanReversionWorker(BaseWorker):
                 entry_price=price,
                 confidence=ml_confidence or 0.65,
                 metadata=metadata,
+                validation_score=validation.get("reward") if validation else None,
             )
 
         should_close = False

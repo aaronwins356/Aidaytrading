@@ -1,5 +1,4 @@
 import asyncio
-import asyncio
 import json
 import logging
 
@@ -16,7 +15,9 @@ class _StubWebsocket:
         self.sent_payloads.append(message)
 
 
-def test_websocket_manager_expands_aliases_and_normalises_ticks(caplog: pytest.LogCaptureFixture) -> None:
+def test_websocket_manager_expands_aliases_and_normalises_ticks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     caplog.set_level(logging.INFO)
     manager = KrakenWebsocketManager(["BTC/USD"])
     assert manager.symbols == ["BTC/USD"]

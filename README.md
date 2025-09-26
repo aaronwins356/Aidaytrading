@@ -10,6 +10,7 @@ A modular crypto trading bot for Kraken that runs multiple strategy workers, enf
 - **FastAPI monitoring API** – expose bot status, profit snapshots, and risk controls for external integrations.
 - **Extensible strategies** – drop new worker classes in `ai_trader/workers/` and wire them up via configuration.
 - **SQLite-first persistence** – capture trades, equity history, and control flags for audits and analytics.
+- **Walk-forward validation** – ML models continuously self-check using rolling validation windows and surface accuracy/reward metrics via the API and dashboard.
 
 ## Project Layout
 
@@ -32,8 +33,9 @@ The bot loads settings from [`configs/config.yaml`](configs/config.yaml). Key se
 
 - `exchange`: Kraken REST keys and rate limits. Leave `api_key`/`api_secret` empty in git and provide real credentials via environment variables (`KRAKEN_API_KEY`, `KRAKEN_API_SECRET`) for production.
 - `trading`: base currency, enabled symbols, sizing rules, and the critical `paper_trading` flag. When `paper_trading: true`, the broker simulates fills and you can run without API keys.
-- `risk`: global guardrails such as `max_drawdown_percent`, `daily_loss_limit_percent`, ATR stops, and minimum trades per day.
+- `risk`: global guardrails such as `max_drawdown_percent`, `daily_loss_limit_percent`, ATR stops, and minimum trades per day. `min_trades_per_day` now accepts a mapping so you can set a default plus per-symbol overrides (e.g. require 10 BTC trades before relaxing ML confidence but allow ETH to relax after 5).
 - `workers`: strategy definitions with per-worker risk overrides.
+- `workers`: strategy definitions with per-worker risk overrides. ML-centric workers support additional parameters like `shadow_mode` to run in signal-only mode until validation metrics are satisfactory.
 - `researcher` / `ml`: market feature extraction and ML ensemble configuration.
 - `notifications.telegram`: bot token, chat ID, and heartbeat cadence. Credentials can also be supplied via `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID`.
 - `streamlit` and `api`: dashboard refresh cadence, theme, and FastAPI host/port overrides.
@@ -91,6 +93,8 @@ python -m ai_trader.main --mode api --config configs/config.yaml
 
 Use `AI_TRADER_API_HOST`, `AI_TRADER_API_PORT`, and `AI_TRADER_API_RELOAD` to customise the server without editing YAML.
 
+The API exposes `/ml-metrics` to retrieve the latest walk-forward validation snapshot (accuracy, reward, support, and confidence) for each symbol.
+
 ## Streamlit Dashboard Backtesting
 
 Launch the dashboard:
@@ -99,7 +103,12 @@ Launch the dashboard:
 streamlit run ai_trader/streamlit_app.py
 ```
 
-The sidebar now includes a **Quick Backtest** section:
+The sidebar now includes:
+
+- **ML Validation** – live accuracy/reward/support metrics aggregated from the walk-forward validator. Values update automatically as fresh labels arrive.
+- **Quick Backtest** – run ad-hoc historical replays without interrupting the live loop.
+
+For backtests:
 
 1. Select a symbol from `trading.symbols`.
 2. Choose how many days to replay (default 30).

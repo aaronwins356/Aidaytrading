@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pickle
 import sqlite3
 from collections import defaultdict, deque
@@ -111,6 +112,15 @@ class _PendingTradeSample:
     entry_timestamp: datetime
 
 
+@dataclass(slots=True)
+class _ValidationSample:
+    """Validation example captured once ground truth labels are available."""
+
+    features: Dict[str, float]
+    label: int
+    timestamp: datetime
+
+
 class MLService:
     """Stateful online learning engine shared across workers."""
 
@@ -157,6 +167,13 @@ class MLService:
         self._zero_confidence_streak: Dict[str, int] = {}
         self._zero_confidence_alerted: Dict[str, bool] = {}
         self._confidence_stall_limit = max(1, int(confidence_stall_limit))
+        self._validation_window = 256
+        self._validation_min_samples = max(10, int(warmup_samples))
+        self._validation_history: DefaultDict[str, Deque[_ValidationSample]] = defaultdict(
+            lambda: deque(maxlen=self._validation_window)
+        )
+        self._latest_validation: Dict[str, Dict[str, float]] = {}
+        self._last_validation_sample_count: Dict[str, int] = {}
         if self._ensemble_requested and not self._use_ensemble:
             self._logger.warning(
                 "ML ensemble requested but river.forest.ARFClassifier is unavailable. "
@@ -172,6 +189,7 @@ class MLService:
         with self._connect() as conn:
             for statement in ML_TABLES.values():
                 conn.execute(statement)
+            self._ensure_metric_columns(conn)
             conn.commit()
 
     @contextmanager
@@ -182,6 +200,114 @@ class MLService:
             yield conn
         finally:
             conn.close()
+
+    def _ensure_metric_columns(self, conn: sqlite3.Connection) -> None:
+        cursor = conn.execute("PRAGMA table_info(ml_metrics)")
+        existing = {row[1] for row in cursor.fetchall()}
+        column_specs = {
+            "accuracy": "REAL",
+            "f1_score": "REAL",
+            "reward": "REAL",
+            "avg_confidence": "REAL",
+            "threshold": "REAL",
+            "trades": "INTEGER",
+            "window": "INTEGER",
+        }
+        for column, column_type in column_specs.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE ml_metrics ADD COLUMN {column} {column_type}")
+
+    def _record_validation_sample(
+        self, symbol: str, features: Mapping[str, float], label: int
+    ) -> None:
+        history = self._validation_history[symbol]
+        history.append(
+            _ValidationSample(
+                features=dict(features), label=int(label), timestamp=datetime.utcnow()
+            )
+        )
+
+    def _evaluate_validation_metrics(self, symbol: str) -> None:
+        history = self._validation_history.get(symbol)
+        if not history or len(history) < self._validation_min_samples:
+            return
+        sample_count = len(history)
+        if self._last_validation_sample_count.get(symbol) == sample_count:
+            return
+        metrics = self._walk_forward_metrics(symbol, list(history))
+        if not metrics:
+            return
+        self._latest_validation[symbol] = metrics
+        self._last_validation_sample_count[symbol] = sample_count
+        self._record_metrics(symbol, "validation", metrics)
+
+    def _walk_forward_metrics(
+        self, symbol: str, samples: Iterable[_ValidationSample]
+    ) -> Dict[str, float]:
+        bundle = _ModelBundle(
+            pipeline=self._build_pipeline(),
+            forest=self._build_forest() if self._use_ensemble else None,
+        )
+        stats = _ClassificationStats()
+        returns: list[float] = []
+        confidences: list[float] = []
+        series = list(samples)
+        warmup = min(self._validation_min_samples // 2, len(series) // 3)
+        warmup = max(5, warmup)
+        for index, sample in enumerate(series):
+            features = self._sanitize_features(sample.features)
+            label = int(sample.label)
+            if index < warmup:
+                bundle.learn(features, label)
+                continue
+            probability = bundle.predict_proba(features)
+            probability = float(max(0.0, min(1.0, probability)))
+            probability = self._apply_confidence_floor(symbol, probability)
+            confidences.append(probability)
+            decision = int(probability >= self._threshold)
+            stats.update(prediction=decision, label=label)
+            if decision == 1:
+                direction = 1 if label == 1 else -1
+                returns.append(direction * probability)
+            bundle.learn(features, label)
+
+        support = stats.support
+        precision = stats.precision()
+        recall = stats.recall()
+        accuracy = stats.accuracy()
+        f1_score = stats.f1_score()
+        win_rate = stats.win_rate()
+        trades = stats.trades
+        avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        if returns:
+            mean_return = sum(returns) / len(returns)
+            variance = sum((value - mean_return) ** 2 for value in returns) / len(returns)
+            volatility = math.sqrt(max(variance, 1e-12))
+            reward = mean_return / volatility
+        else:
+            reward = 0.0
+        metrics = {
+            "precision": precision,
+            "recall": recall,
+            "accuracy": accuracy,
+            "f1_score": f1_score,
+            "win_rate": win_rate,
+            "support": float(support),
+            "trades": float(trades),
+            "avg_confidence": avg_confidence,
+            "reward": reward,
+            "threshold": self._threshold,
+            "window": float(len(series)),
+        }
+        self._logger.info(
+            "[ML] Validation for %s accuracy=%.3f precision=%.3f reward=%.3f support=%d",
+            symbol,
+            accuracy,
+            precision,
+            reward,
+            support,
+        )
+        return metrics
 
     # ------------------------------------------------------------------
     # Model lifecycle management
@@ -410,6 +536,7 @@ class MLService:
             )
         else:
             self._safe_learn(symbol, model, cleaned, int(label))
+            self._record_validation_sample(symbol, cleaned, int(label))
             self._label_counts[symbol] = self._label_counts.get(symbol, 0) + 1
             if self.is_warmed_up(symbol) and not self._warmup_logged.get(symbol):
                 self._logger.info(
@@ -423,6 +550,7 @@ class MLService:
             self._track_confidence_stall(symbol, probability)
             if persist:
                 self._persist_model(symbol, model)
+            self._evaluate_validation_metrics(symbol)
 
         decision = int(probability >= self._threshold)
         self._latest_confidence[("researcher", symbol)] = probability
@@ -516,6 +644,15 @@ class MLService:
             return self._latest_confidence[key]
         researcher_key = ("researcher", symbol)
         return self._latest_confidence.get(researcher_key, 0.0)
+
+    def latest_validation_metrics(
+        self, symbol: Optional[str] = None
+    ) -> Dict[str, float] | Dict[str, Dict[str, float]]:
+        """Return the most recent validation metrics for a symbol or all symbols."""
+
+        if symbol is None:
+            return {key: dict(value) for key, value in self._latest_validation.items()}
+        return dict(self._latest_validation.get(symbol, {}))
 
     def latest_features(self, symbol: str) -> Optional[Dict[str, float]]:
         """Return the last seen feature vector for a symbol."""
@@ -772,6 +909,7 @@ class MLService:
 
         stats = _ClassificationStats()
         probabilities: list[float] = []
+        trade_returns: list[float] = []
         warmup_span = max(0, warmup)
 
         for index, row in enumerate(rows):
@@ -790,6 +928,9 @@ class MLService:
             prediction = int(proba >= gate)
             stats.update(prediction=prediction, label=label)
             test_model.learn(features, label)
+            if prediction == 1:
+                direction = 1 if label == 1 else -1
+                trade_returns.append(direction * proba)
 
         precision = stats.precision()
         recall = stats.recall()
@@ -797,6 +938,15 @@ class MLService:
         accuracy = stats.accuracy()
         f1_score = stats.f1_score()
         avg_confidence = sum(probabilities) / len(probabilities) if probabilities else 0.0
+        if trade_returns:
+            mean_return = sum(trade_returns) / len(trade_returns)
+            variance = sum((value - mean_return) ** 2 for value in trade_returns) / len(
+                trade_returns
+            )
+            volatility = math.sqrt(max(variance, 1e-12))
+            reward = mean_return / volatility
+        else:
+            reward = 0.0
 
         metrics_payload = {
             "precision": precision,
@@ -809,6 +959,8 @@ class MLService:
             "threshold": float(gate),
             "trades": int(stats.trades),
             "warmup": warmup_span,
+            "reward": reward,
+            "window": len(rows),
         }
 
         self._logger.info(
@@ -883,20 +1035,41 @@ class MLService:
             conn.commit()
 
     def _record_metrics(self, symbol: str, mode: str, metrics: Mapping[str, float]) -> None:
+        support = int(metrics.get("support", 0))
+        precision = float(metrics.get("precision", 0.0))
+        recall = float(metrics.get("recall", 0.0))
+        win_rate = float(metrics.get("win_rate", 0.0))
+        accuracy = float(metrics.get("accuracy", 0.0))
+        f1_score = float(metrics.get("f1_score", 0.0))
+        reward = float(metrics.get("reward", 0.0))
+        avg_confidence = float(metrics.get("avg_confidence", 0.0))
+        threshold = float(metrics.get("threshold", self._threshold))
+        trades = int(metrics.get("trades", 0))
+        window = int(metrics.get("window", 0))
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO ml_metrics(timestamp, symbol, mode, precision, recall, win_rate, support)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ml_metrics(
+                    timestamp, symbol, mode, precision, recall, win_rate, support,
+                    accuracy, f1_score, reward, avg_confidence, threshold, trades, window
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.utcnow().isoformat(),
                     symbol,
                     mode,
-                    float(metrics.get("precision", 0.0)),
-                    float(metrics.get("recall", 0.0)),
-                    float(metrics.get("win_rate", 0.0)),
-                    int(metrics.get("support", 0)),
+                    precision,
+                    recall,
+                    win_rate,
+                    support,
+                    accuracy,
+                    f1_score,
+                    reward,
+                    avg_confidence,
+                    threshold,
+                    trades,
+                    window,
                 ),
             )
             conn.commit()

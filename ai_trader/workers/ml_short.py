@@ -106,11 +106,14 @@ class MLShortWorker(BaseWorker):
             cash = float(equity_per_trade) * (self.position_size_pct / 100)
             if cash <= 0:
                 return None
-            allowed, ml_confidence = self.ml_confirmation(
+            allowed, ml_confidence, validation = self.ml_confirmation(
                 symbol, features=features, threshold=self.threshold
             )
             if not allowed:
-                self.update_signal_state(symbol, "ml-block", {"ml_confidence": ml_confidence})
+                indicators = {"ml_confidence": ml_confidence}
+                if validation:
+                    indicators["validation_reward"] = validation.get("reward")
+                self.update_signal_state(symbol, "ml-block", indicators)
                 return None
             confidence = ml_confidence or min(1.0, max(0.0, probability - 0.5))
             metadata = {
@@ -119,6 +122,8 @@ class MLShortWorker(BaseWorker):
             }
             risk_meta = self.prepare_entry_risk(symbol, "sell", price)
             metadata.update({k: v for k, v in risk_meta.items() if v is not None})
+            if validation:
+                metadata["validation_metrics"] = validation
             self.record_trade_event(
                 "open_signal",
                 symbol,
@@ -138,6 +143,7 @@ class MLShortWorker(BaseWorker):
                 entry_price=price,
                 confidence=confidence,
                 metadata=metadata,
+                validation_score=validation.get("reward") if validation else None,
             )
 
         risk_triggered, risk_reason, risk_meta = self.check_risk_exit(symbol, price)

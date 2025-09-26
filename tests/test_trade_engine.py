@@ -109,7 +109,9 @@ class _DummyWebsocketManager:
         self._snapshot.prices[symbol] = price
         self._snapshot.history[symbol].append(price)
         candle = self._snapshot.candles[symbol][-1]
-        candle.update({"close": price, "high": max(candle["high"], price), "low": min(candle["low"], price)})
+        candle.update(
+            {"close": price, "high": max(candle["high"], price), "low": min(candle["low"], price)}
+        )
 
 
 class _TestWorker(BaseWorker):
@@ -719,7 +721,7 @@ def test_trade_engine_applies_trade_fees(tmp_path) -> None:
     assert exit_fee == pytest.approx(expected_exit_fee, rel=1e-6)
     assert close_meta["fees_total"] == pytest.approx(entry_fee + exit_fee, rel=1e-6)
     expected_equity = 1_000.0 - (entry_fee + exit_fee)
-    assert close_meta["pnl_usd"] == pytest.approx(- (entry_fee + exit_fee), rel=1e-6)
+    assert close_meta["pnl_usd"] == pytest.approx(-(entry_fee + exit_fee), rel=1e-6)
 
 
 def test_trade_engine_enforces_atr_stop(tmp_path) -> None:
