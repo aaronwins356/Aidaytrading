@@ -95,7 +95,9 @@ class MLPipeline:
         features = [float(payload.get(key, 0.0)) for key in self._feature_keys]
         label = row["label"]
         label_value = float(label) if label is not None else None
-        return FeatureVector(symbol=row["symbol"], timestamp=row["timestamp"], features=features, label=label_value)
+        return FeatureVector(
+            symbol=row["symbol"], timestamp=row["timestamp"], features=features, label=label_value
+        )
 
     def fetch_recent_features(self, symbol: str, limit: int = 500) -> List[FeatureVector]:
         with self._connect() as conn:
@@ -123,7 +125,9 @@ class MLPipeline:
             return model
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT weights, bias FROM ml_models WHERE symbol = ?", (symbol,)).fetchone()
+            row = conn.execute(
+                "SELECT weights, bias FROM ml_models WHERE symbol = ?", (symbol,)
+            ).fetchone()
         if row:
             weights = np.asarray(json.loads(row["weights"]), dtype=float)
             bias = float(row["bias"])

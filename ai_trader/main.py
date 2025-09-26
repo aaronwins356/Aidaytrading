@@ -174,9 +174,7 @@ def _load_cached_candles(
         return []
     if limit and len(candles) > limit:
         candles = candles[-limit:]
-    logger.info(
-        "Loaded %d cached candles for %s from %s", len(candles), symbol, path
-    )
+    logger.info("Loaded %d cached candles for %s from %s", len(candles), symbol, path)
     return candles
 
 
@@ -225,9 +223,7 @@ def _validate_strategy_topology(
         raise SystemExit(1)
 
     expected_worker_count = len(symbols) * 2
-    strategy_workers = [
-        worker for worker in workers if not getattr(worker, "is_researcher", False)
-    ]
+    strategy_workers = [worker for worker in workers if not getattr(worker, "is_researcher", False)]
     if len(strategy_workers) != expected_worker_count:
         logger.error(
             "Strategy stack requires exactly %d workers (%d symbols × 2). Found %d.",
@@ -263,9 +259,7 @@ def _validate_strategy_topology(
             raise SystemExit(1)
         assignment[symbol].append(getattr(worker, "name", worker.__class__.__name__))
 
-    missing_assignments = {
-        symbol: names for symbol, names in assignment.items() if len(names) != 2
-    }
+    missing_assignments = {symbol: names for symbol, names in assignment.items() if len(names) != 2}
     if missing_assignments:
         for symbol, names in missing_assignments.items():
             logger.error(
@@ -278,9 +272,7 @@ def _validate_strategy_topology(
 
     researcher_map: Dict[str, list[str]] = {symbol: [] for symbol in symbols}
     for researcher in researchers:
-        researcher_symbols = [
-            str(sym).upper() for sym in getattr(researcher, "symbols", [])
-        ]
+        researcher_symbols = [str(sym).upper() for sym in getattr(researcher, "symbols", [])]
         if len(researcher_symbols) != 1:
             logger.error(
                 "Researcher %s must track exactly one symbol but is configured for %s.",
@@ -296,9 +288,7 @@ def _validate_strategy_topology(
                 symbol,
             )
             raise SystemExit(1)
-        researcher_map[symbol].append(
-            getattr(researcher, "name", researcher.__class__.__name__)
-        )
+        researcher_map[symbol].append(getattr(researcher, "name", researcher.__class__.__name__))
 
     missing_researchers = {
         symbol: names for symbol, names in researcher_map.items() if len(names) != 1
@@ -338,19 +328,15 @@ def _validate_startup(
 
     researcher_cfg = config.get("researcher", {})
     if not bool(researcher_cfg.get("enabled", False)):
-        logger.error(
-            "Researcher worker must remain enabled when ML services are active."
-        )
+        logger.error("Researcher worker must remain enabled when ML services are active.")
         raise SystemExit(1)
 
-    ml_workers = [
-        worker
-        for worker in workers
-        if getattr(worker, "_ml_service", None) is not None
-    ]
+    ml_workers = [worker for worker in workers if getattr(worker, "_ml_service", None) is not None]
     if ml_workers:
         researchers = list(getattr(engine, "_researchers", []))
-        has_researcher = any(isinstance(researcher, MarketResearchWorker) for researcher in researchers)
+        has_researcher = any(
+            isinstance(researcher, MarketResearchWorker) for researcher in researchers
+        )
         if not has_researcher:
             logger.error(
                 "ML gating is enabled for %d worker(s) but no MarketResearchWorker was loaded. "
@@ -397,9 +383,7 @@ def _validate_startup(
     if ml_workers and not dryrun:
         try:
             with sqlite3.connect(DB_PATH) as connection:
-                cursor = connection.execute(
-                    "SELECT COUNT(1) FROM market_features"
-                )
+                cursor = connection.execute("SELECT COUNT(1) FROM market_features")
                 count = cursor.fetchone()[0]
         except sqlite3.Error as exc:
             logger.error("Failed to inspect market_features table: %s", exc)
@@ -471,21 +455,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--risk-per-trade", type=float, dest="risk_per_trade")
     parser.add_argument("--risk-max-drawdown", type=float, dest="risk_max_drawdown")
     parser.add_argument("--risk-daily-loss-limit", type=float, dest="risk_daily_loss")
-    parser.add_argument(
-        "--risk-min-trades-per-day", type=int, dest="risk_min_trades"
-    )
-    parser.add_argument(
-        "--risk-confidence-relax", type=float, dest="risk_confidence_relax"
-    )
-    parser.add_argument(
-        "--risk-max-open-positions", type=int, dest="risk_max_open_positions"
-    )
+    parser.add_argument("--risk-min-trades-per-day", type=int, dest="risk_min_trades")
+    parser.add_argument("--risk-confidence-relax", type=float, dest="risk_confidence_relax")
+    parser.add_argument("--risk-max-open-positions", type=int, dest="risk_max_open_positions")
     parser.add_argument("--ml-window-size", type=int, dest="ml_window_size")
     parser.add_argument("--ml-retrain-interval", type=int, dest="ml_retrain_interval")
     parser.add_argument("--pair", type=str, help="Trading pair for backtests (e.g. BTC/USDT)")
     parser.add_argument("--start", type=str, help="Backtest start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, help="Backtest end date (YYYY-MM-DD)")
-    parser.add_argument("--timeframe", type=str, default="1h", help="Backtest timeframe for OHLCV data")
+    parser.add_argument(
+        "--timeframe", type=str, default="1h", help="Backtest timeframe for OHLCV data"
+    )
     parser.add_argument(
         "--backtest-csv",
         dest="backtest_csv",
@@ -610,9 +590,7 @@ def _apply_cli_overrides(config: Dict[str, Any], args: argparse.Namespace) -> No
             if key in enabled_keys or value.get("display_name") in enabled_keys
         }
         if not filtered:
-            raise SystemExit(
-                f"No worker definitions match CLI override: {', '.join(args.workers)}"
-            )
+            raise SystemExit(f"No worker definitions match CLI override: {', '.join(args.workers)}")
         worker_cfg["definitions"] = filtered
 
 
@@ -641,7 +619,9 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
     trading_mode = str(trading_cfg.get("mode", "paper")).lower()
     live_trading = trading_mode == "live"
     if live_trading:
-        logger.info("🚀 Running in LIVE trading mode – Kraken API credentials will be pulled from environment variables.")
+        logger.info(
+            "🚀 Running in LIVE trading mode – Kraken API credentials will be pulled from environment variables."
+        )
     else:
         logger.info("🧪 Running in PAPER trading mode – no real funds at risk.")
 
@@ -819,9 +799,7 @@ def run_api_server(config: Dict[str, Any]) -> None:
     risk_cfg = runtime_config.get("risk", {})
     runtime_state = get_runtime_state()
     runtime_state.set_base_currency(trading_cfg.get("base_currency", "USD"))
-    starting_equity = trading_cfg.get("paper_starting_equity") or trading_cfg.get(
-        "starting_equity"
-    )
+    starting_equity = trading_cfg.get("paper_starting_equity") or trading_cfg.get("starting_equity")
     try:
         if starting_equity is not None:
             runtime_state.set_starting_equity(float(starting_equity))
@@ -899,7 +877,9 @@ def run_backtest_cli(args: argparse.Namespace, config: Dict[str, Any]) -> Backte
     return result
 
 
-def _spawn_parallel_backtest(args: argparse.Namespace, config: Dict[str, Any]) -> threading.Thread | None:
+def _spawn_parallel_backtest(
+    args: argparse.Namespace, config: Dict[str, Any]
+) -> threading.Thread | None:
     if not args.parallel_backtest:
         return None
     logger = get_logger(__name__)
@@ -924,14 +904,24 @@ def _spawn_parallel_backtest(args: argparse.Namespace, config: Dict[str, Any]) -
         logger.warning("Parallel backtest parameter error: %s", exc)
         return None
     if end <= start:
-        logger.warning("Parallel backtest end date must be after start date. Skipping background run.")
+        logger.warning(
+            "Parallel backtest end date must be after start date. Skipping background run."
+        )
         return None
 
     timeframe = args.parallel_backtest_timeframe or args.timeframe or "1h"
     csv_path = _resolve_path(args.parallel_backtest_csv)
     reports_dir = _resolve_path(args.reports_dir)
-    fee = float(args.parallel_backtest_fee) if args.parallel_backtest_fee is not None else float(args.backtest_fee or 0.0)
-    slippage = float(args.parallel_backtest_slippage) if args.parallel_backtest_slippage is not None else float(args.backtest_slippage_bps or 0.0)
+    fee = (
+        float(args.parallel_backtest_fee)
+        if args.parallel_backtest_fee is not None
+        else float(args.backtest_fee or 0.0)
+    )
+    slippage = (
+        float(args.parallel_backtest_slippage)
+        if args.parallel_backtest_slippage is not None
+        else float(args.backtest_slippage_bps or 0.0)
+    )
     label = args.parallel_backtest_label or "parallel"
 
     def _runner() -> None:
@@ -963,6 +953,7 @@ def _spawn_parallel_backtest(args: argparse.Namespace, config: Dict[str, Any]) -
         end.date(),
     )
     return thread
+
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)

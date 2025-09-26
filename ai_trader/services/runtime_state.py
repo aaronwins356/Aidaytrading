@@ -148,9 +148,7 @@ class RuntimeStateStore:
                     self._realized_pnl_percent = (self._realized_pnl_usd / baseline) * 100
             self._persist_locked()
 
-    def update_risk_settings(
-        self, settings: Mapping[str, float | int | None]
-    ) -> None:
+    def update_risk_settings(self, settings: Mapping[str, float | int | None]) -> None:
         with self._lock:
             cleaned: Dict[str, float | int] = {}
             for key, value in settings.items():
@@ -220,10 +218,7 @@ class RuntimeStateStore:
         with self._lock:
             balances = payload.get("balances")
             if isinstance(balances, Mapping):
-                self._balances = {
-                    str(asset): float(amount)
-                    for asset, amount in balances.items()
-                }
+                self._balances = {str(asset): float(amount) for asset, amount in balances.items()}
             self._equity = float(payload.get("equity", self._equity))
             self._starting_equity = self._coerce_optional_float(
                 payload.get("starting_equity"), self._starting_equity
@@ -242,9 +237,7 @@ class RuntimeStateStore:
                 )
             unrealized = payload.get("unrealized")
             if isinstance(unrealized, Mapping):
-                self._unrealized_pnl_usd = float(
-                    unrealized.get("usd", self._unrealized_pnl_usd)
-                )
+                self._unrealized_pnl_usd = float(unrealized.get("usd", self._unrealized_pnl_usd))
                 self._unrealized_pnl_percent = float(
                     unrealized.get("percent", self._unrealized_pnl_percent)
                 )
@@ -254,9 +247,11 @@ class RuntimeStateStore:
             risk_settings = payload.get("risk_settings")
             if isinstance(risk_settings, Mapping):
                 self._risk_settings = {
-                    str(key): float(value)
-                    if isinstance(value, (int, float))
-                    else self._risk_settings.get(str(key), 0.0)
+                    str(key): (
+                        float(value)
+                        if isinstance(value, (int, float))
+                        else self._risk_settings.get(str(key), 0.0)
+                    )
                     for key, value in risk_settings.items()
                 }
             positions = payload.get("open_positions")
@@ -353,9 +348,7 @@ class RuntimeStateStore:
             return
 
     @staticmethod
-    def _coerce_optional_float(
-        value: object, fallback: float | None
-    ) -> float | None:
+    def _coerce_optional_float(value: object, fallback: float | None) -> float | None:
         if value is None:
             return fallback
         try:

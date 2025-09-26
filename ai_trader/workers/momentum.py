@@ -68,9 +68,7 @@ class MomentumWorker(BaseWorker):
                 "price": last_price,
             }
             if self._ml_service is not None:
-                indicators["ml_confidence"] = self._ml_service.latest_confidence(
-                    symbol, self.name
-                )
+                indicators["ml_confidence"] = self._ml_service.latest_confidence(symbol, self.name)
             self.update_signal_state(symbol, signal, indicators)
             if signal:
                 signals[symbol] = signal
@@ -96,7 +94,10 @@ class MomentumWorker(BaseWorker):
             if risk_triggered:
                 self.update_signal_state(symbol, f"close:{risk_reason}")
                 self.clear_risk_tracker(symbol)
-                payload = {"trigger": risk_reason, **{k: v for k, v in risk_meta.items() if v is not None}}
+                payload = {
+                    "trigger": risk_reason,
+                    **{k: v for k, v in risk_meta.items() if v is not None},
+                }
                 close_side = "sell" if existing_position.side == "buy" else "buy"
                 return TradeIntent(
                     worker=self.name,
@@ -118,7 +119,11 @@ class MomentumWorker(BaseWorker):
                 self.update_signal_state(symbol, "ml-block", {"ml_confidence": confidence})
                 return None
             risk_meta = self.prepare_entry_risk(symbol, signal, price)
-            metadata = {"signal": signal, "price": price, **{k: v for k, v in risk_meta.items() if v is not None}}
+            metadata = {
+                "signal": signal,
+                "price": price,
+                **{k: v for k, v in risk_meta.items() if v is not None},
+            }
             return TradeIntent(
                 worker=self.name,
                 action="OPEN",

@@ -17,7 +17,9 @@ from ai_trader.services.types import MarketSnapshot
 class KrakenWebsocketManager:
     """Maintain live price snapshots from Kraken's public WebSocket."""
 
-    def __init__(self, symbols: List[str], history: int = 120, candle_interval_seconds: int = 60) -> None:
+    def __init__(
+        self, symbols: List[str], history: int = 120, candle_interval_seconds: int = 60
+    ) -> None:
         normalised: list[str] = []
         seen: set[str] = set()
         for candidate in symbols:
@@ -108,9 +110,15 @@ class KrakenWebsocketManager:
         history.append(price)
         now = datetime.utcnow()
         volume_fields = payload.get("v", [None, None])
-        volume_total = float(volume_fields[1]) if isinstance(volume_fields, list) and len(volume_fields) > 1 else 0.0
+        volume_total = (
+            float(volume_fields[1])
+            if isinstance(volume_fields, list) and len(volume_fields) > 1
+            else 0.0
+        )
         previous_total = self._last_volume_totals.get(pair)
-        volume_delta = max(0.0, volume_total - previous_total) if previous_total is not None else 0.0
+        volume_delta = (
+            max(0.0, volume_total - previous_total) if previous_total is not None else 0.0
+        )
         self._last_volume_totals[pair] = volume_total
         self._update_candle(pair, price, volume_delta, now)
 

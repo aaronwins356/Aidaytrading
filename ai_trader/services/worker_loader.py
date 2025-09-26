@@ -46,9 +46,7 @@ class WorkerLoader:
                 module = importlib.import_module(module_name)
                 worker_cls = getattr(module, class_name)
                 kwargs: Dict[str, Any] = {}
-                symbols = self._normalize_symbols(
-                    definition.get("symbols", self._symbols)
-                )
+                symbols = self._normalize_symbols(definition.get("symbols", self._symbols))
                 if not symbols:
                     symbols = list(self._symbols)
                 params = definition.get("parameters", {})
@@ -65,7 +63,9 @@ class WorkerLoader:
                         kwargs[param_name] = shared_services[param_name]
                 worker = worker_cls(**kwargs)
             except Exception as exc:  # pragma: no cover - defensive logging
-                self._logger.exception("Failed to load worker %s (%s): %s", worker_name, dotted_path, exc)
+                self._logger.exception(
+                    "Failed to load worker %s (%s): %s", worker_name, dotted_path, exc
+                )
                 continue
             is_researcher = force_researcher or getattr(worker, "is_researcher", False)
             display_name = str(definition.get("display_name", "")).strip()
@@ -170,9 +170,7 @@ class WorkerLoader:
                 if not isinstance(definition, dict):
                     continue
                 normalized = dict(definition)
-                normalized.setdefault(
-                    "module", "ai_trader.workers.researcher.MarketResearchWorker"
-                )
+                normalized.setdefault("module", "ai_trader.workers.researcher.MarketResearchWorker")
                 normalized.setdefault("enabled", True)
                 existing = definitions.get(worker_name, {})
                 merged = {**normalized, **existing}
@@ -201,9 +199,7 @@ class WorkerLoader:
                 continue
             text = str(candidate).strip().upper()
             if not text or "/" not in text:
-                self._logger.warning(
-                    "Ignoring malformed worker symbol '%s'", candidate
-                )
+                self._logger.warning("Ignoring malformed worker symbol '%s'", candidate)
                 continue
             base, quote = text.split("/", 1)
             if base == "XBT":
@@ -271,9 +267,7 @@ class WorkerLoader:
                     kwargs[param_name] = shared_services[param_name]
             worker = worker_cls(**kwargs)
         except Exception as exc:  # pragma: no cover - defensive logging
-            self._logger.exception(
-                "Failed to inject default MarketResearchWorker: %s", exc
-            )
+            self._logger.exception("Failed to inject default MarketResearchWorker: %s", exc)
             return None
         self._logger.info(
             "Worker %s loaded (%s) [auto-injected]",
@@ -281,4 +275,3 @@ class WorkerLoader:
             definition.get("module"),
         )
         return worker
-

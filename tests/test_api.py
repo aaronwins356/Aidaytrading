@@ -83,7 +83,9 @@ def api_context() -> tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTra
     reset_services(state_file=None)
 
 
-def test_status_endpoint(api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]) -> None:
+def test_status_endpoint(
+    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]
+) -> None:
     client, _, _, _ = api_context
     response = client.get("/status")
     assert response.status_code == 200
@@ -95,7 +97,9 @@ def test_status_endpoint(api_context: tuple[TestClient, RuntimeStateStore, RiskM
     assert payload["last_trade_timestamp"] is not None
 
 
-def test_profit_endpoint(api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]) -> None:
+def test_profit_endpoint(
+    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]
+) -> None:
     client, _, _, _ = api_context
     response = client.get("/profit")
     assert response.status_code == 200
@@ -106,7 +110,9 @@ def test_profit_endpoint(api_context: tuple[TestClient, RuntimeStateStore, RiskM
     assert pytest.approx(payload["total"]["usd"], rel=1e-6) == 17.5
 
 
-def test_trades_endpoint_limit(api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]) -> None:
+def test_trades_endpoint_limit(
+    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]
+) -> None:
     client, _, _, _ = api_context
     response = client.get("/trades", params={"limit": 1})
     assert response.status_code == 200

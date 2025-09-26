@@ -68,7 +68,9 @@ class _DummyWebsocketManager:
         self._snapshot = MarketSnapshot(
             prices={symbol: 100.0},
             history={symbol: [100.0, 101.0, 102.0]},
-            candles={symbol: [{"close": 100.0, "open": 99.5, "high": 101.0, "low": 99.0, "volume": 1.0}]},
+            candles={
+                symbol: [{"close": 100.0, "open": 99.5, "high": 101.0, "low": 99.0, "volume": 1.0}]
+            },
         )
 
     async def start(self) -> None:  # pragma: no cover - trivial
@@ -311,7 +313,13 @@ async def _run_trade_engine(tmp_path) -> None:
     broker = _DummyBroker()
     websocket_manager = _DummyWebsocketManager("BTC/USD")
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
-    risk_manager = RiskManager({"max_drawdown_percent": 50, "daily_loss_limit_percent": 50, "max_position_duration_minutes": 5})
+    risk_manager = RiskManager(
+        {
+            "max_drawdown_percent": 50,
+            "daily_loss_limit_percent": 50,
+            "max_position_duration_minutes": 5,
+        }
+    )
     worker = _TestWorker("BTC/USD", trade_log)
 
     engine = TradeEngine(
@@ -349,11 +357,13 @@ def test_rehydrate_open_positions(tmp_path) -> None:
     broker = _DummyBroker()
     websocket_manager = _DummyWebsocketManager("BTC/USD")
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
-    risk_manager = RiskManager({
-        "max_drawdown_percent": 50,
-        "daily_loss_limit_percent": 50,
-        "max_position_duration_minutes": 5,
-    })
+    risk_manager = RiskManager(
+        {
+            "max_drawdown_percent": 50,
+            "daily_loss_limit_percent": 50,
+            "max_position_duration_minutes": 5,
+        }
+    )
     worker = _TestWorker("BTC/USD", trade_log)
 
     engine = TradeEngine(
@@ -405,7 +415,13 @@ async def _run_short_trade_engine(tmp_path, *, ml_enabled: bool = False) -> None
     broker = _DummyBroker()
     websocket_manager = _DummyWebsocketManager("ETH/USD")
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
-    risk_manager = RiskManager({"max_drawdown_percent": 50, "daily_loss_limit_percent": 50, "max_position_duration_minutes": 5})
+    risk_manager = RiskManager(
+        {
+            "max_drawdown_percent": 50,
+            "daily_loss_limit_percent": 50,
+            "max_position_duration_minutes": 5,
+        }
+    )
     worker = _ShortWorker("ETH/USD", trade_log)
     if ml_enabled:
         worker._ml_service = object()  # type: ignore[attr-defined]
@@ -460,11 +476,13 @@ async def _run_engine_with_worker(
     broker.cash_balance = starting_equity
     websocket_manager = _DummyWebsocketManager("BTC/USD")
     equity_engine = EquityEngine(trade_log, broker.starting_equity)
-    risk_manager = RiskManager({
-        "max_drawdown_percent": 50,
-        "daily_loss_limit_percent": 50,
-        "max_position_duration_minutes": 5,
-    })
+    risk_manager = RiskManager(
+        {
+            "max_drawdown_percent": 50,
+            "daily_loss_limit_percent": 50,
+            "max_position_duration_minutes": 5,
+        }
+    )
     engine = TradeEngine(
         broker=broker,
         websocket_manager=websocket_manager,

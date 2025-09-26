@@ -81,9 +81,9 @@ class TradeLog:
             for row in cursor.fetchall():
                 logged_entry = float(row["entry_price"])
                 logged_cash = float(row["cash_spent"])
-                if math.isclose(logged_entry, float(entry_price), rel_tol=1e-6, abs_tol=1e-6) and math.isclose(
-                    logged_cash, float(cash_spent), rel_tol=1e-6, abs_tol=1e-4
-                ):
+                if math.isclose(
+                    logged_entry, float(entry_price), rel_tol=1e-6, abs_tol=1e-6
+                ) and math.isclose(logged_cash, float(cash_spent), rel_tol=1e-6, abs_tol=1e-4):
                     return True
         return False
 
@@ -151,9 +151,7 @@ class TradeLog:
             )
             conn.commit()
 
-    def backfill_market_feature_label(
-        self, symbol: str, timeframe: str, label: float
-    ) -> None:
+    def backfill_market_feature_label(self, symbol: str, timeframe: str, label: float) -> None:
         """Update the oldest unlabeled feature row once ground truth arrives."""
 
         with self._connect() as conn:
@@ -202,8 +200,6 @@ class TradeLog:
             )
             conn.commit()
 
-
-
     def fetch_latest_account_snapshot(self) -> Dict[str, object] | None:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
@@ -250,7 +246,13 @@ class TradeLog:
             indicators = {**indicators, "ml_warming_up": state.get("ml_warming_up")}
         risk_profile = {
             key: state.get(key)
-            for key in ("position_size_pct", "leverage", "stop_loss_pct", "take_profit_pct", "trailing_stop_pct")
+            for key in (
+                "position_size_pct",
+                "leverage",
+                "stop_loss_pct",
+                "take_profit_pct",
+                "trailing_stop_pct",
+            )
             if state.get(key) is not None
         }
         with self._connect() as conn:
@@ -374,14 +376,16 @@ class MemoryTradeLog:
                 continue
             logged_entry = float(row["entry_price"])
             logged_cash = float(row["cash_spent"])
-            if math.isclose(logged_entry, float(entry_price), rel_tol=1e-6, abs_tol=1e-6) and math.isclose(
-                logged_cash, float(cash_spent), rel_tol=1e-6, abs_tol=1e-4
-            ):
+            if math.isclose(
+                logged_entry, float(entry_price), rel_tol=1e-6, abs_tol=1e-6
+            ) and math.isclose(logged_cash, float(cash_spent), rel_tol=1e-6, abs_tol=1e-4):
                 return True
         return False
 
     def record_equity(self, equity: float, pnl_percent: float, pnl_usd: float) -> None:
-        self._equity_curve.append((datetime.utcnow(), float(equity), float(pnl_percent), float(pnl_usd)))
+        self._equity_curve.append(
+            (datetime.utcnow(), float(equity), float(pnl_percent), float(pnl_usd))
+        )
 
     def fetch_trades(self) -> Iterable[dict[str, object]]:
         return list(reversed(self._trades))
@@ -392,11 +396,13 @@ class MemoryTradeLog:
     def record_market_features(self, payload: Dict[str, object]) -> None:
         self._market_features.append(dict(payload))
 
-    def backfill_market_feature_label(
-        self, symbol: str, timeframe: str, label: float
-    ) -> None:
+    def backfill_market_feature_label(self, symbol: str, timeframe: str, label: float) -> None:
         for row in self._market_features:
-            if row.get("symbol") == symbol and row.get("timeframe") == timeframe and row.get("label") is None:
+            if (
+                row.get("symbol") == symbol
+                and row.get("timeframe") == timeframe
+                and row.get("label") is None
+            ):
                 row["label"] = float(label)
                 return
 

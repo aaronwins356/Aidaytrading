@@ -92,22 +92,16 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):  # pragma: no cover - configuration sanitation
         raise ValueError("ML configuration 'regularization' must be numeric")
     try:
-        ml_cfg["forest_size"] = int(
-            ml_cfg.get("forest_size", _ML_DEFAULTS["forest_size"])
-        )
+        ml_cfg["forest_size"] = int(ml_cfg.get("forest_size", _ML_DEFAULTS["forest_size"]))
     except (TypeError, ValueError):  # pragma: no cover - configuration sanitation
         raise ValueError("ML configuration 'forest_size' must be an integer")
     try:
-        ml_cfg["threshold"] = float(
-            ml_cfg.get("threshold", _ML_DEFAULTS["threshold"])
-        )
+        ml_cfg["threshold"] = float(ml_cfg.get("threshold", _ML_DEFAULTS["threshold"]))
     except (TypeError, ValueError):  # pragma: no cover - configuration sanitation
         raise ValueError("ML configuration 'threshold' must be numeric")
     ml_cfg["ensemble"] = bool(ml_cfg.get("ensemble", True))
     try:
-        ml_cfg["warmup_samples"] = int(
-            ml_cfg.get("warmup_samples", _ML_DEFAULTS["warmup_samples"])
-        )
+        ml_cfg["warmup_samples"] = int(ml_cfg.get("warmup_samples", _ML_DEFAULTS["warmup_samples"]))
     except (TypeError, ValueError):  # pragma: no cover - configuration sanitation
         raise ValueError("ML configuration 'warmup_samples' must be an integer")
 
@@ -144,7 +138,9 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
                 normalised_symbols.append(symbol)
                 seen_symbols.add(symbol)
     elif raw_symbols:
-        logger.warning("Trading symbols must be a sequence; received %s", type(raw_symbols).__name__)
+        logger.warning(
+            "Trading symbols must be a sequence; received %s", type(raw_symbols).__name__
+        )
     trading_cfg["symbols"] = normalised_symbols
     trading_cfg.setdefault("allow_shorting", False)
     trading_cfg["paper_trading"] = bool(trading_cfg.get("paper_trading", True))
@@ -152,12 +148,8 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     trading_cfg["equity_allocation_percent"] = float(
         trading_cfg.get("equity_allocation_percent", 2.0)
     )
-    trading_cfg["paper_starting_equity"] = float(
-        trading_cfg.get("paper_starting_equity", 25000.0)
-    )
-    trading_cfg["max_open_positions"] = int(
-        trading_cfg.get("max_open_positions", 3)
-    )
+    trading_cfg["paper_starting_equity"] = float(trading_cfg.get("paper_starting_equity", 25000.0))
+    trading_cfg["max_open_positions"] = int(trading_cfg.get("max_open_positions", 3))
     min_cash = float(trading_cfg.get("min_cash_per_trade", 10.0))
     max_cash = float(trading_cfg.get("max_cash_per_trade", 20.0))
     # Enforce the $10–$20 sizing policy so strategies cannot accidentally
@@ -176,12 +168,8 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     risk_cfg.setdefault("max_drawdown_percent", 12.0)
     risk_cfg.setdefault("daily_loss_limit_percent", 2.0)
     risk_cfg.setdefault("max_position_duration_minutes", 120)
-    risk_cfg["max_drawdown_percent"] = float(
-        risk_cfg.get("max_drawdown_percent", 12.0)
-    )
-    risk_cfg["daily_loss_limit_percent"] = float(
-        risk_cfg.get("daily_loss_limit_percent", 2.0)
-    )
+    risk_cfg["max_drawdown_percent"] = float(risk_cfg.get("max_drawdown_percent", 12.0))
+    risk_cfg["daily_loss_limit_percent"] = float(risk_cfg.get("daily_loss_limit_percent", 2.0))
     risk_cfg["max_position_duration_minutes"] = float(
         risk_cfg.get("max_position_duration_minutes", 120)
     )

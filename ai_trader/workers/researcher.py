@@ -19,9 +19,7 @@ class MarketResearchWorker(BaseWorker):
     name = "Research Sentinel"
     emoji = "🔬"
     is_researcher = True
-    strategy_brief = (
-        "Streams engineered market features into the ML service so trading bots receive up-to-date confidence scores."
-    )
+    strategy_brief = "Streams engineered market features into the ML service so trading bots receive up-to-date confidence scores."
 
     def __init__(
         self,
@@ -116,9 +114,7 @@ class MarketResearchWorker(BaseWorker):
                             symbol, self.timeframe, float(label)
                         )
                     except Exception as exc:  # noqa: BLE001
-                        self._logger.exception(
-                            "Failed to backfill label for %s: %s", symbol, exc
-                        )
+                        self._logger.exception("Failed to backfill label for %s: %s", symbol, exc)
                     try:
                         self._ml_service.update(
                             symbol,
@@ -162,10 +158,12 @@ class MarketResearchWorker(BaseWorker):
                 )
                 self._forest_warning_emitted = True
             pending_queue = self._pending_features.setdefault(symbol, deque())
-            pending_queue.append({
-                "features": dict(features),
-                "timestamp": snapshot.timestamp,
-            })
+            pending_queue.append(
+                {
+                    "features": dict(features),
+                    "timestamp": snapshot.timestamp,
+                }
+            )
             confidence = 0.0
             try:
                 confidence = self._ml_service.update(
@@ -298,14 +296,22 @@ class MarketResearchWorker(BaseWorker):
 
         last_candle = candles[-1]
         body = float(last_candle.get("close", 0.0)) - float(last_candle.get("open", 0.0))
-        high_low_range = max(float(last_candle.get("high", 0.0)) - float(last_candle.get("low", 0.0)), 1e-8)
-        upper_wick = float(last_candle.get("high", 0.0)) - max(float(last_candle.get("open", 0.0)), float(last_candle.get("close", 0.0)))
-        lower_wick = min(float(last_candle.get("open", 0.0)), float(last_candle.get("close", 0.0))) - float(last_candle.get("low", 0.0))
+        high_low_range = max(
+            float(last_candle.get("high", 0.0)) - float(last_candle.get("low", 0.0)), 1e-8
+        )
+        upper_wick = float(last_candle.get("high", 0.0)) - max(
+            float(last_candle.get("open", 0.0)), float(last_candle.get("close", 0.0))
+        )
+        lower_wick = min(
+            float(last_candle.get("open", 0.0)), float(last_candle.get("close", 0.0))
+        ) - float(last_candle.get("low", 0.0))
         features["body_pct"] = abs(body) / high_low_range
         features["upper_wick_pct"] = max(upper_wick, 0.0) / high_low_range
         features["lower_wick_pct"] = max(lower_wick, 0.0) / high_low_range
         close_price = float(last_candle.get("close", 0.0)) or 1e-8
-        features["wick_close_ratio"] = (max(upper_wick, 0.0) + max(lower_wick, 0.0)) / abs(close_price)
+        features["wick_close_ratio"] = (max(upper_wick, 0.0) + max(lower_wick, 0.0)) / abs(
+            close_price
+        )
         features["range_pct"] = high_low_range / abs(close_price)
 
         features["ema_fast"] = self._ema(closes, 12)
@@ -316,10 +322,22 @@ class MarketResearchWorker(BaseWorker):
         features["macd_hist"] = macd - signal
         features["rsi"] = self._rsi(closes, period=14)
         mean_price = fmean(closes[-30:]) if len(closes) >= 30 else fmean(closes)
-        std_dev = pstdev(closes[-30:]) if len(closes) >= 30 else pstdev(closes) if len(closes) > 1 else 0.0
+        std_dev = (
+            pstdev(closes[-30:])
+            if len(closes) >= 30
+            else pstdev(closes) if len(closes) > 1 else 0.0
+        )
         features["zscore"] = (latest_close - mean_price) / std_dev if std_dev else 0.0
-        features["close_to_high"] = (float(last_candle.get("high", 0.0)) - latest_close) / latest_close if latest_close else 0.0
-        features["close_to_low"] = (latest_close - float(last_candle.get("low", 0.0))) / latest_close if latest_close else 0.0
+        features["close_to_high"] = (
+            (float(last_candle.get("high", 0.0)) - latest_close) / latest_close
+            if latest_close
+            else 0.0
+        )
+        features["close_to_low"] = (
+            (latest_close - float(last_candle.get("low", 0.0))) / latest_close
+            if latest_close
+            else 0.0
+        )
         return features
 
     def _derive_label(self, candles: List[dict[str, float]]) -> Optional[float]:

@@ -182,19 +182,25 @@ class BaseWorker(ABC):
         tracker = self._risk_trackers.setdefault(symbol, {})
         tracker.update({"side": side, "entry_price": entry_price, "best_price": entry_price})
         if stop is None and self.stop_loss_pct:
-            stop = entry_price * (1 - self.stop_loss_pct / 100) if side == "buy" else entry_price * (
-                1 + self.stop_loss_pct / 100
+            stop = (
+                entry_price * (1 - self.stop_loss_pct / 100)
+                if side == "buy"
+                else entry_price * (1 + self.stop_loss_pct / 100)
             )
         tracker["stop_price"] = stop
         if target is None and self.take_profit_pct:
-            target = entry_price * (1 + self.take_profit_pct / 100) if side == "buy" else entry_price * (
-                1 - self.take_profit_pct / 100
+            target = (
+                entry_price * (1 + self.take_profit_pct / 100)
+                if side == "buy"
+                else entry_price * (1 - self.take_profit_pct / 100)
             )
         tracker["target_price"] = target
         trailing: float | None = None
         if self.trailing_stop_pct:
-            trailing = entry_price * (1 - self.trailing_stop_pct / 100) if side == "buy" else entry_price * (
-                1 + self.trailing_stop_pct / 100
+            trailing = (
+                entry_price * (1 - self.trailing_stop_pct / 100)
+                if side == "buy"
+                else entry_price * (1 + self.trailing_stop_pct / 100)
             )
         tracker["trailing_price"] = trailing
         return {
@@ -216,7 +222,9 @@ class BaseWorker(ABC):
         if target is not None:
             tracker["target_price"] = target
 
-    def check_risk_exit(self, symbol: str, price: float) -> tuple[bool, Optional[str], Dict[str, float | None]]:
+    def check_risk_exit(
+        self, symbol: str, price: float
+    ) -> tuple[bool, Optional[str], Dict[str, float | None]]:
         tracker = self._risk_trackers.get(symbol)
         if not tracker:
             return False, None, {}
@@ -284,7 +292,8 @@ class BaseWorker(ABC):
         return {
             key: value
             for key, value in tracker.items()
-            if key in {"stop_price", "target_price", "trailing_price"} and isinstance(value, (int, float))
+            if key in {"stop_price", "target_price", "trailing_price"}
+            and isinstance(value, (int, float))
         }
 
     async def observe(
@@ -349,13 +358,15 @@ class BaseWorker(ABC):
                 symbol,
                 confidence,
                 gate,
-        )
+            )
         return decision, confidence
 
     # ------------------------------------------------------------------
     # Trade log helper
     # ------------------------------------------------------------------
-    def record_trade_event(self, event: str, symbol: str, details: Optional[Dict[str, object]] = None) -> None:
+    def record_trade_event(
+        self, event: str, symbol: str, details: Optional[Dict[str, object]] = None
+    ) -> None:
         """Persist worker-specific events when a trade log is available."""
 
         if self._trade_log is None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -54,9 +54,7 @@ class EnsembleMLWorker(BaseWorker):
     name = "ML Ensemble"
     emoji = "🧠"
     long_only = True
-    strategy_brief = (
-        "Combines logistic regression, random forest, and LSTM forecasts using Sharpe-weighted averaging."
-    )
+    strategy_brief = "Combines logistic regression, random forest, and LSTM forecasts using Sharpe-weighted averaging."
 
     def __init__(
         self,
@@ -290,7 +288,9 @@ class EnsembleMLWorker(BaseWorker):
         sequences, targets = self._build_sequences(X, y, sequence_length)
         if len(sequences) == 0:
             return
-        dataset = TensorDataset(torch.from_numpy(sequences).float(), torch.from_numpy(targets).float())
+        dataset = TensorDataset(
+            torch.from_numpy(sequences).float(), torch.from_numpy(targets).float()
+        )
         loader = DataLoader(dataset, batch_size=min(32, len(dataset)), shuffle=True)
         criterion = nn.BCELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.01)

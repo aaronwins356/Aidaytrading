@@ -17,19 +17,23 @@ def sample_candles() -> List[dict[str, float]]:
         close = price + change
         high = max(price, close) + 0.5
         low = min(price, close) - 0.5
-        candles.append({
-            "open": price,
-            "high": high,
-            "low": low,
-            "close": close,
-            "volume": 5.0,
-        })
+        candles.append(
+            {
+                "open": price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 5.0,
+            }
+        )
         price = close
     return candles
 
 
 def test_feature_generation(sample_candles: List[dict[str, float]]) -> None:
-    worker = EnsembleMLWorker(["BTC/USD"], window_size=80, retrain_interval=15, sequence_length=8, min_history=60)
+    worker = EnsembleMLWorker(
+        ["BTC/USD"], window_size=80, retrain_interval=15, sequence_length=8, min_history=60
+    )
     dataset = worker._build_dataset(sample_candles)  # pylint: disable=protected-access
     assert dataset is not None
     df, _ = dataset
@@ -38,7 +42,9 @@ def test_feature_generation(sample_candles: List[dict[str, float]]) -> None:
 
 
 def test_models_train_and_predict(sample_candles: List[dict[str, float]]) -> None:
-    worker = EnsembleMLWorker(["BTC/USD"], window_size=80, retrain_interval=10, sequence_length=6, min_history=60)
+    worker = EnsembleMLWorker(
+        ["BTC/USD"], window_size=80, retrain_interval=10, sequence_length=6, min_history=60
+    )
     closes = [candle["close"] for candle in sample_candles]
     snapshot = MarketSnapshot(
         prices={"BTC/USD": closes[-1]},
@@ -55,7 +61,9 @@ def test_models_train_and_predict(sample_candles: List[dict[str, float]]) -> Non
 
 
 def test_generate_trade_outputs_intent(sample_candles: List[dict[str, float]]) -> None:
-    worker = EnsembleMLWorker(["BTC/USD"], window_size=80, retrain_interval=10, sequence_length=6, min_history=60)
+    worker = EnsembleMLWorker(
+        ["BTC/USD"], window_size=80, retrain_interval=10, sequence_length=6, min_history=60
+    )
     closes = [candle["close"] for candle in sample_candles]
     snapshot = MarketSnapshot(
         prices={"BTC/USD": closes[-1]},
@@ -65,7 +73,9 @@ def test_generate_trade_outputs_intent(sample_candles: List[dict[str, float]]) -
     asyncio.run(worker.evaluate_signal(snapshot))
 
     async def _open_trade() -> TradeIntent | None:
-        return await worker.generate_trade("BTC/USD", "buy", snapshot, equity_per_trade=50.0, existing_position=None)
+        return await worker.generate_trade(
+            "BTC/USD", "buy", snapshot, equity_per_trade=50.0, existing_position=None
+        )
 
     open_intent = asyncio.run(_open_trade())
     assert open_intent is not None
@@ -78,6 +88,7 @@ def test_generate_trade_outputs_intent(sample_candles: List[dict[str, float]]) -
         entry_price=closes[-2],
         cash_spent=10.0,
     )
+
     async def _close_trade() -> TradeIntent | None:
         return await worker.generate_trade(
             "BTC/USD",
