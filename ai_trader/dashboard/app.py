@@ -266,7 +266,17 @@ def load_equity_curve() -> pd.DataFrame:
 @st.cache_data(ttl=5)
 def load_bot_states() -> pd.DataFrame:
     if not DB_PATH.exists():
-        return pd.DataFrame(columns=["worker", "symbol", "status", "last_signal", "indicators", "risk", "updated_at"])
+        return pd.DataFrame(
+            columns=[
+                "worker",
+                "symbol",
+                "status",
+                "last_signal",
+                "indicators",
+                "risk",
+                "updated_at",
+            ]
+        )
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -339,7 +349,9 @@ def load_trade_events(limit: int = 200) -> pd.DataFrame:
 @st.cache_data(ttl=5)
 def load_market_features(symbol: str, limit: int = 720) -> pd.DataFrame:
     if not DB_PATH.exists():
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "features"])
+        return pd.DataFrame(
+            columns=["timestamp", "open", "high", "low", "close", "volume", "features"]
+        )
     with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql_query(
             """
@@ -386,7 +398,9 @@ def load_ml_predictions(symbol: str, limit: int = 720) -> pd.DataFrame:
 @st.cache_data(ttl=5)
 def load_ml_metrics() -> pd.DataFrame:
     if not DB_PATH.exists():
-        return pd.DataFrame(columns=["timestamp", "symbol", "mode", "precision", "recall", "win_rate", "support"])
+        return pd.DataFrame(
+            columns=["timestamp", "symbol", "mode", "precision", "recall", "win_rate", "support"]
+        )
     with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql_query(
             """
@@ -432,7 +446,11 @@ def render_account_overview(
     account_snapshot: Optional[Dict[str, object]],
 ) -> None:
     st.header("Account Overview")
-    latest_equity = equity_df["equity"].iloc[-1] if not equity_df.empty else config["trading"].get("paper_starting_equity", 0)
+    latest_equity = (
+        equity_df["equity"].iloc[-1]
+        if not equity_df.empty
+        else config["trading"].get("paper_starting_equity", 0)
+    )
     pnl_percent = equity_df["pnl_percent"].iloc[-1] if not equity_df.empty else 0.0
     pnl_usd = equity_df["pnl_usd"].iloc[-1] if not equity_df.empty else 0.0
     starting_equity = config["trading"].get("paper_starting_equity", 0.0)
@@ -445,7 +463,9 @@ def render_account_overview(
 
     if account_snapshot:
         snapshot_time = account_snapshot["timestamp"].strftime("%Y-%m-%d %H:%M:%S UTC")
-        st.caption(f"Equity values update every trading engine cycle | Broker snapshot: {snapshot_time}")
+        st.caption(
+            f"Equity values update every trading engine cycle | Broker snapshot: {snapshot_time}"
+        )
         balances = account_snapshot.get("balances", {})
         if balances:
             cols = st.columns(min(4, len(balances)))
@@ -499,10 +519,7 @@ def render_runtime_status(config: Dict, bot_states: pd.DataFrame, ml_service: ML
         if str(definition.get("module", "")).endswith("researcher.MarketResearchWorker")
     ]
     if research_names:
-        st.caption(
-            "Research bots streaming features: "
-            + ", ".join(sorted(set(research_names)))
-        )
+        st.caption("Research bots streaming features: " + ", ".join(sorted(set(research_names))))
 
     if not bot_states.empty:
         warming = bot_states[bot_states["ml_warming_up"].notnull()]
@@ -513,10 +530,7 @@ def render_runtime_status(config: Dict, bot_states: pd.DataFrame, ml_service: ML
                     "ML gating is still warming up for: "
                     + ", ".join(
                         sorted(
-                            {
-                                f"{row.worker} {row.symbol}"
-                                for row in warming_workers.itertuples()
-                            }
+                            {f"{row.worker} {row.symbol}" for row in warming_workers.itertuples()}
                         )
                     )
                 )
@@ -530,8 +544,7 @@ def render_strategy_pulse(config: Dict, bot_states: pd.DataFrame, ml_service: ML
 
     definitions = config.get("workers", {}).get("definitions", {})
     name_lookup = {
-        _display_name_for_definition(definition): definition
-        for definition in definitions.values()
+        _display_name_for_definition(definition): definition for definition in definitions.values()
     }
 
     rows: List[Dict[str, object]] = []
@@ -543,7 +556,9 @@ def render_strategy_pulse(config: Dict, bot_states: pd.DataFrame, ml_service: ML
         warmup_label = "warming" if warmup_state else "ready"
         indicators: Dict[str, object] = row.indicators or {}
         confidence = indicators.get("ml_confidence")
-        threshold = indicators.get("ml_threshold") or definition.get("parameters", {}).get("ml_threshold")
+        threshold = indicators.get("ml_threshold") or definition.get("parameters", {}).get(
+            "ml_threshold"
+        )
         if confidence is None and row.symbol:
             confidence = ml_service.latest_confidence(row.symbol, worker=row.worker)
         posture = (
@@ -563,8 +578,12 @@ def render_strategy_pulse(config: Dict, bot_states: pd.DataFrame, ml_service: ML
                 "Symbol": row.symbol,
                 "Status": status_label,
                 "Decision": _human_signal(row.last_signal),
-                "ML Confidence": f"{float(confidence):.3f}" if isinstance(confidence, (int, float)) else "–",
-                "ML Gate": f"> {float(threshold):.2f}" if isinstance(threshold, (int, float)) else "auto",
+                "ML Confidence": (
+                    f"{float(confidence):.3f}" if isinstance(confidence, (int, float)) else "–"
+                ),
+                "ML Gate": (
+                    f"> {float(threshold):.2f}" if isinstance(threshold, (int, float)) else "auto"
+                ),
                 "Warmup": warmup_label if warmup_state is not None else "n/a",
                 "Updated": row.updated_at.strftime("%H:%M:%S"),
                 "Posture": posture,
@@ -598,14 +617,11 @@ def render_bot_cards(
 
     definitions = config.get("workers", {}).get("definitions", {})
     name_lookup = {
-        _display_name_for_definition(definition): definition
-        for definition in definitions.values()
+        _display_name_for_definition(definition): definition for definition in definitions.values()
     }
     trading_mode = str(config.get("trading", {}).get("mode", "paper")).lower()
     mode_sentence = (
-        "live trading with the broker"
-        if trading_mode == "live"
-        else "paper simulation mode"
+        "live trading with the broker" if trading_mode == "live" else "paper simulation mode"
     )
 
     def _status_sentence(raw_status: str) -> str:
@@ -623,7 +639,11 @@ def render_bot_cards(
         closed = worker_trades[worker_trades["exit_price"].notna()]
         if closed.empty:
             return "Positions opened, awaiting closes before we can score performance."
-        wins = closed[closed["win_loss"].str.lower() == "win"] if "win_loss" in closed else pd.DataFrame()
+        wins = (
+            closed[closed["win_loss"].str.lower() == "win"]
+            if "win_loss" in closed
+            else pd.DataFrame()
+        )
         win_rate = (len(wins) / len(closed) * 100) if len(closed) else 0.0
         net_pnl = float(closed.get("pnl_usd", pd.Series(dtype=float)).fillna(0.0).sum())
         avg_return = float(closed.get("pnl_percent", pd.Series(dtype=float)).dropna().mean() or 0.0)
@@ -640,17 +660,25 @@ def render_bot_cards(
         symbol = latest_trade.get("symbol", "the market")
         if pd.isna(latest_trade.get("exit_price")):
             entry = float(latest_trade.get("entry_price", 0.0))
-            return (
-                "Opened a long position on {symbol} at ${price:,.2f} on {time}."
-            ).format(symbol=symbol, price=entry, time=action_time)
+            return ("Opened a long position on {symbol} at ${price:,.2f} on {time}.").format(
+                symbol=symbol, price=entry, time=action_time
+            )
         exit_price = float(latest_trade.get("exit_price", 0.0))
         pnl_percent = float(latest_trade.get("pnl_percent", 0.0))
         outcome = str(latest_trade.get("win_loss") or "result").lower()
-        outcome_label = "a win" if outcome == "win" else "a loss" if outcome == "loss" else "an outcome"
+        outcome_label = (
+            "a win" if outcome == "win" else "a loss" if outcome == "loss" else "an outcome"
+        )
         return (
             "Closed the latest {symbol} trade at ${price:,.2f} on {time}, "
             "locking {outcome} of {pnl:.2f}%."
-        ).format(symbol=symbol, price=exit_price, time=action_time, outcome=outcome_label, pnl=pnl_percent)
+        ).format(
+            symbol=symbol,
+            price=exit_price,
+            time=action_time,
+            outcome=outcome_label,
+            pnl=pnl_percent,
+        )
 
     grouped = bot_states.groupby("worker")
     cols = st.columns(2)
@@ -748,7 +776,9 @@ def render_bot_cards(
                 st.markdown(f"Performance snapshot: {_performance_summary(worker_trades)}")
             last_updated = latest.get("updated_at")
             if isinstance(last_updated, pd.Timestamp):
-                timestamp_text = last_updated.tz_convert("UTC") if last_updated.tzinfo else last_updated
+                timestamp_text = (
+                    last_updated.tz_convert("UTC") if last_updated.tzinfo else last_updated
+                )
                 st.caption(f"Last update received at {timestamp_text.strftime('%H:%M:%S UTC')}")
             else:
                 st.caption("Awaiting the first status update from this worker.")
@@ -847,7 +877,9 @@ def render_market_view(symbol: str, trades: pd.DataFrame, ml_service: MLService)
         st.info("Waiting for market data snapshots from the researcher bot.")
         return
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Markers show ▲ long entries and ● exits. The lower panel charts ML confidence feeding each strategy.")
+    st.caption(
+        "Markers show ▲ long entries and ● exits. The lower panel charts ML confidence feeding each strategy."
+    )
     if not confidence_df.empty:
         latest_conf = confidence_df.sort_values("timestamp").iloc[-1]
         st.markdown(
@@ -912,7 +944,9 @@ def render_ml_debug_panel(config: Dict, ml_service: MLService, bot_states: pd.Da
                     }
                     st.json({"confidence": confidence_payload})
                 else:
-                    st.caption("Workers have not published state yet; confidence history unavailable.")
+                    st.caption(
+                        "Workers have not published state yet; confidence history unavailable."
+                    )
 
 
 def render_trade_logs(trades: pd.DataFrame, events: pd.DataFrame) -> None:
@@ -927,7 +961,9 @@ def render_trade_logs(trades: pd.DataFrame, events: pd.DataFrame) -> None:
             worker_filter_key = "trade_logs_worker_filter"
             st.selectbox("Filter by strategy", workers, key=worker_filter_key)
             selected_worker = st.session_state.get(worker_filter_key, workers[0])
-            filtered = trades if selected_worker == "All" else trades[trades["worker"] == selected_worker]
+            filtered = (
+                trades if selected_worker == "All" else trades[trades["worker"] == selected_worker]
+            )
             display_cols = [
                 "timestamp",
                 "worker",
@@ -1089,7 +1125,9 @@ def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> No
             if st.button("Save", key=f"save_{worker_key}"):
                 new_symbols = st.session_state.get(symbol_key, symbols)
                 position_size = float(
-                    st.session_state.get(position_size_key, float(risk.get("position_size_pct", 100.0)))
+                    st.session_state.get(
+                        position_size_key, float(risk.get("position_size_pct", 100.0))
+                    )
                 )
                 leverage = float(
                     st.session_state.get(leverage_key, float(risk.get("leverage", 1.0)))
@@ -1132,7 +1170,12 @@ def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> No
             module_path = definition.get("module", worker_key)
             worker_label = _display_name_for_definition(definition)
             flag_key = f"ml::{worker_label}"
-            enabled = control_flags.get(flag_key, "on").lower() not in {"off", "false", "0", "disabled"}
+            enabled = control_flags.get(flag_key, "on").lower() not in {
+                "off",
+                "false",
+                "0",
+                "disabled",
+            }
             toggle_key = f"ml_gate_{worker_key}"
             initial_toggle = st.session_state.get(toggle_key, enabled)
             cols[idx % len(cols)].toggle(
@@ -1175,7 +1218,9 @@ def render_risk_controls(config: Dict, ml_service: MLService, symbol: str) -> No
     if not metrics_df.empty:
         filtered = metrics_df[metrics_df["symbol"] == selected_symbol]
         if filtered.empty:
-            st.info("No metrics recorded yet for this symbol. Run a backtest to populate statistics.")
+            st.info(
+                "No metrics recorded yet for this symbol. Run a backtest to populate statistics."
+            )
         else:
             st.dataframe(filtered.head(10), use_container_width=True)
     else:

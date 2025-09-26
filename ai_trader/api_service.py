@@ -175,7 +175,9 @@ async def get_trades(limit: int = Query(10, ge=1, le=200)) -> Dict[str, Any]:
     try:
         rows = list(trade_log.fetch_trades())
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+        ) from exc
     trimmed = rows[:limit]
     return {
         "trades": [_format_trade(row) for row in trimmed],

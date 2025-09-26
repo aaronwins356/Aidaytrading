@@ -30,9 +30,7 @@ FeatureMapping = Mapping[str, float]
 
 _MODULE_LOGGER = get_logger(__name__)
 if not _FOREST_AVAILABLE:
-    _MODULE_LOGGER.warning(
-        "river.forest.ARFClassifier unavailable – ML ensemble fallback active"
-    )
+    _MODULE_LOGGER.warning("river.forest.ARFClassifier unavailable – ML ensemble fallback active")
 
 
 @dataclass(slots=True)
@@ -71,9 +69,7 @@ class _ModelBundle:
     def predict_proba(self, features: FeatureMapping) -> float:
         """Return a blended probability using the configured ensemble."""
 
-        logistic_proba = self._probability_from_mapping(
-            self.pipeline.predict_proba_one(features)
-        )
+        logistic_proba = self._probability_from_mapping(self.pipeline.predict_proba_one(features))
         probability = logistic_proba
         if self.forest is not None:
             forest_probability = self._probability_from_mapping(
@@ -100,9 +96,7 @@ class _ModelBundle:
         if limit <= 0:
             return []
         importance = self.feature_importances()
-        ranked = sorted(
-            importance.items(), key=lambda item: abs(item[1]), reverse=True
-        )
+        ranked = sorted(importance.items(), key=lambda item: abs(item[1]), reverse=True)
         return [name for name, _ in ranked[:limit]]
 
 
@@ -143,17 +137,15 @@ class MLService:
         self._threshold = threshold
         self._logger = get_logger(__name__)
         self._ensemble_requested = bool(ensemble)
-        self._forest_backend = (
-            "river.forest.ARFClassifier" if _FOREST_AVAILABLE else None
-        )
+        self._forest_backend = "river.forest.ARFClassifier" if _FOREST_AVAILABLE else None
         self._use_ensemble = self._ensemble_requested and self._forest_backend is not None
         self._forest_size = forest_size
         self._random_state = random_state
         self._models: Dict[str, _ModelBundle] = {}
         self._latest_features: Dict[str, Dict[str, float]] = {}
         self._latest_confidence: Dict[Tuple[str, str], float] = {}
-        self._pending_trades: DefaultDict[tuple[str, str], Deque[_PendingTradeSample]] = defaultdict(
-            lambda: deque(maxlen=25)
+        self._pending_trades: DefaultDict[tuple[str, str], Deque[_PendingTradeSample]] = (
+            defaultdict(lambda: deque(maxlen=25))
         )
         self._pending_trade_warnings: Dict[tuple[str, str], bool] = {}
         self._warmup_target = max(1, int(warmup_target))
@@ -293,11 +285,11 @@ class MLService:
     def _persist_model(self, symbol: str, bundle: _ModelBundle) -> None:
         logistic_blob = pickle.dumps(bundle.pipeline)
         forest_blob = (
-            pickle.dumps(bundle.forest) if bundle.forest is not None and self._use_ensemble else None
+            pickle.dumps(bundle.forest)
+            if bundle.forest is not None and self._use_ensemble
+            else None
         )
-        metadata = json.dumps(
-            {"ensemble": self._use_ensemble, "backend": self._forest_backend}
-        )
+        metadata = json.dumps({"ensemble": self._use_ensemble, "backend": self._forest_backend})
         with self._connect() as conn:
             conn.execute(
                 """
@@ -400,18 +392,14 @@ class MLService:
 
         cleaned = self._sanitize_features(features)
         feature_count = len(cleaned)
-        self._logger.debug(
-            "Received %d engineered features for %s", feature_count, symbol
-        )
+        self._logger.debug("Received %d engineered features for %s", feature_count, symbol)
         self._latest_features[symbol] = cleaned
         model = self._load_model(symbol)
 
         probability = self._predict_probability(symbol, model, cleaned)
         probability = self._apply_confidence_floor(symbol, probability)
         learner_name = (
-            "forest+logistic"
-            if self._use_ensemble and model.forest is not None
-            else "logistic"
+            "forest+logistic" if self._use_ensemble and model.forest is not None else "logistic"
         )
         self._track_confidence_stall(symbol, probability)
         if label is None:
@@ -478,9 +466,7 @@ class MLService:
         model = self._load_model(symbol)
         feature_payload: Mapping[str, float] | None = features or self._latest_features.get(symbol)
         if feature_payload is None:
-            self._logger.warning(
-                "Prediction skipped for %s – no features available yet", symbol
-            )
+            self._logger.warning("Prediction skipped for %s – no features available yet", symbol)
             return False, 0.0
 
         cleaned = self._sanitize_features(feature_payload)
@@ -492,9 +478,7 @@ class MLService:
         self._latest_confidence[(worker_name, symbol)] = probability
         bundle = self._models[symbol]
         learner_name = (
-            "forest+logistic"
-            if self._use_ensemble and bundle.forest is not None
-            else "logistic"
+            "forest+logistic" if self._use_ensemble and bundle.forest is not None else "logistic"
         )
         top_features = bundle.top_features()
         warmup_seen, warmup_target = self.warmup_counts(symbol)
@@ -695,7 +679,9 @@ class MLService:
         sorted_items = sorted(weights.items(), key=lambda item: abs(item[1]), reverse=True)
         return dict(sorted_items[:top_n])
 
-    def confidence_history(self, symbol: str, limit: int = 200) -> list[tuple[datetime, float, str]]:
+    def confidence_history(
+        self, symbol: str, limit: int = 200
+    ) -> list[tuple[datetime, float, str]]:
         """Fetch recent confidence readings for charting."""
 
         with self._connect() as conn:
@@ -711,7 +697,9 @@ class MLService:
             ).fetchall()
         history: list[tuple[datetime, float, str]] = []
         for row in rows:
-            history.append((datetime.fromisoformat(row["timestamp"]), float(row["confidence"]), row["worker"]))
+            history.append(
+                (datetime.fromisoformat(row["timestamp"]), float(row["confidence"]), row["worker"])
+            )
         return list(reversed(history))
 
     def feature_count(self, symbol: str) -> int:
@@ -725,7 +713,6 @@ class MLService:
         if row is None:
             return 0
         return int(row[0] or 0)
-
 
     def warmup_ratio(self, symbol: str) -> float:
         """Return a [0,1] warm-up ratio based on stored feature history."""
@@ -914,6 +901,7 @@ class MLService:
             )
             conn.commit()
 
+
 @dataclass(slots=True)
 class _ClassificationStats:
     """Lightweight container to keep track of classification outcomes."""
@@ -975,4 +963,3 @@ class _ClassificationStats:
         precision = self.precision()
         recall = self.recall()
         return (2 * precision * recall) / (precision + recall) if (precision + recall) else 0.0
-

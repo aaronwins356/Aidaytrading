@@ -11,9 +11,7 @@ def test_normalize_config_maps_deprecated_keys(caplog) -> None:
     """Deprecated ML keys should map to the canonical names with warnings."""
 
     caplog.set_level(logging.WARNING)
-    raw_config = {
-        "ml": {"learning_rate": 0.1, "ensemble_trees": 25, "ensemble_enabled": True}
-    }
+    raw_config = {"ml": {"learning_rate": 0.1, "ensemble_trees": 25, "ensemble_enabled": True}}
     normalised = normalize_config(raw_config)
 
     ml_cfg = normalised["ml"]
@@ -28,9 +26,7 @@ def test_normalize_config_maps_deprecated_keys(caplog) -> None:
 def test_normalize_config_sanitises_symbols() -> None:
     """Trading symbols should be upper-cased, de-duplicated, and XBT normalised."""
 
-    config = {
-        "trading": {"symbols": ["btc/usd", "SOL/USD", "xbt/usd", "ETH/USD", "eth/usd"]}
-    }
+    config = {"trading": {"symbols": ["btc/usd", "SOL/USD", "xbt/usd", "ETH/USD", "eth/usd"]}}
 
     normalised = normalize_config(config)
 

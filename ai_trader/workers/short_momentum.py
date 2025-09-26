@@ -32,7 +32,9 @@ class ShortMomentumWorker(BaseWorker):
     ) -> None:
         self.fast_window = int((config or {}).get("fast_window", 12))
         self.slow_window = int((config or {}).get("slow_window", 48))
-        lookback = max(self.slow_window * 3, int((config or {}).get("lookback", self.slow_window * 3)))
+        lookback = max(
+            self.slow_window * 3, int((config or {}).get("lookback", self.slow_window * 3))
+        )
         super().__init__(
             symbols=symbols,
             lookback=lookback,
@@ -65,7 +67,11 @@ class ShortMomentumWorker(BaseWorker):
             fast = self._ema(history[-self.fast_window * 2 :], self.fast_window)
             slow = self._ema(history[-self.slow_window * 2 :], self.slow_window)
             last_price = history[-1]
-            returns = [math.log(history[idx] / history[idx - 1]) for idx in range(1, len(history)) if history[idx - 1] > 0]
+            returns = [
+                math.log(history[idx] / history[idx - 1])
+                for idx in range(1, len(history))
+                if history[idx - 1] > 0
+            ]
             vol = pstdev(returns[-self.slow_window :]) if len(returns) >= self.slow_window else 0.0
             momentum = slow - fast
             threshold = abs(slow) * self.momentum_threshold

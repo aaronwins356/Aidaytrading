@@ -1,6 +1,5 @@
 """Telegram notifier for live trading alerts and heartbeats."""
 
-
 from __future__ import annotations
 
 import asyncio
@@ -87,7 +86,11 @@ class Notifier:
         lines = [
             f"📈 <b>{verb} {side}</b> {symbol} via <b>{worker}</b>",
             f"Price: <code>{price:,.2f}</code>" if isinstance(price, (int, float)) else None,
-            f"PnL: <code>{pnl_usd:,.2f} USD</code> ({pnl_pct:.2f}%)" if isinstance(pnl_usd, (int, float)) and isinstance(pnl_pct, (int, float)) else None,
+            (
+                f"PnL: <code>{pnl_usd:,.2f} USD</code> ({pnl_pct:.2f}%)"
+                if isinstance(pnl_usd, (int, float)) and isinstance(pnl_pct, (int, float))
+                else None
+            ),
             f"Confidence: {confidence:.2f}" if isinstance(confidence, (int, float)) else None,
             f"Mode: {mode}" if mode else None,
             f"Reason: {reason}" if reason else None,
@@ -126,13 +129,19 @@ class Notifier:
         except Exception as exc:  # noqa: BLE001 - logging only; notifier must not crash loop
             LOGGER.warning("Failed to send Telegram message: %s", exc)
 
-    def _normalize_trade(self, trade: TradeIntent | Mapping[str, object]) -> MutableMapping[str, object]:
+    def _normalize_trade(
+        self, trade: TradeIntent | Mapping[str, object]
+    ) -> MutableMapping[str, object]:
         if isinstance(trade, TradeIntent):
             metadata = dict(trade.metadata or {})
             fill_price = metadata.get("fill_price")
             if fill_price is None:
                 fill_price = trade.exit_price if trade.exit_price else trade.entry_price
-            metadata.setdefault("mode", metadata.get("mode") or ("paper" if trade.cash_spent and trade.cash_spent < 1_000 else "live"))
+            metadata.setdefault(
+                "mode",
+                metadata.get("mode")
+                or ("paper" if trade.cash_spent and trade.cash_spent < 1_000 else "live"),
+            )
             return {
                 "worker": trade.worker,
                 "action": trade.action,
@@ -164,6 +173,7 @@ class Notifier:
             target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
             if target > now:
                 return (target - now).total_seconds()
-        tomorrow = (now + timedelta(days=1)).replace(hour=self.HEARTBEAT_HOURS[0], minute=0, second=0, microsecond=0)
+        tomorrow = (now + timedelta(days=1)).replace(
+            hour=self.HEARTBEAT_HOURS[0], minute=0, second=0, microsecond=0
+        )
         return max((tomorrow - now).total_seconds(), 0.0)
-

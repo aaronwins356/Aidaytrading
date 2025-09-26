@@ -41,11 +41,13 @@ class KrakenClient:
         self._rest_rate_limit = rest_rate_limit
         self._paper_balances: Dict[str, float] = {base_currency: paper_starting_equity}
         self._allow_shorting = allow_shorting
-        self._exchange = ccxt.kraken({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "enableRateLimit": True,
-        })
+        self._exchange = ccxt.kraken(
+            {
+                "apiKey": api_key,
+                "secret": api_secret,
+                "enableRateLimit": True,
+            }
+        )
         self._markets: Dict[str, dict] = {}
         self._starting_equity = paper_starting_equity if paper_trading else 0.0
         self._starting_equity_captured = paper_trading
@@ -65,9 +67,7 @@ class KrakenClient:
         return self._base_currency
 
     async def load_markets(self) -> None:
-        markets = await self._with_retries(
-            self._exchange.load_markets, description="load_markets"
-        )
+        markets = await self._with_retries(self._exchange.load_markets, description="load_markets")
         normalised_markets: Dict[str, dict] = {}
         for symbol, payload in (markets or {}).items():
             canonical = self._normalise_market_symbol(symbol)
@@ -123,9 +123,7 @@ class KrakenClient:
         normalized: List[OpenPosition] = []
         for payload in raw_positions or []:
             if not isinstance(payload, dict):
-                self._logger.debug(
-                    "Skipping non-dict position payload from broker: %s", payload
-                )
+                self._logger.debug("Skipping non-dict position payload from broker: %s", payload)
                 continue
             position = self._normalise_position_payload(payload)
             if position is not None:
@@ -277,7 +275,9 @@ class KrakenClient:
             # true baseline instead of the paper default.
             self._starting_equity = equity
             self._starting_equity_captured = True
-            self._logger.info("Captured live starting equity at %.2f %s", equity, self._base_currency)
+            self._logger.info(
+                "Captured live starting equity at %.2f %s", equity, self._base_currency
+            )
         return equity, balances
 
     def _normalise_balance_asset(self, asset: str) -> str:
@@ -325,9 +325,7 @@ class KrakenClient:
         return adjusted
 
     @staticmethod
-    def _apply_precision(
-        amount: float, precision: int | float | str | None
-    ) -> float:
+    def _apply_precision(amount: float, precision: int | float | str | None) -> float:
         """Round ``amount`` down to the exchange precision or step size.
 
         Kraken (via ccxt) occasionally reports the precision as a fractional step
@@ -466,9 +464,7 @@ class KrakenClient:
         jitter = random.uniform(0, base_delay)
         return min(20.0, base_delay * exponent + jitter)
 
-    def _normalise_position_payload(
-        self, payload: Dict[str, Any]
-    ) -> Optional[OpenPosition]:
+    def _normalise_position_payload(self, payload: Dict[str, Any]) -> Optional[OpenPosition]:
         """Convert a broker payload into an :class:`OpenPosition`.
 
         Kraken exposes multiple position schemas depending on the endpoint used.

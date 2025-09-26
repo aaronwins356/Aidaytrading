@@ -145,7 +145,9 @@ class DummyStreamlit:
     def expander(self, *_args: Any, **_kwargs: Any) -> DummyContext:
         return DummyContext()
 
-    def multiselect(self, _label: str, options: Iterable[Any], default: Iterable[Any] | None = None):
+    def multiselect(
+        self, _label: str, options: Iterable[Any], default: Iterable[Any] | None = None
+    ):
         return list(default) if default is not None else list(options)
 
     def date_input(self, _label: str, value: Any):
@@ -214,10 +216,18 @@ def test_streamlit_dashboard_smoke(tmp_path, monkeypatch) -> None:
 
     dummy_st = DummyStreamlit()
     monkeypatch.setattr(streamlit_app, "st", dummy_st, raising=False)
-    monkeypatch.setattr(streamlit_app, "cache_data", lambda *args, **kwargs: (lambda func: func), raising=False)
+    monkeypatch.setattr(
+        streamlit_app, "cache_data", lambda *args, **kwargs: (lambda func: func), raising=False
+    )
 
     # clear any cached data that may have been initialised with the original paths
-    for fn in (streamlit_app.load_trades, streamlit_app.load_equity_curve, streamlit_app.load_latest_account_snapshot, streamlit_app.load_control_flags, streamlit_app.load_config):
+    for fn in (
+        streamlit_app.load_trades,
+        streamlit_app.load_equity_curve,
+        streamlit_app.load_latest_account_snapshot,
+        streamlit_app.load_control_flags,
+        streamlit_app.load_config,
+    ):
         clear = getattr(fn, "clear", None)
         if callable(clear):
             clear()

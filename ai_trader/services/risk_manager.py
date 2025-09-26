@@ -38,17 +38,13 @@ class RiskConfig:
         return cls(
             max_drawdown_percent=float(payload.get("max_drawdown_percent", 20.0)),
             daily_loss_limit_percent=float(payload.get("daily_loss_limit_percent", 5.0)),
-            max_position_duration_minutes=float(
-                payload.get("max_position_duration_minutes", 240)
-            ),
+            max_position_duration_minutes=float(payload.get("max_position_duration_minutes", 240)),
             risk_per_trade=float(payload.get("risk_per_trade", 0.02)),
             max_open_positions=int(payload.get("max_open_positions", 3)),
             atr_stop_loss_multiplier=float(payload.get("atr_stop_loss_multiplier", 1.5)),
             atr_take_profit_multiplier=float(payload.get("atr_take_profit_multiplier", 2.5)),
             min_trades_per_day=int(payload.get("min_trades_per_day", 30)),
-            confidence_relax_percent=max(
-                0.0, float(payload.get("confidence_relax_percent", 0.1))
-            ),
+            confidence_relax_percent=max(0.0, float(payload.get("confidence_relax_percent", 0.1))),
             atr_period=int(payload.get("atr_period", 14)),
             min_stop_buffer=max(0.0005, float(payload.get("min_stop_buffer", 0.005))),
         )
@@ -188,11 +184,10 @@ class RiskManager:
             return assessment
 
         # Daily drawdown guard using session peak equity
-        if (
-            working_state.daily_peak_equity
-            and working_state.daily_peak_equity > 0.0
-        ):
-            drawdown_pct = (equity - working_state.daily_peak_equity) / working_state.daily_peak_equity * 100
+        if working_state.daily_peak_equity and working_state.daily_peak_equity > 0.0:
+            drawdown_pct = (
+                (equity - working_state.daily_peak_equity) / working_state.daily_peak_equity * 100
+            )
             if drawdown_pct <= -abs(self._config.daily_loss_limit_percent):
                 working_state.halted = True
                 working_state.halt_reason = "daily_loss_limit"
@@ -203,9 +198,7 @@ class RiskManager:
                 return assessment
 
         if intent.action == "OPEN":
-            adjustments = self._apply_position_sizing(
-                intent, equity, price=price, candles=candles
-            )
+            adjustments = self._apply_position_sizing(intent, equity, price=price, candles=candles)
             if adjustments:
                 assessment.adjustments.update(adjustments)
 
@@ -225,8 +218,8 @@ class RiskManager:
         price: float | None = None,
         candles: Sequence[Mapping[str, float]] | None = None,
     ) -> bool:
-        equity_value = float(equity) if equity is not None else float(
-            equity_metrics.get("equity", 0.0)
+        equity_value = (
+            float(equity) if equity is not None else float(equity_metrics.get("equity", 0.0))
         )
         assessment = self.evaluate_trade(
             intent,
@@ -267,7 +260,10 @@ class RiskManager:
         if base_threshold <= 0.0:
             return base_threshold, False
         working_state = self._prepare_state(state, equity=None, now=now)
-        if working_state.trades_today == 0 or working_state.trades_today >= self._config.min_trades_per_day:
+        if (
+            working_state.trades_today == 0
+            or working_state.trades_today >= self._config.min_trades_per_day
+        ):
             return base_threshold, False
         relax_pct = min(0.9, max(0.0, self._config.confidence_relax_percent))
         adjusted = max(0.0, base_threshold * (1.0 - relax_pct))
@@ -378,7 +374,9 @@ class RiskManager:
         }
 
     def _extract_atr(
-        self, metadata: Mapping[str, float | str | bool], candles: Sequence[Mapping[str, float]] | None
+        self,
+        metadata: Mapping[str, float | str | bool],
+        candles: Sequence[Mapping[str, float]] | None,
     ) -> float | None:
         if "atr" in metadata:
             try:
@@ -391,9 +389,7 @@ class RiskManager:
             return None
         return self._compute_atr(candles, period=self._config.atr_period)
 
-    def _resolve_stop_price(
-        self, side: str, entry_price: float, atr: float | None
-    ) -> float:
+    def _resolve_stop_price(self, side: str, entry_price: float, atr: float | None) -> float:
         buffer = entry_price * self._config.min_stop_buffer
         if atr is not None and atr > 0:
             offset = atr * self._config.atr_stop_loss_multiplier
@@ -403,9 +399,7 @@ class RiskManager:
             return max(0.0, entry_price - offset)
         return entry_price + offset
 
-    def _resolve_target_price(
-        self, side: str, entry_price: float, atr: float | None
-    ) -> float:
+    def _resolve_target_price(self, side: str, entry_price: float, atr: float | None) -> float:
         if atr is not None and atr > 0:
             offset = atr * self._config.atr_take_profit_multiplier
         else:
@@ -414,9 +408,7 @@ class RiskManager:
             return entry_price + offset
         return max(0.0, entry_price - offset)
 
-    def _compute_atr(
-        self, candles: Sequence[Mapping[str, float]], *, period: int
-    ) -> float | None:
+    def _compute_atr(self, candles: Sequence[Mapping[str, float]], *, period: int) -> float | None:
         if len(candles) < 2:
             return None
         true_ranges: list[float] = []

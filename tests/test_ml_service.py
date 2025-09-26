@@ -31,9 +31,7 @@ def test_ml_service_prediction_cycle(tmp_path) -> None:
     # Repeat once more to ensure the logistic weights receive multiple updates.
     service.update("BTC/USD", {"f1": 0.8, "f2": 0.2}, label=1.0)
 
-    decision, probability = service.predict(
-        "BTC/USD", {"f1": 0.9, "f2": 0.4}, worker="unit-test"
-    )
+    decision, probability = service.predict("BTC/USD", {"f1": 0.9, "f2": 0.4}, worker="unit-test")
     assert isinstance(decision, bool)
     assert probability > 0.0
 

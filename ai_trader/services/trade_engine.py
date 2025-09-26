@@ -120,9 +120,9 @@ class TradeEngine:
                 cash_spent = float(row["cash_spent"])
                 # Allow small float variance because fills are rounded differently
                 # across Kraken endpoints and historical trade logs.
-                if math.isclose(entry_price, position.entry_price, rel_tol=1e-5, abs_tol=1e-5) and math.isclose(
-                    cash_spent, position.cash_spent, rel_tol=1e-4, abs_tol=1e-4
-                ):
+                if math.isclose(
+                    entry_price, position.entry_price, rel_tol=1e-5, abs_tol=1e-5
+                ) and math.isclose(cash_spent, position.cash_spent, rel_tol=1e-4, abs_tol=1e-4):
                     return row_worker
                 metadata_json = None
                 if hasattr(row, "keys") and "metadata_json" in row.keys():
@@ -260,8 +260,8 @@ class TradeEngine:
                 )
             self._trade_log.record_account_snapshot(normalized_balances, equity)
             equity_per_trade = equity * (self._equity_allocation_percent / 100.0)
-            self._effective_confidence_min, relaxed = self._risk_manager.effective_confidence_threshold(
-                self._trade_confidence_min
+            self._effective_confidence_min, relaxed = (
+                self._risk_manager.effective_confidence_threshold(self._trade_confidence_min)
             )
             if relaxed and self._trade_confidence_min > 0:
                 self._logger.debug(
@@ -310,7 +310,9 @@ class TradeEngine:
                             open_position,
                         )
                     except Exception as exc:  # noqa: BLE001
-                        self._logger.error("Worker %s trade generation failed: %s", worker.name, exc)
+                        self._logger.error(
+                            "Worker %s trade generation failed: %s", worker.name, exc
+                        )
                         continue
                     if intent is None:
                         continue
@@ -336,7 +338,9 @@ class TradeEngine:
                             continue
                         intent = funding_checked
                     if self._kill_switch and intent.action == "OPEN":
-                        self._logger.warning("Kill switch active. Blocking %s intent for %s", worker.name, symbol)
+                        self._logger.warning(
+                            "Kill switch active. Blocking %s intent for %s", worker.name, symbol
+                        )
                         continue
                     assessment = self._risk_manager.evaluate_trade(
                         intent,
@@ -623,9 +627,7 @@ class TradeEngine:
                 exc,
             )
             self._logger.debug("Failed intent payload: %s", intent, exc_info=True)
-            await self._notify_error(
-                f"Order rejected for {intent.symbol} ({intent.side}) — {exc}"
-            )
+            await self._notify_error(f"Order rejected for {intent.symbol} ({intent.side}) — {exc}")
             return
         price = float(price)
         quantity = float(quantity)
@@ -680,7 +682,9 @@ class TradeEngine:
         )
         await self._notify_trade(recorded_intent)
 
-    async def _close_trade(self, intent: TradeIntent, key: Tuple[str, str], position: OpenPosition) -> None:
+    async def _close_trade(
+        self, intent: TradeIntent, key: Tuple[str, str], position: OpenPosition
+    ) -> None:
         mode = "paper" if self._paper_trading else "live"
         self._logger.info(
             "[TRADE] %s submitting CLOSE order for %s qty=%.6f mode=%s",
@@ -716,14 +720,16 @@ class TradeEngine:
         pnl_percent = pnl / position.cash_spent * 100 if position.cash_spent else 0.0
         reason = intent.reason or "exit"
         metadata = dict(intent.metadata or {})
-        metadata.update({
-            "fill_price": price,
-            "fill_quantity": quantity,
-            "mode": mode,
-            "pnl_usd": pnl,
-            "pnl_percent": pnl_percent,
-            "reason": reason,
-        })
+        metadata.update(
+            {
+                "fill_price": price,
+                "fill_quantity": quantity,
+                "mode": mode,
+                "pnl_usd": pnl,
+                "pnl_percent": pnl_percent,
+                "reason": reason,
+            }
+        )
         recorded_intent = TradeIntent(
             worker=intent.worker,
             action="CLOSE",

@@ -82,6 +82,20 @@ When `--parallel-backtest` is enabled, a daemon thread replays historical data w
    streamlit run ai_trader/streamlit_app.py
    ```
 
+
+## QA pipeline
+
+Run the full QA gate locally before opening a pull request. It mirrors the CI pipeline and runs unit, integration, regression, and linting suites.
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+black .
+flake8 .
+python tests/regression/compare_regression.py
+```
+
+The regression step executes the fixed BTC/USDT Jan–Feb 2022 backtest and compares the resulting equity curve to the frozen baseline within a ±0.5% tolerance.
 3. **Run automated tests**
 
    ```bash

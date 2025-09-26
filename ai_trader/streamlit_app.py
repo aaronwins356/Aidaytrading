@@ -26,11 +26,13 @@ except ModuleNotFoundError:  # pragma: no cover - allow running as a script
 if hasattr(st, "cache_data"):
     cache_data = st.cache_data
 else:  # pragma: no cover - fallback for minimal environments
+
     def cache_data(*_args: Any, **_kwargs: Any):
         def decorator(func):
             return func
 
         return decorator
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -64,9 +66,7 @@ def _connect() -> sqlite3.Connection:
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    cursor = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
-    )
+    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
     return cursor.fetchone() is not None
 
 
@@ -75,9 +75,7 @@ def load_trades() -> pd.DataFrame:
     if DB_PATH.exists():
         with _connect() as conn:
             if _table_exists(conn, "trades"):
-                frame = pd.read_sql_query(
-                    "SELECT * FROM trades ORDER BY timestamp DESC", conn
-                )
+                frame = pd.read_sql_query("SELECT * FROM trades ORDER BY timestamp DESC", conn)
                 return _prepare_trades(frame)
     if TRADES_JSON_PATH.exists():
         records = json.loads(TRADES_JSON_PATH.read_text(encoding="utf-8"))
@@ -126,9 +124,7 @@ def load_equity_curve() -> pd.DataFrame:
     if DB_PATH.exists():
         with _connect() as conn:
             if _table_exists(conn, "equity_curve"):
-                frame = pd.read_sql_query(
-                    "SELECT * FROM equity_curve ORDER BY timestamp ASC", conn
-                )
+                frame = pd.read_sql_query("SELECT * FROM equity_curve ORDER BY timestamp ASC", conn)
                 return _prepare_equity(frame)
     if EQUITY_JSON_PATH.exists():
         frame = pd.read_json(EQUITY_JSON_PATH)
@@ -243,14 +239,31 @@ def compute_daily_returns(equity: pd.Series) -> pd.Series:
     return daily.pct_change().dropna()
 
 
-def render_portfolio_overview(trades: pd.DataFrame, equity: pd.DataFrame, account: Dict[str, Any] | None, config: Mapping[str, Any]) -> None:
+def render_portfolio_overview(
+    trades: pd.DataFrame,
+    equity: pd.DataFrame,
+    account: Dict[str, Any] | None,
+    config: Mapping[str, Any],
+) -> None:
     st.subheader("Portfolio Overview")
-    latest_equity = float(equity["equity"].iloc[-1]) if not equity.empty else float(account["equity"]) if account else 0.0
-    starting_equity = float(config.get("trading", {}).get("paper_starting_equity", latest_equity or 0.0))
+    latest_equity = (
+        float(equity["equity"].iloc[-1])
+        if not equity.empty
+        else float(account["equity"]) if account else 0.0
+    )
+    starting_equity = float(
+        config.get("trading", {}).get("paper_starting_equity", latest_equity or 0.0)
+    )
     realized_pnl = float(trades.get("pnl_usd", pd.Series(dtype="float64")).sum())
-    win_trades = trades[trades.get("win_loss") == "win"] if not trades.empty and "win_loss" in trades else pd.DataFrame()
+    win_trades = (
+        trades[trades.get("win_loss") == "win"]
+        if not trades.empty and "win_loss" in trades
+        else pd.DataFrame()
+    )
     win_rate = (len(win_trades) / len(trades) * 100.0) if len(trades) else 0.0
-    drawdown_series = compute_drawdowns(equity["equity"]) if not equity.empty else pd.Series(dtype="float64")
+    drawdown_series = (
+        compute_drawdowns(equity["equity"]) if not equity.empty else pd.Series(dtype="float64")
+    )
     max_drawdown = abs(drawdown_series.min() * 100.0) if not drawdown_series.empty else 0.0
 
     col1, col2, col3, col4 = st.columns(4)
@@ -272,7 +285,9 @@ def render_portfolio_overview(trades: pd.DataFrame, equity: pd.DataFrame, accoun
     )
     st.plotly_chart(equity_fig, use_container_width=True)
 
-    daily_returns = compute_daily_returns(equity["equity"]) if not equity.empty else pd.Series(dtype="float64")
+    daily_returns = (
+        compute_daily_returns(equity["equity"]) if not equity.empty else pd.Series(dtype="float64")
+    )
     histogram = go.Figure()
     if not daily_returns.empty:
         histogram.add_trace(
@@ -361,18 +376,40 @@ def render_trades_log(trades: pd.DataFrame) -> None:
     )
 
 
-def render_risk_controls(control_flags: Mapping[str, str], config: MutableMapping[str, Any]) -> None:
+def render_risk_controls(
+    control_flags: Mapping[str, str], config: MutableMapping[str, Any]
+) -> None:
     st.subheader("Risk Controls")
     risk_cfg = config.setdefault("risk", {})
-    default_stop = float(control_flags.get("global::stop_loss_pct", risk_cfg.get("min_stop_buffer", 0.005) * 100))
+    default_stop = float(
+        control_flags.get("global::stop_loss_pct", risk_cfg.get("min_stop_buffer", 0.005) * 100)
+    )
     default_risk = float(risk_cfg.get("risk_per_trade", 0.02) * 100)
     default_drawdown = float(risk_cfg.get("max_drawdown_percent", 20.0))
-    relax_enabled = control_flags.get("risk::confidence_relax", "on").lower() not in {"off", "false", "0"}
+    relax_enabled = control_flags.get("risk::confidence_relax", "on").lower() not in {
+        "off",
+        "false",
+        "0",
+    }
 
     with st.form("risk_controls"):
-        stop_loss = st.slider("Stop-loss %", min_value=0.1, max_value=5.0, value=round(default_stop, 2), step=0.1)
-        risk_per_trade = st.slider("Risk per trade %", min_value=0.1, max_value=10.0, value=round(default_risk, 2), step=0.1)
-        max_drawdown = st.slider("Max drawdown %", min_value=1.0, max_value=60.0, value=round(default_drawdown, 1), step=0.5)
+        stop_loss = st.slider(
+            "Stop-loss %", min_value=0.1, max_value=5.0, value=round(default_stop, 2), step=0.1
+        )
+        risk_per_trade = st.slider(
+            "Risk per trade %",
+            min_value=0.1,
+            max_value=10.0,
+            value=round(default_risk, 2),
+            step=0.1,
+        )
+        max_drawdown = st.slider(
+            "Max drawdown %",
+            min_value=1.0,
+            max_value=60.0,
+            value=round(default_drawdown, 1),
+            step=0.5,
+        )
         relax_confidence = st.toggle("Relax ML confidence when idle", value=relax_enabled)
         submitted = st.form_submit_button("Apply risk controls")
     if submitted:
@@ -386,7 +423,9 @@ def render_risk_controls(control_flags: Mapping[str, str], config: MutableMappin
         st.success("Risk controls updated.")
 
 
-def render_strategy_manager(control_flags: Mapping[str, str], config: MutableMapping[str, Any]) -> None:
+def render_strategy_manager(
+    control_flags: Mapping[str, str], config: MutableMapping[str, Any]
+) -> None:
     st.subheader("Strategy Manager")
     definitions = (
         config.get("workers", {}).get("definitions", {})
@@ -419,10 +458,14 @@ def render_strategy_manager(control_flags: Mapping[str, str], config: MutableMap
     with st.form("strategy_manager"):
         st.markdown("### Rule-based workers")
         for entry in rule_based:
-            entry["selected"] = st.checkbox(entry["name"], value=entry["enabled"], key=f"rule::{entry['key']}")
+            entry["selected"] = st.checkbox(
+                entry["name"], value=entry["enabled"], key=f"rule::{entry['key']}"
+            )
         st.markdown("### ML-driven workers")
         for entry in ml_based:
-            entry["selected"] = st.checkbox(entry["name"], value=entry["enabled"], key=f"ml::{entry['key']}")
+            entry["selected"] = st.checkbox(
+                entry["name"], value=entry["enabled"], key=f"ml::{entry['key']}"
+            )
         submitted = st.form_submit_button("Update strategies")
     if submitted:
         for entry in entries:
@@ -444,12 +487,14 @@ def render_dashboard() -> None:
     account = load_latest_account_snapshot()
     control_flags = load_control_flags()
 
-    tabs = st.tabs([
-        "Portfolio Overview",
-        "Trades Log",
-        "Risk Controls",
-        "Strategy Manager",
-    ])
+    tabs = st.tabs(
+        [
+            "Portfolio Overview",
+            "Trades Log",
+            "Risk Controls",
+            "Strategy Manager",
+        ]
+    )
 
     with tabs[0]:
         render_portfolio_overview(trades, equity, account, config)

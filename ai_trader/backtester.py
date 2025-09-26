@@ -208,9 +208,7 @@ def load_ohlcv_history(
     timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
     ohlcv: list[dict[str, Any]] = []
 
-    logger.info(
-        "Fetching OHLCV from Kraken via CCXT (%s, timeframe=%s)", pair, timeframe
-    )
+    logger.info("Fetching OHLCV from Kraken via CCXT (%s, timeframe=%s)", pair, timeframe)
     while since <= end_ms:
         try:
             batch = exchange.fetch_ohlcv(pair, timeframe=timeframe, since=since, limit=500)
@@ -286,15 +284,11 @@ class Backtester:
         trading_cfg = self._config.setdefault("trading", {})
         trading_cfg["symbols"] = [self._pair]
         self._starting_equity = float(trading_cfg.get("paper_starting_equity", 10_000.0))
-        self._equity_allocation_percent = float(
-            trading_cfg.get("equity_allocation_percent", 5.0)
-        )
+        self._equity_allocation_percent = float(trading_cfg.get("equity_allocation_percent", 5.0))
         self._max_open_positions = int(
             trading_cfg.get("max_open_positions", trading_cfg.get("max_positions", 3))
         )
-        self._min_cash_per_trade = max(
-            0.0, float(trading_cfg.get("min_cash_per_trade", 10.0))
-        )
+        self._min_cash_per_trade = max(0.0, float(trading_cfg.get("min_cash_per_trade", 10.0)))
         self._max_cash_per_trade = max(
             self._min_cash_per_trade,
             float(trading_cfg.get("max_cash_per_trade", self._starting_equity)),
@@ -316,9 +310,7 @@ class Backtester:
             worker for worker in workers if self._pair in getattr(worker, "symbols", [])
         ]
         self._researchers = [
-            worker
-            for worker in researchers
-            if self._pair in getattr(worker, "symbols", [])
+            worker for worker in researchers if self._pair in getattr(worker, "symbols", [])
         ]
         if not self._workers:
             raise ValueError(
@@ -406,9 +398,7 @@ class Backtester:
         if not self._researchers:
             return
         equity_metrics = self._equity_engine.get_latest_metrics()
-        open_positions = [
-            position.to_open_position() for position in self._open_positions.values()
-        ]
+        open_positions = [position.to_open_position() for position in self._open_positions.values()]
         for researcher in self._researchers:
             try:
                 await researcher.observe(snapshot, equity_metrics, open_positions)
@@ -457,9 +447,7 @@ class Backtester:
                 if intent is None:
                     continue
                 if worker.long_only and intent.action == "OPEN" and intent.side != "buy":
-                    self._logger.debug(
-                        "Skipping short trade for long-only worker %s", worker
-                    )
+                    self._logger.debug("Skipping short trade for long-only worker %s", worker)
                     continue
 
                 assessment = self._risk_manager.evaluate_trade(
@@ -546,7 +534,9 @@ class Backtester:
         self, intent: TradeIntent, timestamp: datetime, position: SimulatedPosition
     ) -> None:
         key = (intent.worker, intent.symbol)
-        fill_price = self._apply_slippage(intent.side, float(intent.exit_price or intent.entry_price))
+        fill_price = self._apply_slippage(
+            intent.side, float(intent.exit_price or intent.entry_price)
+        )
         quantity = position.quantity
         notional = quantity * fill_price
         fee = notional * self._fee_rate
@@ -670,7 +660,9 @@ class Backtester:
             last_price = float(self._candles[-1]["close"]) if self._candles else 0.0
             final_equity = self._cash_balance + self._mark_to_market(last_price)
         net_profit = final_equity - self._starting_equity
-        total_return_pct = (net_profit / self._starting_equity * 100.0) if self._starting_equity else 0.0
+        total_return_pct = (
+            (net_profit / self._starting_equity * 100.0) if self._starting_equity else 0.0
+        )
         max_drawdown = abs(min(self._drawdowns)) * 100.0 if self._drawdowns else 0.0
         returns_array = np.array([r for r in self._returns if math.isfinite(r)])
         sharpe = 0.0
@@ -781,7 +773,10 @@ class Backtester:
         if not self._equity_curve:
             return
         plt.figure(figsize=(10, 4))
-        plt.plot([row["timestamp"] for row in self._equity_curve], [row["equity"] for row in self._equity_curve])
+        plt.plot(
+            [row["timestamp"] for row in self._equity_curve],
+            [row["equity"] for row in self._equity_curve],
+        )
         plt.title(f"Equity Curve – {self._pair}")
         plt.xlabel("Time")
         plt.ylabel("Equity")
@@ -794,7 +789,9 @@ class Backtester:
         if not self._equity_curve:
             return
         plt.figure(figsize=(10, 4))
-        plt.plot([row["timestamp"] for row in self._equity_curve], [dd * 100 for dd in self._drawdowns])
+        plt.plot(
+            [row["timestamp"] for row in self._equity_curve], [dd * 100 for dd in self._drawdowns]
+        )
         plt.title(f"Drawdown Curve – {self._pair}")
         plt.xlabel("Time")
         plt.ylabel("Drawdown (%)")

@@ -67,9 +67,7 @@ class MeanReversionWorker(BaseWorker):
                 "threshold": self.threshold,
             }
             if self._ml_service is not None:
-                indicators["ml_confidence"] = self._ml_service.latest_confidence(
-                    symbol, self.name
-                )
+                indicators["ml_confidence"] = self._ml_service.latest_confidence(symbol, self.name)
             self.update_signal_state(symbol, signal, indicators)
             if signal:
                 signals[symbol] = signal
@@ -94,7 +92,10 @@ class MeanReversionWorker(BaseWorker):
             if risk_triggered:
                 self.update_signal_state(symbol, f"close:{risk_reason}")
                 self.clear_risk_tracker(symbol)
-                payload = {"trigger": risk_reason, **{k: v for k, v in risk_meta.items() if v is not None}}
+                payload = {
+                    "trigger": risk_reason,
+                    **{k: v for k, v in risk_meta.items() if v is not None},
+                }
                 close_side = "sell" if existing_position.side == "buy" else "buy"
                 return TradeIntent(
                     worker=self.name,
@@ -115,7 +116,11 @@ class MeanReversionWorker(BaseWorker):
                 self.update_signal_state(symbol, "ml-block", {"ml_confidence": confidence})
                 return None
             risk_meta = self.prepare_entry_risk(symbol, signal, price)
-            metadata = {"signal": signal, "price": price, **{k: v for k, v in risk_meta.items() if v is not None}}
+            metadata = {
+                "signal": signal,
+                "price": price,
+                **{k: v for k, v in risk_meta.items() if v is not None},
+            }
             cash_value = float(equity_per_trade)
             return TradeIntent(
                 worker=self.name,
@@ -128,7 +133,11 @@ class MeanReversionWorker(BaseWorker):
                 metadata=metadata,
             )
 
-        if signal in {"exit", "sell"} and existing_position is not None and existing_position.side == "buy":
+        if (
+            signal in {"exit", "sell"}
+            and existing_position is not None
+            and existing_position.side == "buy"
+        ):
             pnl = (price - existing_position.entry_price) * existing_position.quantity
             base_cash = float(existing_position.cash_spent)
             pnl_percent = pnl / base_cash * 100 if base_cash else 0.0

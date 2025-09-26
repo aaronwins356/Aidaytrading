@@ -30,7 +30,10 @@ class MLShortWorker(BaseWorker):
     ) -> None:
         self._ml_service = ml_service
         self.feature_lookback = int((config or {}).get("feature_lookback", 30))
-        lookback = max(self.feature_lookback * 2, int((config or {}).get("lookback", self.feature_lookback * 2)))
+        lookback = max(
+            self.feature_lookback * 2,
+            int((config or {}).get("lookback", self.feature_lookback * 2)),
+        )
         super().__init__(
             symbols=symbols,
             lookback=lookback,
@@ -103,7 +106,9 @@ class MLShortWorker(BaseWorker):
             cash = float(equity_per_trade) * (self.position_size_pct / 100)
             if cash <= 0:
                 return None
-            allowed, ml_confidence = self.ml_confirmation(symbol, features=features, threshold=self.threshold)
+            allowed, ml_confidence = self.ml_confirmation(
+                symbol, features=features, threshold=self.threshold
+            )
             if not allowed:
                 self.update_signal_state(symbol, "ml-block", {"ml_confidence": ml_confidence})
                 return None
@@ -172,7 +177,10 @@ class MLShortWorker(BaseWorker):
                 self.record_trade_event(
                     f"close_{reason}",
                     symbol,
-                    {"probability": probability, "confidence": self._last_probabilities.get(symbol, probability)},
+                    {
+                        "probability": probability,
+                        "confidence": self._last_probabilities.get(symbol, probability),
+                    },
                 )
             self.clear_risk_tracker(symbol)
             return TradeIntent(
