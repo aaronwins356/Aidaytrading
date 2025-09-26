@@ -202,6 +202,8 @@ class TradeLog:
             )
             conn.commit()
 
+
+
     def fetch_latest_account_snapshot(self) -> Dict[str, object] | None:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
@@ -334,3 +336,98 @@ class TradeLog:
                 (int(limit),),
             )
             return cursor.fetchall()
+
+
+class MemoryTradeLog:
+    """In-memory drop-in replacement used for dry-run sessions."""
+
+    def __init__(self) -> None:
+        self._trades: list[dict[str, object]] = []
+        self._trade_events: list[dict[str, object]] = []
+        self._bot_states: list[tuple[str, str, dict[str, object]]] = []
+        self._equity_curve: list[tuple[datetime, float, float, float]] = []
+        self._account_snapshots: list[dict[str, object]] = []
+        self._market_features: list[dict[str, object]] = []
+
+    def record_trade(self, trade: TradeIntent) -> None:
+        payload = {
+            "timestamp": trade.created_at.isoformat(),
+            "worker": trade.worker,
+            "symbol": trade.symbol,
+            "side": trade.side,
+            "cash_spent": trade.cash_spent,
+            "entry_price": trade.entry_price,
+            "exit_price": trade.exit_price,
+            "pnl_percent": trade.pnl_percent,
+            "pnl_usd": trade.pnl_usd,
+            "win_loss": trade.win_loss,
+            "reason": trade.reason,
+            "metadata_json": json.dumps(trade.metadata or {}),
+        }
+        self._trades.append(payload)
+
+    def has_trade_entry(
+        self, worker: str, symbol: str, entry_price: float, cash_spent: float
+    ) -> bool:
+        for row in self._trades:
+            if row["worker"] != worker or row["symbol"] != symbol:
+                continue
+            logged_entry = float(row["entry_price"])
+            logged_cash = float(row["cash_spent"])
+            if math.isclose(logged_entry, float(entry_price), rel_tol=1e-6, abs_tol=1e-6) and math.isclose(
+                logged_cash, float(cash_spent), rel_tol=1e-6, abs_tol=1e-4
+            ):
+                return True
+        return False
+
+    def record_equity(self, equity: float, pnl_percent: float, pnl_usd: float) -> None:
+        self._equity_curve.append((datetime.utcnow(), float(equity), float(pnl_percent), float(pnl_usd)))
+
+    def fetch_trades(self) -> Iterable[dict[str, object]]:
+        return list(reversed(self._trades))
+
+    def fetch_equity_curve(self) -> Iterable[tuple]:
+        return list(self._equity_curve)
+
+    def record_market_features(self, payload: Dict[str, object]) -> None:
+        self._market_features.append(dict(payload))
+
+    def backfill_market_feature_label(
+        self, symbol: str, timeframe: str, label: float
+    ) -> None:
+        for row in self._market_features:
+            if row.get("symbol") == symbol and row.get("timeframe") == timeframe and row.get("label") is None:
+                row["label"] = float(label)
+                return
+
+    def fetch_market_features(self, symbol: str, limit: int = 500) -> Iterable[dict[str, object]]:
+        rows = [row for row in self._market_features if row.get("symbol") == symbol]
+        return list(reversed(rows[-limit:]))
+
+    def record_account_snapshot(self, balances: Dict[str, float], equity: float) -> None:
+        snapshot = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "equity": float(equity),
+            "balances": dict(balances),
+        }
+        self._account_snapshots.append(snapshot)
+
+    def record_trade_event(
+        self,
+        worker: str,
+        symbol: str,
+        event: str,
+        details: Dict[str, object],
+    ) -> None:
+        self._trade_events.append(
+            {
+                "timestamp": datetime.utcnow().isoformat(),
+                "worker": worker,
+                "symbol": symbol,
+                "event": event,
+                "details": dict(details),
+            }
+        )
+
+    def record_bot_state(self, worker: str, symbol: str, state: Dict[str, object]) -> None:
+        self._bot_states.append((worker, symbol, dict(state)))

@@ -1,62 +1,70 @@
 kraken:
-  api_key: ''
-  api_secret: ''
+  api_key: ""
+  api_secret: ""
   rest_rate_limit: 0.5
+
 trading:
   base_currency: USD
   symbols:
-  - BTC/USD
-  - ETH/USD
-  - SOL/USD
+    - BTC/USD
+    - ETH/USD
+    - SOL/USD
   equity_allocation_percent: 10.0
   max_open_positions: 2
   paper_trading: true
   paper_starting_equity: 200.0
   allow_shorting: false
-min_cash_per_trade: 5.0
- max_cash_per_trade: 10.0
-  trade_confidence_min:   0.6
+  min_cash_per_trade: 5.0
+  max_cash_per_trade: 10.0
+  trade_confidence_min: 0.6
   mode: live
-    trade_fee_percent: 0.0026
+  trade_fee_percent: 0.0026
   min_order_value: 10.0
+
 risk:
   max_drawdown_percent: 20.0
-    daily_loss_limit_percent: 5.0
+  daily_loss_limit_percent: 5.0
   max_position_duration_minutes: 240
+  risk_per_trade: 0.02
+  max_open_positions: 3
+  min_trades_per_day: 30
+  confidence_relax_percent: 0.1
+  atr_stop_loss_multiplier: 1.5
+  atr_take_profit_multiplier: 2.5
+  atr_period: 14
+  min_stop_buffer: 0.005
   telegram:
-      enabled: true
-      bot_token: ''
-      chat_id: ''
-      heartbeat_hours: 6
-
-
+    enabled: true
+    bot_token: ""
+    chat_id: ""
+    heartbeat_hours: 6
 
 ml:
   feature_keys:
-  - momentum_1
-  - momentum_3
-  - momentum_5
-  - momentum_10
-  - rolling_volatility
-  - atr
-  - volume_delta
-  - volume_ratio
-  - volume_ratio_3
-  - volume_ratio_10
-  - body_pct
-  - upper_wick_pct
-  - lower_wick_pct
-  - wick_close_ratio
-  - range_pct
-  - ema_fast
-  - ema_slow
-  - macd
-  - macd_hist
-  - rsi
-  - zscore
-  - close_to_high
-  - close_to_low
-  lr: 0.23
+    - momentum_1
+    - momentum_3
+    - momentum_5
+    - momentum_10
+    - rolling_volatility
+    - atr
+    - volume_delta
+    - volume_ratio
+    - volume_ratio_3
+    - volume_ratio_10
+    - body_pct
+    - upper_wick_pct
+    - lower_wick_pct
+    - wick_close_ratio
+    - range_pct
+    - ema_fast
+    - ema_slow
+    - macd
+    - macd_hist
+    - rsi
+    - zscore
+    - close_to_high
+    - close_to_low
+  learning_rate: 0.23
   regularization: 0.0005
   threshold: 0.35
   ensemble: true
@@ -64,6 +72,7 @@ ml:
   random_state: 7
   warmup_samples: 25
   enabled: true
+
 workers:
   refresh_interval_seconds: 15
   definitions:
@@ -71,9 +80,9 @@ workers:
       module: ai_trader.workers.momentum.MomentumWorker
       enabled: true
       display_name: BTC Momentum Scout
-      emoji: "\u26A1"
+      emoji: "⚡"
       symbols:
-      - BTC/USD
+        - BTC/USD
       parameters:
         fast_window: 10
         slow_window: 30
@@ -89,9 +98,9 @@ workers:
       module: ai_trader.workers.mean_reversion.MeanReversionWorker
       enabled: true
       display_name: BTC Mean Reverter
-      emoji: "\U0001F504"
+      emoji: "🔄"
       symbols:
-      - BTC/USD
+        - BTC/USD
       parameters:
         window: 28
         threshold: 0.012
@@ -107,9 +116,9 @@ workers:
       module: ai_trader.workers.momentum.MomentumWorker
       enabled: true
       display_name: ETH Momentum Scout
-      emoji: "\u26A1"
+      emoji: "⚡"
       symbols:
-      - ETH/USD
+        - ETH/USD
       parameters:
         fast_window: 9
         slow_window: 27
@@ -125,9 +134,9 @@ workers:
       module: ai_trader.workers.mean_reversion.MeanReversionWorker
       enabled: true
       display_name: ETH Mean Reverter
-      emoji: "\U0001F501"
+      emoji: "🔁"
       symbols:
-      - ETH/USD
+        - ETH/USD
       parameters:
         window: 26
         threshold: 0.013
@@ -143,9 +152,9 @@ workers:
       module: ai_trader.workers.momentum.MomentumWorker
       enabled: true
       display_name: SOL Momentum Scout
-      emoji: "\u26A1"
+      emoji: "⚡"
       symbols:
-      - SOL/USD
+        - SOL/USD
       parameters:
         fast_window: 8
         slow_window: 24
@@ -161,9 +170,9 @@ workers:
       module: ai_trader.workers.mean_reversion.MeanReversionWorker
       enabled: true
       display_name: SOL Mean Reverter
-      emoji: "\U0001F501"
+      emoji: "🔁"
       symbols:
-      - SOL/USD
+        - SOL/USD
       parameters:
         window: 24
         threshold: 0.018
@@ -175,66 +184,31 @@ workers:
         stop_loss_pct: 1.4
         take_profit_pct: 2.8
         trailing_stop_pct: 1.0
-    research_btc:
-      module: ai_trader.workers.researcher.MarketResearchWorker
-      enabled: true
-      display_name: Research Sentinel (BTC)
-      emoji: "\U0001F52C"
+    ml_ensemble:
+      module: ai_trader.workers.ml_ensemble_worker.EnsembleMLWorker
+      enabled: false
+      display_name: ML Ensemble
+      emoji: "🧠"
       symbols:
-      - BTC/USD
+        - BTC/USD
       parameters:
-        warmup_candles: 2
-        feature_windows:
-        - 5
-        - 14
-        - 30
-        timeframe: 1m
-        log_every_n_snapshots: 1
-        volatility_window: 20
-        ohlc_window: 20
-    research_eth:
-      module: ai_trader.workers.researcher.MarketResearchWorker
-      enabled: true
-      display_name: Research Sentinel (ETH)
-      emoji: "\U0001F52C"
-      symbols:
-      - ETH/USD
-      parameters:
-        warmup_candles: 2
-        feature_windows:
-        - 5
-        - 14
-        - 30
-        timeframe: 1m
-        log_every_n_snapshots: 1
-        volatility_window: 20
-        ohlc_window: 20
-    research_sol:
-      module: ai_trader.workers.researcher.MarketResearchWorker
-      enabled: true
-      display_name: Research Sentinel (SOL)
-      emoji: "\U0001F52C"
-      symbols:
-      - SOL/USD
-      parameters:
-        warmup_candles: 2
-        feature_windows:
-        - 5
-        - 14
-        - 30
-        timeframe: 1m
-        log_every_n_snapshots: 1
-        volatility_window: 20
-        ohlc_window: 20
-dashboard:
-  host: 0.0.0.0
-  port: 8501
-  refresh_interval_seconds: 5
-  default_symbol: BTC/USD
+        window_size: 160
+        retrain_interval: 20
+        sequence_length: 12
+        min_history: 90
+
 researcher:
   enabled: true
+  module: ai_trader.workers.researcher.MarketResearchWorker
   symbols:
-  - BTC/USD
-  - ETH/USD
-  - SOL/USD
-  save_snapshots: true
+    - BTC/USD
+  parameters:
+    warmup_candles: 2
+    feature_windows:
+      - 5
+      - 14
+      - 30
+    timeframe: 1m
+    log_every_n_snapshots: 1
+    volatility_window: 20
+    ohlc_window: 20

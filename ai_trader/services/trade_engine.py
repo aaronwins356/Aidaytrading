@@ -73,6 +73,7 @@ class TradeEngine:
         self._min_cash_per_trade = max(0.0, float(min_cash_per_trade))
         self._max_cash_per_trade = max(self._min_cash_per_trade, float(max_cash_per_trade))
         self._trade_confidence_min = max(0.0, min(1.0, float(trade_confidence_min)))
+        self._effective_confidence_min: float = self._trade_confidence_min
         self._base_currency = getattr(broker, "base_currency", "USD")
 
     async def rehydrate_open_positions(self, positions: Iterable[OpenPosition]) -> None:
@@ -238,6 +239,15 @@ class TradeEngine:
             equity_metrics = self._equity_engine.get_latest_metrics()
             self._trade_log.record_account_snapshot(normalized_balances, equity)
             equity_per_trade = equity * (self._equity_allocation_percent / 100.0)
+            self._effective_confidence_min, relaxed = self._risk_manager.effective_confidence_threshold(
+                self._trade_confidence_min
+            )
+            if relaxed and self._trade_confidence_min > 0:
+                self._logger.debug(
+                    "[RISK] Confidence threshold relaxed from %.3f to %.3f due to low trade count",
+                    self._trade_confidence_min,
+                    self._effective_confidence_min,
+                )
             await self._run_researchers(snapshot, equity_metrics)
             self._update_control_flags()
 
@@ -283,20 +293,20 @@ class TradeEngine:
                         continue
                     if intent is None:
                         continue
-                    intent = self._apply_trade_size_bounds(intent)
                     if self._violates_long_only(worker, intent, open_position):
                         continue
+                    threshold = self._effective_confidence_min
                     if (
                         intent.action == "OPEN"
-                        and self._trade_confidence_min > 0.0
+                        and threshold > 0.0
                         and self._is_ml_worker(worker)
-                        and float(intent.confidence) < self._trade_confidence_min
+                        and float(intent.confidence) < threshold
                     ):
                         self._logger.info(
                             "[ML] Skipped low-confidence trade (symbol=%s, confidence=%.3f < threshold=%.3f)",
                             intent.symbol,
                             float(intent.confidence),
-                            self._trade_confidence_min,
+                            threshold,
                         )
                         continue
                     if intent.action == "OPEN":
@@ -307,14 +317,33 @@ class TradeEngine:
                     if self._kill_switch and intent.action == "OPEN":
                         self._logger.warning("Kill switch active. Blocking %s intent for %s", worker.name, symbol)
                         continue
-                    if not self._risk_manager.check_trade(
+                    assessment = self._risk_manager.evaluate_trade(
                         intent,
-                        equity_metrics,
-                        len(self._open_positions),
-                        self._max_open_positions,
-                    ):
-                        self._logger.warning("Risk manager blocked %s trade for %s", worker.name, symbol)
+                        equity=equity,
+                        equity_metrics=equity_metrics,
+                        open_positions=len(self._open_positions),
+                        max_open_positions=self._max_open_positions,
+                        price=snapshot.prices.get(intent.symbol),
+                        candles=snapshot.candles.get(intent.symbol),
+                    )
+                    intent = assessment.intent
+                    if not assessment.allowed:
+                        reason = assessment.reason or "risk_block"
+                        self._logger.warning(
+                            "[RISK] Blocked %s trade for %s (%s)",
+                            worker.name,
+                            symbol,
+                            reason,
+                        )
                         continue
+                    if assessment.adjustments:
+                        self._logger.info(
+                            "[RISK] Adjusted %s trade for %s -> %s",
+                            worker.name,
+                            symbol,
+                            assessment.adjustments,
+                        )
+                    intent = self._apply_trade_size_bounds(intent)
                     await self._execute_intent(intent, key, open_position)
 
             await self._enforce_position_duration(snapshot)
@@ -607,6 +636,7 @@ class TradeEngine:
                 "mode": mode,
             },
         )
+        self._risk_manager.on_trade_executed(recorded_intent)
         self._record_ml_trade_open(recorded_intent, price, quantity)
         self._logger.info(
             "[TRADE] %s opened %s %s @ %.2f qty=%.6f cash=%.2f",
@@ -692,6 +722,7 @@ class TradeEngine:
             pnl_percent,
             reason,
         )
+        self._risk_manager.on_trade_executed(recorded_intent)
         if reason in {"stop", "target", "trail", "mean-hit", "prob-revert", "prob-floor"}:
             self._logger.info(
                 "[TRADE] Risk exit triggered for %s on %s (%s)",
