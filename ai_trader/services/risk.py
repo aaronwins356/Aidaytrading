@@ -1,4 +1,4 @@
-"""Risk management utilities."""
+"""Risk management utilities with tuned default risk limits for moderate returns."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ class RiskManager:
     """Evaluate trades against configurable risk rules."""
 
     def __init__(self, config: Dict[str, float]) -> None:
-        self._max_drawdown = float(config.get("max_drawdown_percent", 25.0))
+           self._max_drawdown = float(config.get("max_drawdown_percent", 20.0))
         self._daily_loss_limit = float(config.get("daily_loss_limit_percent", 5.0))
         self._max_duration_minutes = float(config.get("max_position_duration_minutes", 240))
         self._daily_anchor = datetime.utcnow().date()
