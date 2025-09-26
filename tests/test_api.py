@@ -26,7 +26,7 @@ def api_context() -> tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTra
     )
     runtime_state.set_base_currency("USD")
     runtime_state.set_starting_equity(1000.0)
-    runtime_state.update_risk_settings(risk_manager.config_dict())
+    runtime_state.update_risk_settings(risk_manager.config_dict(), revision=0)
     attach_services(trade_log=trade_log, runtime_state=runtime_state, risk_manager=risk_manager)
 
     # Seed trade history for the API responses.
@@ -137,6 +137,8 @@ def test_config_updates_risk_settings(
     payload = response.json()
     assert pytest.approx(payload["config"]["risk_per_trade"], rel=1e-6) == 0.05
     assert pytest.approx(risk_manager.config_dict()["risk_per_trade"], rel=1e-6) == 0.05
+    assert payload["revision"] >= 1
     risk_snapshot = runtime_state.risk_snapshot()
     assert pytest.approx(risk_snapshot["risk_per_trade"], rel=1e-6) == 0.05
     assert pytest.approx(risk_snapshot["max_drawdown_percent"], rel=1e-6) == 15.0
+    assert risk_snapshot["revision"] == payload["revision"]

@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Mapping, Optional
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 from ai_trader.services.schema import TRADE_LOG_TABLES
 from ai_trader.services.types import TradeIntent
@@ -277,6 +277,47 @@ class TradeLog:
                 continue
         return None
 
+    def record_risk_settings(
+        self, settings: Mapping[str, object], *, revision: int | None = None
+    ) -> int:
+        """Persist the provided risk settings and return the applied revision."""
+
+        payload = json.dumps(dict(settings))
+        with self._connect() as conn:
+            if revision is None:
+                cursor = conn.execute("SELECT COALESCE(MAX(revision), 0) FROM risk_settings")
+                row = cursor.fetchone()
+                latest_revision = int(row[0]) if row and row[0] is not None else 0
+                revision = latest_revision + 1
+            conn.execute(
+                """
+                INSERT INTO risk_settings(revision, settings_json, updated_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(revision) DO UPDATE SET
+                    settings_json = excluded.settings_json,
+                    updated_at = excluded.updated_at
+                """,
+                (revision, payload, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+        return revision
+
+    def fetch_latest_risk_settings(self) -> Optional[Tuple[int, Dict[str, object]]]:
+        """Return the most recent risk settings revision, if any."""
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT revision, settings_json FROM risk_settings ORDER BY revision DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            settings = json.loads(row["settings_json"])
+        except (TypeError, ValueError):
+            settings = {}
+        return int(row["revision"]), dict(settings)
+
     def record_bot_state(self, worker: str, symbol: str, state: Dict[str, object]) -> None:
         """Store a bot's runtime state for dashboard consumption."""
 
@@ -389,6 +430,7 @@ class MemoryTradeLog:
         self._equity_curve: list[tuple[datetime, float, float, float]] = []
         self._account_snapshots: list[dict[str, object]] = []
         self._market_features: list[dict[str, object]] = []
+        self._risk_settings: list[tuple[int, dict[str, object]]] = []
 
     def record_trade(self, trade: TradeIntent) -> None:
         payload = {
@@ -461,6 +503,23 @@ class MemoryTradeLog:
             "balances": dict(balances),
         }
         self._account_snapshots.append(snapshot)
+
+    def record_risk_settings(
+        self, settings: Mapping[str, object], *, revision: int | None = None
+    ) -> int:
+        payload = dict(settings)
+        if revision is None:
+            revision = self._risk_settings[-1][0] + 1 if self._risk_settings else 1
+        else:
+            revision = int(revision)
+        self._risk_settings.append((revision, payload))
+        return revision
+
+    def fetch_latest_risk_settings(self) -> Optional[Tuple[int, Dict[str, object]]]:
+        if not self._risk_settings:
+            return None
+        revision, payload = self._risk_settings[-1]
+        return revision, dict(payload)
 
     def record_trade_event(
         self,

@@ -83,6 +83,14 @@ TRADE_LOG_TABLES: Dict[str, str] = OrderedDict(
                 updated_at TEXT NOT NULL
             )
         """,
+        "risk_settings": """
+            CREATE TABLE IF NOT EXISTS risk_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                revision INTEGER NOT NULL UNIQUE,
+                settings_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """,
         "trade_events": """
             CREATE TABLE IF NOT EXISTS trade_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
