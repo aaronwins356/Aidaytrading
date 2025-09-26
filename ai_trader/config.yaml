@@ -17,10 +17,20 @@ min_cash_per_trade: 5.0
  max_cash_per_trade: 10.0
   trade_confidence_min:   0.6
   mode: live
+    trade_fee_percent: 0.0026
+  min_order_value: 10.0
 risk:
   max_drawdown_percent: 20.0
     daily_loss_limit_percent: 5.0
-    max_position_duration_minutes: 240
+  max_position_duration_minutes: 240
+  telegram:
+      enabled: true
+      bot_token: ''
+      chat_id: ''
+      heartbeat_hours: 6
+
+
+
 ml:
   feature_keys:
   - momentum_1
