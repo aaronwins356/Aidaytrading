@@ -53,6 +53,38 @@ Double-click any of the provided batch files from Explorer:
 
 Each script pauses at the end so you can review logs before closing the console window.
 
+## Containerised deployment
+
+Build a reproducible runtime image and orchestrate the trading bot, FastAPI service, and Streamlit dashboard with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+The compose file provisions three services that share the SQLite database via the `trader_state` volume:
+
+- **`trader`** – default entrypoint (`python -m ai_trader.main --mode live`).
+- **`api`** – FastAPI monitoring service exposed on port `8000`.
+- **`dashboard`** – Streamlit dashboard exposed on port `8501`.
+
+SQLite artefacts and runtime state are mounted at `/app/ai_trader/data`, so all services read and write the same ledger. Override image commands or environment variables per service as needed for your deployment target.
+
+## Dependency tiers
+
+Dependencies are split to keep production images light:
+
+- `requirements-core.txt` – FastAPI, Streamlit, ccxt, and other runtime essentials.
+- `requirements-ml.txt` – optional heavy ML stack (`torch`, `scikit-learn`, `river`).
+- `requirements-dev.txt` – formatting, linting, pytest, and HTTP client tooling.
+
+Install only the layers you need, or pull everything for full test coverage:
+
+```bash
+pip install -r requirements-core.txt      # minimal runtime footprint
+pip install -r requirements-ml.txt        # enable ML workers & backtests
+pip install -r requirements-dev.txt       # linting + pytest utilities
+```
+
 ## Manual Commands
 
 ### Run the trading loop
@@ -95,6 +127,17 @@ python -m ai_trader.main --mode api --config configs/config.yaml
 Use `AI_TRADER_API_HOST`, `AI_TRADER_API_PORT`, and `AI_TRADER_API_RELOAD` to customise the server without editing YAML.
 
 The API exposes `/ml-metrics` to retrieve the latest walk-forward validation snapshot (accuracy, reward, support, and confidence) for each symbol.
+
+Operational metrics for Prometheus are exported via `/metrics` (text format). Exposed gauges include:
+
+- `trader_equity_total`
+- `trader_open_positions`
+- `trader_max_drawdown_percent`
+- `trader_watchdog_last_update_age_seconds`
+- `trader_ml_validation_accuracy`
+- `trader_websocket_reconnect_total`
+
+Point Prometheus or any compatible scraper at `http://<api-host>:8000/metrics` to populate dashboards.
 
 ### Runtime watchdog & telemetry
 
@@ -144,20 +187,33 @@ An asynchronous task spins up a shared `Backtester` instance on a background thr
 
 No artefacts are written to disk; everything is rendered in-memory inside Streamlit.
 
+## Regression backtests
+
+Deterministic seven-day backtests guard against strategy drift. Baselines live in [`tests/regression/baselines/`](tests/regression/baselines/) and cover BTC/USDT and ETH/USDT pairs with fixed seeds. Run the suite locally with:
+
+```bash
+pytest tests/regression -q
+```
+
+CI executes the same tests and fails if equity, PnL, or the equity curve deviates by more than 1% from the stored baselines.
+
 ## QA Pipeline
 
 The CI workflow (`.github/workflows/qa.yml`) installs runtime + dev dependencies, then runs:
 
-1. `flake8 . --max-line-length=100 --exclude=.venv`
-2. `black --check .`
-3. `pytest -q --maxfail=1 --disable-warnings --timeout=20`
+1. `docker build --target runtime -t aidaytrading:ci .`
+2. `flake8 . --max-line-length=100 --exclude=.venv`
+3. `black --check .`
+4. `pytest -q --maxfail=1 --disable-warnings --timeout=20`
 
 Run the same steps locally before opening a pull request:
 
 ```bash
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-core.txt
+pip install -r requirements-ml.txt
 pip install -r requirements-dev.txt
+docker build --target runtime -t aidaytrading:ci .
 flake8 . --max-line-length=100 --exclude=.venv
 black --check .
 pytest -q --maxfail=1 --disable-warnings --timeout=20
@@ -169,7 +225,7 @@ pytest -q --maxfail=1 --disable-warnings --timeout=20
 - Kraken account (live trading)
 - Optional: Telegram bot token + chat ID for notifications
 
-See [`requirements.txt`](requirements.txt) for the full dependency list.
+See [`requirements-core.txt`](requirements-core.txt) and [`requirements-ml.txt`](requirements-ml.txt) for pinned runtime dependencies.
 
 ## Disclaimer
 

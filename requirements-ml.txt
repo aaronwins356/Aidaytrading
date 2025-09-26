@@ -1,0 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+scikit-learn==1.4.2
+torch==2.2.2+cpu
+river==0.17.0

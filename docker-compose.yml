@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  trader:
+    build:
+      context: .
+      target: runtime
+    image: aidaytrading:latest
+    command: ["python", "-m", "ai_trader.main", "--mode", "live", "--config", "configs/config.yaml"]
+    volumes:
+      - trader_state:/app/ai_trader/data
+    environment:
+      PYTHONUNBUFFERED: "1"
+
+  api:
+    image: aidaytrading:latest
+    depends_on:
+      - trader
+    command: ["uvicorn", "ai_trader.api_service:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - trader_state:/app/ai_trader/data
+
+  dashboard:
+    image: aidaytrading:latest
+    depends_on:
+      - trader
+      - api
+    command:
+      - streamlit
+      - run
+      - ai_trader/streamlit_app.py
+      - "--server.address=0.0.0.0"
+      - "--server.port=8501"
+    ports:
+      - "8501:8501"
+    volumes:
+      - trader_state:/app/ai_trader/data
+
+volumes:
+  trader_state:

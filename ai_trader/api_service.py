@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping
+from typing import Any, Dict, Iterable, Mapping, Sequence
 
 from fastapi import FastAPI, HTTPException, Query, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict
 
 from ai_trader.services.monitoring import get_monitoring_center
@@ -273,6 +274,126 @@ async def update_config(payload: RiskUpdate) -> Dict[str, Any]:
     config = risk_manager.update_config(updates)
     runtime_state.update_risk_settings(config)
     return {"status": "ok", "config": config}
+
+
+def _extract_equity_value(row: Mapping[str, Any] | Sequence[Any]) -> float:
+    if isinstance(row, Mapping) or hasattr(row, "keys"):
+        try:
+            value = row.get("equity") if isinstance(row, Mapping) else row["equity"]
+        except Exception:  # noqa: BLE001
+            value = None
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+    if isinstance(row, (list, tuple)):
+        if len(row) >= 2:
+            try:
+                return float(row[1])
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def _compute_max_drawdown(trade_log: TradeLog | MemoryTradeLog) -> float:
+    try:
+        rows = list(trade_log.fetch_equity_curve())
+    except Exception:  # noqa: BLE001
+        return 0.0
+    if not rows:
+        return 0.0
+    peak_equity = 0.0
+    max_drawdown = 0.0
+    for row in rows:
+        equity = _extract_equity_value(row)
+        if equity <= 0.0:
+            continue
+        if equity > peak_equity:
+            peak_equity = equity
+        if peak_equity <= 0.0:
+            continue
+        drawdown = (equity - peak_equity) / peak_equity
+        if drawdown < max_drawdown:
+            max_drawdown = drawdown
+    return abs(max_drawdown) * 100.0
+
+
+def _latest_ml_accuracy() -> float:
+    metrics: Dict[str, Dict[str, Any]] = {}
+    if _ML_SERVICE is not None and hasattr(_ML_SERVICE, "latest_validation_metrics"):
+        try:
+            raw = _ML_SERVICE.latest_validation_metrics()  # type: ignore[attr-defined]
+            if isinstance(raw, Mapping):
+                metrics = {str(symbol): dict(values) for symbol, values in raw.items()}
+        except Exception:  # noqa: BLE001
+            metrics = {}
+    if not metrics:
+        metrics = _load_validation_metrics_from_db()
+    best = 0.0
+    for payload in metrics.values():
+        try:
+            value = float(payload.get("accuracy", 0.0))
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > best:
+            best = value
+    return best
+
+
+def _watchdog_age_seconds(runtime_state: RuntimeStateStore) -> float:
+    last_update = runtime_state.last_update_time()
+    if last_update is None:
+        return -1.0
+    now = datetime.now(timezone.utc)
+    return max((now - last_update).total_seconds(), 0.0)
+
+
+def _websocket_reconnect_count() -> int:
+    center = get_monitoring_center()
+    events = center.recent_events()
+    count = 0
+    for event in events:
+        try:
+            if event.get("event_type") == "websocket_reconnect":
+                count += 1
+        except AttributeError:
+            continue
+    return count
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def get_metrics() -> str:
+    trade_log, runtime_state, _ = _ensure_services()
+    runtime_state.refresh_from_disk()
+    status_snapshot = runtime_state.status_snapshot()
+    equity = float(status_snapshot.get("equity") or 0.0)
+    open_positions = status_snapshot.get("open_positions") or []
+    drawdown = _compute_max_drawdown(trade_log)
+    watchdog_age = _watchdog_age_seconds(runtime_state)
+    accuracy = _latest_ml_accuracy()
+    reconnects = _websocket_reconnect_count()
+    lines = [
+        "# HELP trader_equity_total Current account equity in USD.",
+        "# TYPE trader_equity_total gauge",
+        f"trader_equity_total {equity:.6f}",
+        "# HELP trader_open_positions Number of open positions tracked by the runtime.",
+        "# TYPE trader_open_positions gauge",
+        f"trader_open_positions {len(open_positions)}",
+        "# HELP trader_max_drawdown_percent Maximum recorded drawdown percent from equity curve.",
+        "# TYPE trader_max_drawdown_percent gauge",
+        f"trader_max_drawdown_percent {drawdown:.6f}",
+        "# HELP trader_watchdog_last_update_age_seconds Age of the last runtime heartbeat in seconds.",
+        "# TYPE trader_watchdog_last_update_age_seconds gauge",
+        f"trader_watchdog_last_update_age_seconds {watchdog_age:.6f}",
+        "# HELP trader_ml_validation_accuracy Latest ML validation accuracy.",
+        "# TYPE trader_ml_validation_accuracy gauge",
+        f"trader_ml_validation_accuracy {accuracy:.6f}",
+        "# HELP trader_websocket_reconnect_total Count of websocket reconnect events since startup.",
+        "# TYPE trader_websocket_reconnect_total counter",
+        f"trader_websocket_reconnect_total {reconnects}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 __all__ = [
