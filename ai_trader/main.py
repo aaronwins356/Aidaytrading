@@ -5,12 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
-import csv
 import os
 import signal
 import sqlite3
 import threading
-from collections import deque
 from datetime import datetime, timezone
 from logging import Logger
 from pathlib import Path
@@ -18,24 +16,23 @@ from typing import Any, Dict, Iterable, Sequence
 
 from ai_trader.api_service import attach_services, get_runtime_state
 from ai_trader.backtester import Backtester, BacktestResult
-from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.broker.websocket_manager import KrakenWebsocketManager
-from ai_trader.notifier import Notifier
-from ai_trader.services.configuration import (
-    normalize_config,
-    normalize_symbol,
-    read_config_file,
+from ai_trader.runtime import (
+    create_broker,
+    initialise_notifier,
+    load_workers,
+    prepare_runtime_config,
+    start_watchdog,
+    warm_start_workers,
 )
+from ai_trader.services.configuration import normalize_config, read_config_file
 from ai_trader.services.equity import EquityEngine
 from ai_trader.services.logging import configure_logging, get_logger
 from ai_trader.services.ml import MLService
 from ai_trader.services.risk import RiskManager
 from ai_trader.services.schema import ALL_TABLES
-from ai_trader.services.monitoring import get_monitoring_center
 from ai_trader.services.trade_engine import TradeEngine
 from ai_trader.services.trade_log import TradeLog
-from ai_trader.services.worker_loader import WorkerLoader
-from ai_trader.services.watchdog import RuntimeWatchdog
 from ai_trader.workers.researcher import MarketResearchWorker
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "config.yaml"
@@ -66,131 +63,6 @@ def _merge_dicts(
         else:
             merged[key] = value
     return merged
-
-
-def _collect_all_symbols(config: Dict[str, Any]) -> list[str]:
-    """Gather the union of symbols referenced across the configuration."""
-
-    collected: list[str] = []
-    seen: set[str] = set()
-
-    def _ingest(candidate: object) -> None:
-        if candidate is None:
-            return
-        if isinstance(candidate, (list, tuple, set)):
-            for item in candidate:
-                _ingest(item)
-            return
-        if isinstance(candidate, dict):
-            _ingest(candidate.get("symbols"))
-            return
-        normalised = normalize_symbol(candidate)
-        if normalised and normalised not in seen:
-            seen.add(normalised)
-            collected.append(normalised)
-
-    trading_cfg = config.get("trading", {})
-    _ingest(trading_cfg.get("symbols"))
-
-    worker_cfg = config.get("workers", {})
-    definitions = worker_cfg.get("definitions") if isinstance(worker_cfg, dict) else None
-    if isinstance(definitions, dict):
-        for definition in definitions.values():
-            if isinstance(definition, dict):
-                _ingest(definition.get("symbols"))
-
-    researcher_cfg = config.get("researcher")
-    if isinstance(researcher_cfg, dict):
-        _ingest(researcher_cfg.get("symbols"))
-
-    return collected
-
-
-def _cache_path_for_symbol(symbol: str) -> Path:
-    """Return the expected cache path for a trading symbol."""
-
-    sanitized = symbol.replace("/", "_").replace("-", "_").lower()
-    return DATA_DIR / f"{sanitized}.csv"
-
-
-def _load_cached_candles(
-    symbol: str,
-    logger: Logger,
-    *,
-    limit: int = 500,
-) -> list[dict[str, float]]:
-    """Load cached OHLCV candles from disk if present."""
-
-    path = _cache_path_for_symbol(symbol)
-    if not path.exists():
-        return []
-    candles: list[dict[str, float]] = []
-    try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
-                if not row:
-                    continue
-                normalized = {str(key).strip().lower(): value for key, value in row.items() if key}
-                try:
-                    candle = {
-                        "open": float(normalized["open"]),
-                        "high": float(normalized["high"]),
-                        "low": float(normalized["low"]),
-                        "close": float(normalized["close"]),
-                        "volume": float(normalized.get("volume", 0.0)),
-                    }
-                except (KeyError, TypeError, ValueError):
-                    logger.debug("Skipping malformed cache row for %s: %s", symbol, row)
-                    continue
-                if "timestamp" in normalized:
-                    try:
-                        candle["timestamp"] = float(normalized["timestamp"])
-                    except (TypeError, ValueError):
-                        logger.debug(
-                            "Invalid timestamp in cache for %s: %s", symbol, normalized["timestamp"]
-                        )
-                candles.append(candle)
-    except OSError as exc:
-        logger.warning("Unable to read cache for %s at %s: %s", symbol, path, exc)
-        return []
-    if not candles:
-        return []
-    if limit and len(candles) > limit:
-        candles = candles[-limit:]
-    logger.info("Loaded %d cached candles for %s from %s", len(candles), symbol, path)
-    return candles
-
-
-def _seed_worker_histories(
-    workers: Iterable[object],
-    cached_candles: Dict[str, list[dict[str, float]]],
-) -> None:
-    """Populate worker price history deques using cached candles."""
-
-    for worker in workers:
-        history_map = getattr(worker, "price_history", None)
-        lookback = getattr(worker, "lookback", None)
-        if history_map is None or lookback is None:
-            continue
-        for symbol, candles in cached_candles.items():
-            series = history_map.setdefault(symbol, deque(maxlen=lookback))
-            closes = [float(candle.get("close", 0.0)) for candle in candles]
-            max_len = series.maxlen or len(closes)
-            for close in closes[-max_len:]:
-                series.append(float(close))
-
-
-def _warm_start_researchers(
-    researchers: Iterable[object],
-    cached_candles: Dict[str, list[dict[str, float]]],
-) -> None:
-    """Seed MarketResearchWorker instances with cached candles."""
-
-    for researcher in researchers:
-        if isinstance(researcher, MarketResearchWorker):
-            for symbol, candles in cached_candles.items():
-                researcher.preload_candles(symbol, candles)
 
 
 def _validate_strategy_topology(
@@ -585,78 +457,23 @@ def prepare_config(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> None:
-    runtime_config = copy.deepcopy(config)
     logger = get_logger(__name__)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    bundle = prepare_runtime_config(config, data_dir=DATA_DIR, logger=logger)
+    runtime_config = bundle.config
+    trading_cfg = bundle.trading
+    risk_cfg = bundle.risk
+    worker_cfg = bundle.workers
 
-    symbols = _collect_all_symbols(runtime_config)
-    if not symbols:
-        logger.error("No trading symbols configured. Add at least one market pair to config.yaml")
-        raise SystemExit(1)
-    runtime_config.setdefault("trading", {})["symbols"] = symbols
-    trading_cfg = runtime_config.get("trading", {})
-    risk_cfg = runtime_config.get("risk", {})
-    worker_cfg = runtime_config.get("workers", {})
-    logger.info("Tracking markets: %s", ", ".join(symbols))
-
-    paper_mode = bool(trading_cfg.get("paper_trading", True))
-    trading_mode = "PAPER" if paper_mode else "LIVE"
-    trading_cfg["mode"] = trading_mode.lower()
-    if paper_mode:
+    if bundle.paper_mode:
         logger.info("🧪 Running in PAPER trading mode – no real funds at risk.")
     else:
         logger.info(
             "🚀 Running in LIVE trading mode – Kraken orders will be routed to the exchange."
         )
 
-    exchange_cfg = runtime_config.get("exchange", {})
-    default_rate_limit = runtime_config.get("kraken", {}).get("rest_rate_limit", 0.5)
-    rest_rate_limit = float(exchange_cfg.get("rest_rate_limit", default_rate_limit))
-    env_api_key = os.getenv("KRAKEN_API_KEY", "").strip()
-    env_api_secret = os.getenv("KRAKEN_API_SECRET", "").strip()
-    config_api_key = str(
-        exchange_cfg.get("api_key", runtime_config.get("kraken", {}).get("api_key", ""))
-    ).strip()
-    config_api_secret = str(
-        exchange_cfg.get("api_secret", runtime_config.get("kraken", {}).get("api_secret", ""))
-    ).strip()
-    broker_api_key = env_api_key or config_api_key
-    broker_api_secret = env_api_secret or config_api_secret
-
-    broker = KrakenClient(
-        api_key=broker_api_key,
-        api_secret=broker_api_secret,
-        base_currency=trading_cfg.get("base_currency", "USD"),
-        rest_rate_limit=rest_rate_limit,
-        paper_trading=paper_mode,
-        paper_starting_equity=float(trading_cfg.get("paper_starting_equity", 10000.0)),
-        allow_shorting=bool(trading_cfg.get("allow_shorting", False)),
-        fee_rate=float(trading_cfg.get("trade_fee_percent", 0.0)),
-    )
-
+    broker = create_broker(bundle, logger=logger)
     trade_log = TradeLog(DB_PATH)
-
-    notifier: Notifier | None = None
-    monitoring_center = get_monitoring_center()
-    monitoring_center.set_runtime_degraded(False, None)
-    telegram_cfg = runtime_config.get("notifications", {}).get("telegram", {})
-    telegram_token = (
-        os.getenv("TELEGRAM_TOKEN", "").strip() or str(telegram_cfg.get("bot_token", "")).strip()
-    )
-    telegram_chat_id = (
-        os.getenv("TELEGRAM_CHAT_ID", "").strip() or str(telegram_cfg.get("chat_id", "")).strip()
-    )
-    telegram_enabled = bool(telegram_cfg.get("enabled", True))
-    if telegram_enabled and telegram_token and telegram_chat_id:
-        try:
-            notifier = Notifier(token=telegram_token, chat_id=telegram_chat_id)
-        except Exception as exc:  # noqa: BLE001 - network/setup issues should not abort startup
-            logger.warning("Failed to initialise Telegram notifier: %s", exc)
-            notifier = None
-        else:
-            logger.info("Telegram notifier enabled for chat %s", telegram_chat_id)
-    else:
-        logger.info("Telegram notifier disabled – configure notifications.telegram or env vars")
+    notifier = initialise_notifier(bundle, logger=logger)
     ml_cfg = runtime_config.get("ml", {})
     feature_keys = ml_cfg.get(
         "feature_keys",
@@ -707,27 +524,11 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
     runtime_state.update_risk_settings(risk_manager.config_dict())
     attach_services(trade_log=trade_log, runtime_state=runtime_state, risk_manager=risk_manager)
 
-    symbols = trading_cfg.get("symbols", [])
-    websocket_manager = KrakenWebsocketManager(symbols)
-    worker_loader = WorkerLoader(
-        worker_cfg, symbols, researcher_config=runtime_config.get("researcher")
-    )
+    websocket_manager = KrakenWebsocketManager(bundle.symbols)
     shared_services = {"ml_service": ml_service, "trade_log": trade_log}
-    workers, researchers = worker_loader.load(shared_services)
+    workers, researchers = load_workers(bundle, shared_services)
 
-    cached_histories: Dict[str, list[dict[str, float]]] = {}
-    for symbol in symbols:
-        candles = _load_cached_candles(symbol, logger)
-        if candles:
-            cached_histories[symbol] = candles
-    if cached_histories:
-        _warm_start_researchers(researchers, cached_histories)
-        non_research_workers = [
-            worker for worker in workers if not isinstance(worker, MarketResearchWorker)
-        ]
-        _seed_worker_histories(non_research_workers, cached_histories)
-    else:
-        logger.info("No cached candle files found – live warmup will proceed normally.")
+    warm_start_workers(bundle, workers, researchers, data_dir=DATA_DIR, logger=logger)
 
     engine = TradeEngine(
         broker=broker,
@@ -771,24 +572,12 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         await notifier.send_startup_heartbeat(
             equity=equity,
             open_positions=open_positions_count,
-            mode=trading_mode.lower(),
+            mode=bundle.trading_mode.lower(),
             currency=broker.base_currency,
         )
         await notifier.start()
 
-    watchdog: RuntimeWatchdog | None = None
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    watchdog_timeout = float(runtime_config.get("watchdog_timeout_seconds", 60.0))
-    watchdog = RuntimeWatchdog(
-        runtime_state,
-        timeout_seconds=watchdog_timeout,
-        alert_callback=notifier.send_watchdog_alert if notifier is not None else None,
-        event_loop=loop,
-    )
-    watchdog.start()
+    watchdog = start_watchdog(bundle, runtime_state, notifier)
 
     _validate_startup(
         engine,
@@ -796,7 +585,7 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         researchers,
         runtime_config,
         ml_service,
-        paper_trading=paper_mode,
+        paper_trading=bundle.paper_mode,
     )
 
     stop_event = asyncio.Event()
