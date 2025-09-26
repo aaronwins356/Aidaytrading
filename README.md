@@ -27,10 +27,28 @@ ai_trader/
 
 1. **Run the bot**
 
-   ```bash
-   .venv\\Scripts\\Activate.ps1
-   python -m ai_trader.main
-   ```
+```bash
+.venv\\Scripts\\Activate.ps1
+python -m ai_trader.main
+```
+
+**Dry run (no SQLite or live orders)**
+
+```bash
+python -m ai_trader.main --dryrun --config ai_trader/config.yaml
+```
+
+**Enable the ML ensemble worker only**
+
+```bash
+python -m ai_trader.main --workers ml_ensemble
+```
+
+Risk parameters such as `risk_per_trade`, `max_drawdown_percent`, and the ML ensemble lookback can be overridden from the CLI:
+
+```bash
+python -m ai_trader.main --risk-per-trade 0.015 --risk-max-drawdown 12 --ml-window-size 200
+```
 
 2. **Launch the dashboard** (in a new terminal)
 

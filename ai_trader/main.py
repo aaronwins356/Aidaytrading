@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import csv
 import os
@@ -21,7 +22,7 @@ from ai_trader.services.ml import MLService
 from ai_trader.services.risk import RiskManager
 from ai_trader.services.schema import ALL_TABLES
 from ai_trader.services.trade_engine import TradeEngine
-from ai_trader.services.trade_log import TradeLog
+from ai_trader.services.trade_log import MemoryTradeLog, TradeLog
 from ai_trader.services.worker_loader import WorkerLoader
 from ai_trader.workers.researcher import MarketResearchWorker
 
@@ -31,11 +32,11 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 DB_PATH = DATA_DIR / "trades.db"
 
 
-def load_config() -> Dict[str, Any]:
+def load_config(config_path: Path) -> Dict[str, Any]:
     """Load and normalise runtime configuration from YAML sources."""
 
     logger = get_logger(__name__)
-    base_config = read_config_file(CONFIG_PATH)
+    base_config = read_config_file(config_path)
     profile = os.getenv("AI_TRADER_ENV", os.getenv("AI_TRADER_MODE", "")).lower()
     if profile == "live":
         live_overrides = read_config_file(CONFIG_LIVE_PATH)
@@ -320,6 +321,8 @@ def _validate_startup(
     researchers: Sequence[object],
     config: Dict[str, Any],
     ml_service: MLService,
+    *,
+    dryrun: bool = False,
 ) -> None:
     """Ensure critical services and configuration are ready before trading."""
 
@@ -355,21 +358,23 @@ def _validate_startup(
                 "Researcher will build the initial dataset before trades execute."
             )
 
-    _ensure_sqlite_schema(logger)
+    if not dryrun:
+        _ensure_sqlite_schema(logger)
 
-    try:
-        with sqlite3.connect(DB_PATH) as connection:
-            exists = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='market_features'"
-            ).fetchone()
-    except sqlite3.Error as exc:
-        logger.error("Failed to verify market_features table: %s", exc)
-        raise SystemExit(1) from exc
-    if exists is None:
-        logger.error(
-            "Required SQLite table 'market_features' is missing. Run initialisation before starting the bot."
-        )
-        raise SystemExit(1)
+    if not dryrun:
+        try:
+            with sqlite3.connect(DB_PATH) as connection:
+                exists = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='market_features'"
+                ).fetchone()
+        except sqlite3.Error as exc:
+            logger.error("Failed to verify market_features table: %s", exc)
+            raise SystemExit(1) from exc
+        if exists is None:
+            logger.error(
+                "Required SQLite table 'market_features' is missing. Run initialisation before starting the bot."
+            )
+            raise SystemExit(1)
 
     trading_cfg = config.get("trading", {})
     trading_mode = str(trading_cfg.get("mode", "paper")).lower()
@@ -383,7 +388,7 @@ def _validate_startup(
             )
             raise SystemExit(1)
 
-    if ml_workers:
+    if ml_workers and not dryrun:
         try:
             with sqlite3.connect(DB_PATH) as connection:
                 cursor = connection.execute(
@@ -433,8 +438,93 @@ def _ensure_sqlite_schema(logger: Logger) -> None:
         raise SystemExit(1) from exc
 
 
-async def start_bot() -> None:
-    config = load_config()
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="AI Day Trading Bot")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=str(CONFIG_PATH),
+        help="Path to configuration YAML file",
+    )
+    parser.add_argument(
+        "--dryrun",
+        action="store_true",
+        help="Enable dry-run mode (no database writes or live orders)",
+    )
+    parser.add_argument(
+        "--workers",
+        nargs="*",
+        help="Subset of worker definition keys to enable",
+    )
+    parser.add_argument("--risk-per-trade", type=float, dest="risk_per_trade")
+    parser.add_argument("--risk-max-drawdown", type=float, dest="risk_max_drawdown")
+    parser.add_argument("--risk-daily-loss-limit", type=float, dest="risk_daily_loss")
+    parser.add_argument(
+        "--risk-min-trades-per-day", type=int, dest="risk_min_trades"
+    )
+    parser.add_argument(
+        "--risk-confidence-relax", type=float, dest="risk_confidence_relax"
+    )
+    parser.add_argument(
+        "--risk-max-open-positions", type=int, dest="risk_max_open_positions"
+    )
+    parser.add_argument("--ml-window-size", type=int, dest="ml_window_size")
+    parser.add_argument("--ml-retrain-interval", type=int, dest="ml_retrain_interval")
+    return parser.parse_args(argv)
+
+
+def _apply_cli_overrides(config: Dict[str, Any], args: argparse.Namespace) -> None:
+    risk_cfg = config.setdefault("risk", {})
+    if args.risk_per_trade is not None:
+        risk_cfg["risk_per_trade"] = float(args.risk_per_trade)
+    if args.risk_max_drawdown is not None:
+        risk_cfg["max_drawdown_percent"] = float(args.risk_max_drawdown)
+    if args.risk_daily_loss is not None:
+        risk_cfg["daily_loss_limit_percent"] = float(args.risk_daily_loss)
+    if args.risk_min_trades is not None:
+        risk_cfg["min_trades_per_day"] = int(args.risk_min_trades)
+    if args.risk_confidence_relax is not None:
+        risk_cfg["confidence_relax_percent"] = float(args.risk_confidence_relax)
+    if args.risk_max_open_positions is not None:
+        risk_cfg["max_open_positions"] = int(args.risk_max_open_positions)
+
+    if args.ml_window_size is not None or args.ml_retrain_interval is not None:
+        worker_cfg = config.setdefault("workers", {}).setdefault("definitions", {})
+        ml_worker = worker_cfg.get("ml_ensemble") or worker_cfg.get("ml_ensemble_worker")
+        if ml_worker is None:
+            ml_worker = worker_cfg.setdefault(
+                "ml_ensemble",
+                {
+                    "module": "ai_trader.workers.ml_ensemble_worker.EnsembleMLWorker",
+                    "enabled": True,
+                },
+            )
+        params = ml_worker.setdefault("parameters", {})
+        if args.ml_window_size is not None:
+            params["window_size"] = int(args.ml_window_size)
+        if args.ml_retrain_interval is not None:
+            params["retrain_interval"] = int(args.ml_retrain_interval)
+
+    if args.workers:
+        worker_cfg = config.setdefault("workers", {})
+        definitions = worker_cfg.get("definitions", {})
+        enabled_keys = set(args.workers)
+        filtered = {
+            key: value
+            for key, value in definitions.items()
+            if key in enabled_keys or value.get("display_name") in enabled_keys
+        }
+        if not filtered:
+            raise SystemExit(
+                f"No worker definitions match CLI override: {', '.join(args.workers)}"
+            )
+        worker_cfg["definitions"] = filtered
+
+
+async def start_bot(args: argparse.Namespace) -> None:
+    config_path = Path(args.config).expanduser().resolve()
+    config = load_config(config_path)
+    _apply_cli_overrides(config, args)
     configure_logging()
     logger = get_logger(__name__)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -468,7 +558,11 @@ async def start_bot() -> None:
         allow_shorting=bool(trading_cfg.get("allow_shorting", False)),
     )
 
-    trade_log = TradeLog(DB_PATH)
+    dryrun = bool(args.dryrun)
+    if dryrun:
+        trade_log = MemoryTradeLog()
+    else:
+        trade_log = TradeLog(DB_PATH)
     ml_cfg = config.get("ml", {})
     feature_keys = ml_cfg.get(
         "feature_keys",
@@ -561,7 +655,7 @@ async def start_bot() -> None:
         logger.info("Broker returned %d open position(s) for reconciliation", len(broker_positions))
     await engine.rehydrate_open_positions(broker_positions)
 
-    _validate_startup(engine, workers, researchers, config, ml_service)
+    _validate_startup(engine, workers, researchers, config, ml_service, dryrun=dryrun)
 
     stop_event = asyncio.Event()
 
@@ -575,15 +669,18 @@ async def start_bot() -> None:
         except NotImplementedError:
             signal.signal(sig, lambda *_: asyncio.create_task(engine.stop()))
 
+    if dryrun:
+        engine.enable_signal_only_mode("dry-run")
     bot_task = asyncio.create_task(engine.start())
     await stop_event.wait()
     await engine.stop()
     await bot_task
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
     try:
-        asyncio.run(start_bot())
+        asyncio.run(start_bot(args))
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - catch-all for a clean shutdown message
