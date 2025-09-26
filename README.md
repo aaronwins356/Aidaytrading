@@ -79,7 +79,7 @@ When `--parallel-backtest` is enabled, a daemon thread replays historical data w
 
    ```bash
    .venv\\Scripts\\Activate.ps1
-   streamlit run ai_trader/dashboard/app.py
+   streamlit run ai_trader/streamlit_app.py
    ```
 
 3. **Run automated tests**
@@ -105,11 +105,38 @@ The included paper mode initializes with `$10,000` USD and honours Kraken minimu
 - **Leverage ML:** create workers that learn from the SQLite trade history. The logging schema stores entry/exit data ready for pandas modelling.
 - **Risk tuning:** adjust sliders in the dashboard, then update `config.yaml` to persist changes for the runtime loop.
 
+## Monitoring & Notifications
+
+### Streamlit operations dashboard
+
+- Start the UI with `streamlit run ai_trader/streamlit_app.py`.
+- The **Portfolio Overview** tab surfaces equity, PnL, daily return histogram, and drawdown curve.
+- **Trades Log** exposes rich filtering (symbol, strategy, date) with export to CSV.
+- **Risk Controls** persists stop-loss, risk-per-trade, and drawdown guardrails directly into `config.yaml` and live control flags.
+- **Strategy Manager** toggles rule-based and ML workers on/off while updating runtime control flags.
+- Screenshot the dashboard after launching with seeded data for runbooks or documentation (e.g. `streamlit run ...` then capture via your OS screenshot tool).
+
+### Telegram live alerts
+
+Set the following environment variables before launching `python -m ai_trader.main` to enable live notifications:
+
+```bash
+export TELEGRAM_TOKEN="<bot token>"
+export TELEGRAM_CHAT_ID="<chat id>"
+```
+
+With credentials in place the bot will:
+
+- push every executed trade (open and close) with price, PnL, and confidence metrics;
+- broadcast heartbeats daily at 02:00, 08:00, 14:00, and 20:00 UTC;
+- escalate risk halts and broker/API failures via `send_error` alerts.
+
 ## Requirements
 
 - Python 3.11+
 - Kraken account (for live trading)
 - Streamlit for the dashboard
+- Telegram bot token & chat ID for live notifications (optional)
 
 See `requirements.txt` for all Python dependencies.
 
