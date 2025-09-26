@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 import yaml
 
 from ai_trader import streamlit_app
+from ai_trader.backtester import BacktestResult, BacktestTrade
 
 
 def _create_db(path: Path) -> None:
@@ -123,6 +125,7 @@ class DummyColumn:
 class DummyStreamlit:
     def __init__(self) -> None:
         self.session_state: dict[str, Any] = {}
+        self.sidebar = self
 
     def set_page_config(self, *_args: Any, **_kwargs: Any) -> None:
         return None
@@ -132,6 +135,31 @@ class DummyStreamlit:
 
     def subheader(self, *_args: Any, **_kwargs: Any) -> None:
         return None
+
+    def caption(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def selectbox(self, _label: str, options: Iterable[Any], index: int = 0, **_kwargs: Any) -> Any:
+        sequence = list(options)
+        if not sequence:
+            return None
+        index = max(0, min(index, len(sequence) - 1))
+        return sequence[index]
+
+    def number_input(
+        self,
+        _label: str,
+        *,
+        min_value: int = 0,
+        max_value: int = 100,
+        value: int = 0,
+        step: int = 1,
+        **_kwargs: Any,
+    ) -> int:
+        return max(min_value, min(max_value, value))
+
+    def button(self, *_args: Any, **_kwargs: Any) -> bool:
+        return False
 
     def columns(self, count: int) -> Iterable[DummyColumn]:
         return [DummyColumn() for _ in range(count)]
@@ -162,6 +190,9 @@ class DummyStreamlit:
     def info(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
+    def error(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
     def form(self, *_args: Any, **_kwargs: Any) -> DummyContext:
         return DummyContext()
 
@@ -182,6 +213,57 @@ class DummyStreamlit:
 
     def metric(self, *_args: Any, **_kwargs: Any) -> None:
         return None
+
+
+def test_run_backtest_async_returns_serialised_payload(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class DummyBacktester:
+        def __init__(self, config, symbol, start, end, **kwargs):  # noqa: D401 - test stub
+            captured.update(
+                {
+                    "symbol": symbol,
+                    "start": start,
+                    "end": end,
+                    "generate_reports": kwargs.get("generate_reports"),
+                }
+            )
+
+        async def run(self) -> BacktestResult:
+            now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            trade = BacktestTrade(
+                worker="demo",
+                symbol="BTC/USD",
+                side="buy",
+                quantity=0.1,
+                open_time=now,
+                entry_price=100.0,
+                entry_fee=0.0,
+                cash_spent=10.0,
+                close_time=now + timedelta(hours=1),
+                exit_price=101.0,
+                exit_fee=0.0,
+                pnl=1.0,
+                pnl_percent=10.0,
+                win=True,
+            )
+            metrics = {"return_percent": 10.0, "max_drawdown_percent": -1.0, "win_rate": 100.0}
+            equity_curve = [
+                {"timestamp": now, "equity": 10000.0},
+                {"timestamp": now + timedelta(hours=1), "equity": 10100.0},
+            ]
+            return BacktestResult(metrics=metrics, trades=[trade], equity_curve=equity_curve)
+
+    monkeypatch.setattr(streamlit_app, "Backtester", DummyBacktester, raising=False)
+
+    config = {"trading": {"symbols": ["BTC/USD"], "trade_fee_percent": 0.001}}
+    result = asyncio.run(streamlit_app.run_backtest("BTC/USD", "2024-01-01", "2024-01-02", config))
+
+    assert captured["symbol"] == "BTC/USD"
+    assert captured["generate_reports"] is False
+    assert result["metrics"]["return_percent"] == 10.0
+    assert result["equity_values"] == [10000.0, 10100.0]
+    assert result["trades"][0]["open_time"].startswith("2024-01-01")
 
 
 def test_streamlit_dashboard_smoke(tmp_path, monkeypatch) -> None:

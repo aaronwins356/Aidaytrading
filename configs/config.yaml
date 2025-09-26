@@ -1,24 +1,37 @@
-kraken:
+# Unified configuration for AI Day Trader.
+# Copy this template and inject your real API keys + Telegram credentials before live trading.
+
+exchange:
+  name: kraken
   api_key: ""
   api_secret: ""
   rest_rate_limit: 0.5
+  enable_rate_limit: true
+  aliases:
+    BTC/USD:
+      - XBT/USD
+      - XXBTZUSD
+    ETH/USD:
+      - XETHZUSD
+    SOL/USD:
+      - SOL/USD
 
 trading:
+  mode: live
+  paper_trading: true
   base_currency: USD
   symbols:
     - BTC/USD
     - ETH/USD
     - SOL/USD
   equity_allocation_percent: 10.0
-  max_open_positions: 2
-  paper_trading: true
-  paper_starting_equity: 200.0
+  paper_starting_equity: 10000.0
   allow_shorting: false
-  min_cash_per_trade: 5.0
-  max_cash_per_trade: 10.0
+  min_cash_per_trade: 10.0
+  max_cash_per_trade: 20.0
   trade_confidence_min: 0.6
-  mode: live
   trade_fee_percent: 0.0026
+  slippage_bps: 1.0
   min_order_value: 10.0
 
 risk:
@@ -33,45 +46,6 @@ risk:
   atr_take_profit_multiplier: 2.5
   atr_period: 14
   min_stop_buffer: 0.005
-  telegram:
-    enabled: true
-    bot_token: ""
-    chat_id: ""
-    heartbeat_hours: 6
-
-ml:
-  feature_keys:
-    - momentum_1
-    - momentum_3
-    - momentum_5
-    - momentum_10
-    - rolling_volatility
-    - atr
-    - volume_delta
-    - volume_ratio
-    - volume_ratio_3
-    - volume_ratio_10
-    - body_pct
-    - upper_wick_pct
-    - lower_wick_pct
-    - wick_close_ratio
-    - range_pct
-    - ema_fast
-    - ema_slow
-    - macd
-    - macd_hist
-    - rsi
-    - zscore
-    - close_to_high
-    - close_to_low
-  learning_rate: 0.23
-  regularization: 0.0005
-  threshold: 0.35
-  ensemble: true
-  forest_size: 10
-  random_state: 7
-  warmup_samples: 25
-  enabled: true
 
 workers:
   refresh_interval_seconds: 15
@@ -159,56 +133,70 @@ workers:
         fast_window: 8
         slow_window: 24
         warmup_candles: 5
-        ml_threshold: 0.58
-      risk:
-        leverage: 1.0
-        position_size_pct: 100.0
-        stop_loss_pct: 1.5
-        take_profit_pct: 3.0
-        trailing_stop_pct: 1.1
-    sol_mean_reversion:
-      module: ai_trader.workers.mean_reversion.MeanReversionWorker
-      enabled: true
-      display_name: SOL Mean Reverter
-      emoji: "🔁"
-      symbols:
-        - SOL/USD
-      parameters:
-        window: 24
-        threshold: 0.018
-        warmup_candles: 5
-        ml_threshold: 0.56
+        ml_threshold: 0.52
       risk:
         leverage: 1.0
         position_size_pct: 100.0
         stop_loss_pct: 1.4
-        take_profit_pct: 2.8
-        trailing_stop_pct: 1.0
-    ml_ensemble:
-      module: ai_trader.workers.ml_ensemble_worker.EnsembleMLWorker
-      enabled: false
-      display_name: ML Ensemble
-      emoji: "🧠"
-      symbols:
-        - BTC/USD
-      parameters:
-        window_size: 160
-        retrain_interval: 20
-        sequence_length: 12
-        min_history: 90
+        take_profit_pct: 2.4
+        trailing_stop_pct: 0.95
 
 researcher:
-  enabled: true
   module: ai_trader.workers.researcher.MarketResearchWorker
+  enabled: true
   symbols:
     - BTC/USD
-  parameters:
-    warmup_candles: 2
-    feature_windows:
-      - 5
-      - 14
-      - 30
-    timeframe: 1m
-    log_every_n_snapshots: 1
-    volatility_window: 20
-    ohlc_window: 20
+    - ETH/USD
+    - SOL/USD
+  features:
+    - momentum_1
+    - momentum_3
+    - momentum_5
+    - momentum_10
+    - rolling_volatility
+    - atr
+    - volume_delta
+    - volume_ratio
+    - volume_ratio_3
+    - volume_ratio_10
+    - body_pct
+    - upper_wick_pct
+    - lower_wick_pct
+    - wick_close_ratio
+    - range_pct
+    - ema_fast
+    - ema_slow
+    - macd
+    - macd_hist
+    - rsi
+    - zscore
+    - close_to_high
+    - close_to_low
+
+ml:
+  lr: 0.23
+  regularization: 0.0005
+  threshold: 0.35
+  ensemble: true
+  forest_size: 10
+  random_state: 7
+  warmup_samples: 25
+  enabled: true
+
+notifications:
+  telegram:
+    enabled: true
+    bot_token: ""
+    chat_id: ""
+    heartbeat_hours: 6
+
+streamlit:
+  refresh_interval_seconds: 10
+  theme: dark
+  show_equity_curve: true
+  show_recent_trades: true
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  reload: false

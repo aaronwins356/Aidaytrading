@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping
+from typing import Any, Dict, List, Mapping, MutableMapping
 
 import pandas as pd
+import asyncio
+import copy
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import asdict
+from datetime import datetime, timedelta
+
 import plotly.graph_objects as go
 import streamlit as st
 import yaml
 
 try:
+    from ai_trader.backtester import Backtester
     from ai_trader.services.configuration import normalize_config, read_config_file
 except ModuleNotFoundError:  # pragma: no cover - allow running as a script
     import sys
@@ -21,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - allow running as a script
     ROOT = Path(__file__).resolve().parent
     if str(ROOT.parent) not in sys.path:
         sys.path.append(str(ROOT.parent))
+    from ai_trader.backtester import Backtester
     from ai_trader.services.configuration import normalize_config, read_config_file
 
 if hasattr(st, "cache_data"):
@@ -35,11 +42,18 @@ else:  # pragma: no cover - fallback for minimal environments
 
 
 BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "trades.db"
 TRADES_JSON_PATH = DATA_DIR / "trades.json"
 EQUITY_JSON_PATH = DATA_DIR / "equity_curve.json"
-CONFIG_PATH = BASE_DIR / "config.yaml"
+CONFIG_PATH = PROJECT_ROOT / "configs" / "config.yaml"
+_BACKTEST_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+_BACKTEST_FUTURE_KEY = "_backtest_future"
+_BACKTEST_RESULT_KEY = "_backtest_result"
+_BACKTEST_STATUS_KEY = "_backtest_status"
+_BACKTEST_RANGE_KEY = "_backtest_range"
+_BACKTEST_ERROR_KEY = "_backtest_error"
 
 
 def _set_page_style() -> None:
@@ -224,6 +238,77 @@ def save_config(config: Mapping[str, Any]) -> None:
     load_config.clear()
 
 
+async def run_backtest(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Execute a historical backtest using the shared engine."""
+
+    if not symbol:
+        raise ValueError("Symbol must be provided for backtests")
+    start = datetime.fromisoformat(start_date)
+    end = datetime.fromisoformat(end_date)
+    if end <= start:
+        raise ValueError("Backtest end date must be after the start date")
+
+    trading_cfg = dict(config.get("trading", {}))
+    fee_rate = float(trading_cfg.get("trade_fee_percent", 0.0026))
+    slippage_bps = float(trading_cfg.get("slippage_bps", 1.0))
+    timeframe = str(trading_cfg.get("timeframe", "1h"))
+
+    backtester = Backtester(
+        config,
+        symbol,
+        start,
+        end,
+        timeframe=timeframe,
+        fee_rate=fee_rate,
+        slippage_bps=slippage_bps,
+        generate_reports=False,
+    )
+    result = await backtester.run()
+
+    trades: List[Dict[str, Any]] = []
+    for trade in result.trades:
+        payload = asdict(trade)
+        for key in ("open_time", "close_time"):
+            if payload.get(key):
+                payload[key] = payload[key].isoformat()
+        trades.append(payload)
+
+    equity_curve: List[Dict[str, Any]] = []
+    for row in result.equity_curve:
+        timestamp = row.get("timestamp")
+        if isinstance(timestamp, datetime):
+            timestamp = timestamp.isoformat()
+        equity_curve.append({**row, "timestamp": timestamp})
+
+    equity_values = [float(entry.get("equity", 0.0)) for entry in equity_curve]
+
+    return {
+        "metrics": result.metrics,
+        "trades": trades,
+        "equity_curve": equity_curve,
+        "equity_values": equity_values,
+    }
+
+
+def _run_backtest_in_thread(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(run_backtest(symbol, start_date, end_date, config))
+    finally:
+        loop.close()
+
+
 def compute_drawdowns(equity: pd.Series) -> pd.Series:
     if equity.empty:
         return pd.Series(dtype="float64")
@@ -237,6 +322,126 @@ def compute_daily_returns(equity: pd.Series) -> pd.Series:
         return pd.Series(dtype="float64")
     daily = equity.resample("1D").last().dropna()
     return daily.pct_change().dropna()
+
+
+def render_backtest_sidebar(config: Mapping[str, Any]) -> None:
+    st.sidebar.markdown("### Quick Backtest")
+    symbols = list(config.get("trading", {}).get("symbols", []))
+    if not symbols:
+        st.sidebar.info("Add symbols under trading.symbols to enable backtesting.")
+        return
+
+    stored_symbol = st.session_state.get("backtest_symbol")
+    default_index = symbols.index(stored_symbol) if stored_symbol in symbols else 0
+    symbol = st.sidebar.selectbox("Symbol", symbols, index=default_index, key="backtest_symbol")
+    days_default = int(st.session_state.get("backtest_days", 30))
+    days_back = int(
+        st.sidebar.number_input(
+            "Days back",
+            min_value=7,
+            max_value=365,
+            value=days_default,
+            step=1,
+            key="backtest_days",
+        )
+    )
+
+    status = st.session_state.get(_BACKTEST_STATUS_KEY)
+    error = st.session_state.get(_BACKTEST_ERROR_KEY)
+
+    if st.sidebar.button("Run Backtest", use_container_width=True):
+        start_date = (datetime.utcnow() - timedelta(days=days_back)).date().isoformat()
+        end_date = datetime.utcnow().date().isoformat()
+        payload = copy.deepcopy(dict(config))
+        future = _BACKTEST_EXECUTOR.submit(
+            _run_backtest_in_thread, symbol, start_date, end_date, payload
+        )
+        st.session_state[_BACKTEST_FUTURE_KEY] = future
+        st.session_state[_BACKTEST_STATUS_KEY] = f"Running {symbol} ({days_back}d window)"
+        st.session_state[_BACKTEST_RANGE_KEY] = {
+            "symbol": symbol,
+            "start": start_date,
+            "end": end_date,
+            "days": days_back,
+        }
+        st.session_state[_BACKTEST_RESULT_KEY] = None
+        st.session_state[_BACKTEST_ERROR_KEY] = None
+        status = st.session_state[_BACKTEST_STATUS_KEY]
+
+    future = st.session_state.get(_BACKTEST_FUTURE_KEY)
+    if isinstance(future, Future) and not future.done() and status:
+        st.sidebar.info(status)
+    elif error:
+        st.sidebar.error(error)
+    elif status and st.session_state.get(_BACKTEST_RESULT_KEY):
+        st.sidebar.success(status)
+
+
+def render_backtest_results(
+    result: Mapping[str, Any] | None,
+    status: str | None,
+    error: str | None,
+    metadata: Mapping[str, Any] | None,
+) -> None:
+    if not (result or status or error):
+        return
+
+    st.markdown("## Quick Backtest")
+    if status and status.startswith("Running"):
+        st.info(status)
+        return
+    if error:
+        st.error(error)
+        return
+    if not result:
+        st.info("Backtest results will appear here once available.")
+        return
+
+    metrics = result.get("metrics", {})
+    symbol = (metadata or {}).get("symbol", "")
+    start = (metadata or {}).get("start", "")
+    end = (metadata or {}).get("end", "")
+    caption = f"{symbol} • {start} → {end}" if symbol and start and end else None
+    if caption:
+        st.caption(caption)
+
+    pnl = float(metrics.get("return_percent", metrics.get("pnl_percent", 0.0)))
+    win_rate = float(metrics.get("win_rate", 0.0))
+    drawdown = float(metrics.get("max_drawdown_percent", 0.0))
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("PnL %", f"{pnl:.2f}%")
+    col2.metric("Win rate", f"{win_rate:.1f}%")
+    col3.metric("Max drawdown", f"{drawdown:.2f}%")
+
+    equity_frame = pd.DataFrame(result.get("equity_curve", []))
+    if not equity_frame.empty:
+        equity_frame["timestamp"] = pd.to_datetime(equity_frame["timestamp"], errors="coerce")
+        equity_frame = equity_frame.dropna(subset=["timestamp"]).sort_values("timestamp")
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=equity_frame["timestamp"],
+                y=equity_frame["equity"],
+                mode="lines",
+                name="Equity",
+            )
+        )
+        fig.update_layout(margin=dict(l=20, r=20, t=30, b=20), height=320)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No equity data generated for the selected window.")
+
+    trades_frame = pd.DataFrame(result.get("trades", []))
+    if not trades_frame.empty:
+        for column in ("open_time", "close_time"):
+            if column in trades_frame.columns:
+                trades_frame[column] = pd.to_datetime(trades_frame[column], errors="coerce")
+        trades_frame = trades_frame.sort_values("open_time", ascending=False)
+        st.subheader("Recent trades")
+        st.dataframe(trades_frame.head(50))
+    else:
+        st.info("No trades executed during the requested window.")
 
 
 def render_portfolio_overview(
@@ -482,6 +687,35 @@ def render_strategy_manager(
 def render_dashboard() -> None:
     _set_page_style()
     config = load_config()
+    render_backtest_sidebar(config)
+
+    future: Future | None = st.session_state.get(_BACKTEST_FUTURE_KEY)
+    if isinstance(future, Future) and future.done():
+        try:
+            result_payload = future.result()
+        except Exception as exc:  # noqa: BLE001 - surface errors in UI
+            st.session_state[_BACKTEST_ERROR_KEY] = str(exc)
+            st.session_state[_BACKTEST_STATUS_KEY] = "Backtest failed"
+        else:
+            st.session_state[_BACKTEST_RESULT_KEY] = result_payload
+            range_meta = st.session_state.get(_BACKTEST_RANGE_KEY, {})
+            if range_meta.get("symbol"):
+                st.session_state[_BACKTEST_STATUS_KEY] = (
+                    f"Backtest ready for {range_meta['symbol']} ({range_meta.get('days', '?')}d)"
+                )
+            else:
+                st.session_state[_BACKTEST_STATUS_KEY] = "Backtest ready"
+            st.session_state[_BACKTEST_ERROR_KEY] = None
+        finally:
+            st.session_state[_BACKTEST_FUTURE_KEY] = None
+
+    render_backtest_results(
+        st.session_state.get(_BACKTEST_RESULT_KEY),
+        st.session_state.get(_BACKTEST_STATUS_KEY),
+        st.session_state.get(_BACKTEST_ERROR_KEY),
+        st.session_state.get(_BACKTEST_RANGE_KEY),
+    )
+
     trades = load_trades()
     equity = load_equity_curve()
     account = load_latest_account_snapshot()

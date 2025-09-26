@@ -1,6 +1,6 @@
 -r requirements.txt
-black==24.4.2
-isort==5.13.2
-flake8==7.0.0
-pytest-cov==4.1.0
-pytest-timeout==2.2.0
+pytest
+pytest-timeout
+flake8
+black
+httpx

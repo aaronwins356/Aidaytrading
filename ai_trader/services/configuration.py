@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Mapping, MutableMapping
@@ -40,6 +41,51 @@ _DEPRECATED_KEYS: Dict[str, str] = {
     "learning_rate": "Use 'lr' for SGD optimisers.",
 }
 
+_SYMBOL_ALIASES: Dict[str, str] = {
+    "XBT": "BTC",
+    "XXBT": "BTC",
+    "BTC": "BTC",
+    "XETH": "ETH",
+    "ETH2": "ETH",
+    "ETH": "ETH",
+    "XETC": "ETC",
+}
+
+
+def normalize_symbol(symbol: object) -> str | None:
+    """Return a canonical ``BASE/QUOTE`` string understood by Kraken."""
+
+    if symbol is None:
+        return None
+    text = str(symbol).strip().upper()
+    if not text or "/" not in text:
+        return None
+    base, quote = text.split("/", 1)
+    base = base.split(".", 1)[0]
+    quote = quote.split(".", 1)[0]
+    base = _SYMBOL_ALIASES.get(base, base)
+    quote = _SYMBOL_ALIASES.get(quote, quote)
+    return f"{base}/{quote}"
+
+
+def _normalise_symbol_sequence(symbols: object) -> list[str]:
+    """Normalise an arbitrary symbol container into Kraken-friendly pairs."""
+
+    normalised: list[str] = []
+    seen: set[str] = set()
+    if isinstance(symbols, (list, tuple, set)):
+        iterable: Iterable[object] = symbols
+    elif symbols is None:
+        iterable = []
+    else:
+        iterable = [symbols]
+    for candidate in iterable:
+        symbol = normalize_symbol(candidate)
+        if symbol and symbol not in seen:
+            seen.add(symbol)
+            normalised.append(symbol)
+    return normalised
+
 
 def read_config_file(path: Path) -> Dict[str, Any]:
     """Return a dictionary representation of the YAML configuration file."""
@@ -58,6 +104,33 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
 
     logger = get_logger(__name__)
     normalised: Dict[str, Any] = deepcopy(dict(config))
+
+    exchange_cfg = dict(normalised.get("exchange", {}))
+    kraken_cfg = dict(normalised.get("kraken", {}))
+    if not exchange_cfg and kraken_cfg:
+        exchange_cfg = kraken_cfg
+    if exchange_cfg.get("name", "kraken").lower() == "kraken":
+        kraken_defaults = {
+            "api_key": "",
+            "api_secret": "",
+            "rest_rate_limit": 0.5,
+            "enable_rate_limit": True,
+        }
+        merged = {**kraken_defaults, **exchange_cfg, **kraken_cfg}
+        merged["enable_rate_limit"] = bool(merged.get("enable_rate_limit", True))
+        try:
+            merged["rest_rate_limit"] = float(merged.get("rest_rate_limit", 0.5))
+        except (TypeError, ValueError):  # pragma: no cover - configuration sanitation
+            raise ValueError("Kraken rest_rate_limit must be numeric")
+        normalised["exchange"] = merged
+        normalised["kraken"] = {
+            "api_key": merged.get("api_key", ""),
+            "api_secret": merged.get("api_secret", ""),
+            "rest_rate_limit": merged.get("rest_rate_limit", 0.5),
+        }
+    else:
+        normalised["exchange"] = exchange_cfg
+
     ml_cfg: Dict[str, Any] = dict(normalised.get("ml", {}))
 
     # Record which deprecated keys were encountered so we only warn once per key.
@@ -108,7 +181,6 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     normalised["ml"] = ml_cfg
 
     trading_cfg = dict(normalised.get("trading", {}))
-    trading_cfg.setdefault("mode", "paper")
     trading_cfg.setdefault("paper_trading", True)
     trading_cfg.setdefault("equity_allocation_percent", 2.0)
     trading_cfg.setdefault("paper_starting_equity", 25000.0)
@@ -117,33 +189,14 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     trading_cfg.setdefault("max_cash_per_trade", 20.0)
     trading_cfg.setdefault("trade_confidence_min", 0.5)
     raw_symbols = trading_cfg.get("symbols", [])
-    normalised_symbols: list[str] = []
-    seen_symbols: set[str] = set()
-    if isinstance(raw_symbols, (list, tuple, set)):
-        for candidate in raw_symbols:
-            if candidate is None:
-                continue
-            text = str(candidate).strip().upper()
-            if not text or "/" not in text:
-                logger.warning("Ignoring malformed trading symbol: %s", candidate)
-                continue
-            base, quote = text.split("/", 1)
-            base = base.split(".", 1)[0]
-            quote = quote.split(".", 1)[0]
-            alias_map = {"XBT": "BTC", "XETH": "ETH", "ETH2": "ETH"}
-            base = alias_map.get(base, base)
-            quote = alias_map.get(quote, quote)
-            symbol = f"{base}/{quote}"
-            if symbol not in seen_symbols:
-                normalised_symbols.append(symbol)
-                seen_symbols.add(symbol)
-    elif raw_symbols:
-        logger.warning(
-            "Trading symbols must be a sequence; received %s", type(raw_symbols).__name__
-        )
+    normalised_symbols = _normalise_symbol_sequence(raw_symbols)
+    if raw_symbols and not normalised_symbols:
+        logger.warning("No valid trading symbols were configured; check trading.symbols")
     trading_cfg["symbols"] = normalised_symbols
     trading_cfg.setdefault("allow_shorting", False)
-    trading_cfg["paper_trading"] = bool(trading_cfg.get("paper_trading", True))
+    paper_flag = bool(trading_cfg.get("paper_trading", True))
+    trading_cfg["paper_trading"] = paper_flag
+    trading_cfg["mode"] = "paper" if paper_flag else "live"
     trading_cfg["allow_shorting"] = bool(trading_cfg.get("allow_shorting", False))
     trading_cfg["equity_allocation_percent"] = float(
         trading_cfg.get("equity_allocation_percent", 2.0)
@@ -175,7 +228,25 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     )
     normalised["risk"] = risk_cfg
 
+    worker_cfg = dict(normalised.get("workers", {}))
+    definitions = worker_cfg.get("definitions")
+    if isinstance(definitions, dict):
+        cleaned: Dict[str, dict[str, Any]] = {}
+        for name, definition in definitions.items():
+            if not isinstance(definition, MutableMapping):
+                continue
+            entry = dict(definition)
+            entry["symbols"] = _normalise_symbol_sequence(entry.get("symbols"))
+            cleaned[name] = entry
+        worker_cfg["definitions"] = cleaned
+    normalised["workers"] = worker_cfg
+
+    researcher_cfg = dict(normalised.get("researcher", {}))
+    if researcher_cfg:
+        researcher_cfg["symbols"] = _normalise_symbol_sequence(researcher_cfg.get("symbols"))
+        normalised["researcher"] = researcher_cfg
+
     return normalised
 
 
-__all__ = ["normalize_config", "read_config_file"]
+__all__ = ["normalize_config", "read_config_file", "normalize_symbol"]

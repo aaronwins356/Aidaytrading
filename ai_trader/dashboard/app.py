@@ -35,7 +35,7 @@ if not st.session_state.get("_page_configured", False):
     st.session_state["_page_configured"] = True
 
 DB_PATH = BASE_DIR / "data" / "trades.db"
-CONFIG_PATH = BASE_DIR / "config.yaml"
+CONFIG_PATH = PROJECT_ROOT / "configs" / "config.yaml"
 MODULE_DISPLAY_NAMES = {
     "ai_trader.workers.momentum.MomentumWorker": "Momentum Scout",
     "ai_trader.workers.mean_reversion.MeanReversionWorker": "Mean Reverter",

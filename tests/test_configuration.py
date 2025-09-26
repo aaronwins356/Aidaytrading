@@ -43,3 +43,26 @@ def test_normalize_config_clamps_trade_size_band() -> None:
 
     assert trading["min_cash_per_trade"] == 10.0
     assert trading["max_cash_per_trade"] == 20.0
+
+
+def test_normalize_config_sets_trading_mode_and_worker_symbols() -> None:
+    raw_config = {
+        "trading": {"paper_trading": False, "symbols": ["xbt/usd"]},
+        "workers": {
+            "definitions": {
+                "alpha": {
+                    "module": "ai_trader.workers.momentum.MomentumWorker",
+                    "symbols": ["xbt/usd"],
+                }
+            }
+        },
+    }
+
+    normalised = normalize_config(raw_config)
+    trading_cfg = normalised["trading"]
+    assert trading_cfg["paper_trading"] is False
+    assert trading_cfg["mode"] == "live"
+    assert trading_cfg["symbols"] == ["BTC/USD"]
+
+    worker_symbols = normalised["workers"]["definitions"]["alpha"]["symbols"]
+    assert worker_symbols == ["BTC/USD"]

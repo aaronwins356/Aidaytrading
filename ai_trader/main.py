@@ -21,19 +21,22 @@ from ai_trader.backtester import Backtester, BacktestResult
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.broker.websocket_manager import KrakenWebsocketManager
 from ai_trader.notifier import Notifier
-from ai_trader.services.configuration import normalize_config, read_config_file
+from ai_trader.services.configuration import (
+    normalize_config,
+    normalize_symbol,
+    read_config_file,
+)
 from ai_trader.services.equity import EquityEngine
 from ai_trader.services.logging import configure_logging, get_logger
 from ai_trader.services.ml import MLService
 from ai_trader.services.risk import RiskManager
 from ai_trader.services.schema import ALL_TABLES
 from ai_trader.services.trade_engine import TradeEngine
-from ai_trader.services.trade_log import MemoryTradeLog, TradeLog
+from ai_trader.services.trade_log import TradeLog
 from ai_trader.services.worker_loader import WorkerLoader
 from ai_trader.workers.researcher import MarketResearchWorker
 
-CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
-CONFIG_LIVE_PATH = Path(__file__).resolve().parent / "config.live.yaml"
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "config.yaml"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DB_PATH = DATA_DIR / "trades.db"
 
@@ -43,23 +46,16 @@ def load_config(config_path: Path) -> Dict[str, Any]:
 
     logger = get_logger(__name__)
     base_config = read_config_file(config_path)
-    profile = os.getenv("AI_TRADER_ENV", os.getenv("AI_TRADER_MODE", "")).lower()
-    if profile == "live":
-        live_overrides = read_config_file(CONFIG_LIVE_PATH)
-        if live_overrides:
-            logger.info("Applying live configuration overrides from %s", CONFIG_LIVE_PATH)
-            base_config = _merge_dicts(base_config, live_overrides)
-        else:
-            logger.warning(
-                "AI_TRADER_ENV=live but %s is missing – proceeding with base configuration",
-                CONFIG_LIVE_PATH,
-            )
+    if not base_config:
+        logger.warning("Configuration file %s was empty; using defaults", config_path)
     normalised = normalize_config(base_config)
     return normalised
 
 
-def _merge_dicts(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively merge ``overrides`` into ``base`` without mutating inputs."""
+def _merge_dicts(
+    base: Dict[str, Any], overrides: Dict[str, Any]
+) -> Dict[str, Any]:  # pragma: no cover
+    """Backward-compatible helper retained for legacy imports."""
 
     merged: Dict[str, Any] = {**base}
     for key, value in overrides.items():
@@ -68,20 +64,6 @@ def _merge_dicts(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, A
         else:
             merged[key] = value
     return merged
-
-
-def _normalize_symbol(symbol: object) -> str | None:
-    """Return a broker-friendly ``BASE/QUOTE`` pair or ``None`` if invalid."""
-
-    if symbol is None:
-        return None
-    text = str(symbol).strip().upper()
-    if not text or "/" not in text:
-        return None
-    base, quote = text.split("/", 1)
-    if base == "XBT":
-        base = "BTC"
-    return f"{base}/{quote}"
 
 
 def _collect_all_symbols(config: Dict[str, Any]) -> list[str]:
@@ -100,7 +82,7 @@ def _collect_all_symbols(config: Dict[str, Any]) -> list[str]:
         if isinstance(candidate, dict):
             _ingest(candidate.get("symbols"))
             return
-        normalised = _normalize_symbol(candidate)
+        normalised = normalize_symbol(candidate)
         if normalised and normalised not in seen:
             seen.add(normalised)
             collected.append(normalised)
@@ -318,7 +300,7 @@ def _validate_startup(
     config: Dict[str, Any],
     ml_service: MLService,
     *,
-    dryrun: bool = False,
+    paper_trading: bool = True,
 ) -> None:
     """Ensure critical services and configuration are ready before trading."""
 
@@ -350,37 +332,41 @@ def _validate_startup(
                 "Researcher will build the initial dataset before trades execute."
             )
 
-    if not dryrun:
-        _ensure_sqlite_schema(logger)
+    _ensure_sqlite_schema(logger)
 
-    if not dryrun:
-        try:
-            with sqlite3.connect(DB_PATH) as connection:
-                exists = connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='market_features'"
-                ).fetchone()
-        except sqlite3.Error as exc:
-            logger.error("Failed to verify market_features table: %s", exc)
-            raise SystemExit(1) from exc
-        if exists is None:
-            logger.error(
-                "Required SQLite table 'market_features' is missing. Run initialisation before starting the bot."
-            )
-            raise SystemExit(1)
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            exists = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='market_features'"
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.error("Failed to verify market_features table: %s", exc)
+        raise SystemExit(1) from exc
+    if exists is None:
+        logger.error(
+            "Required SQLite table 'market_features' is missing. Run initialisation before starting the bot."
+        )
+        raise SystemExit(1)
 
     trading_cfg = config.get("trading", {})
-    trading_mode = str(trading_cfg.get("mode", "paper")).lower()
-    logger.info("Trading mode: %s", trading_mode.upper())
-    if trading_mode == "live":
-        api_key = os.getenv("KRAKEN_API_KEY", "").strip()
-        api_secret = os.getenv("KRAKEN_API_SECRET", "").strip()
+    trading_mode = "PAPER" if paper_trading else "LIVE"
+    logger.info("Trading mode: %s", trading_mode)
+    if not paper_trading:
+        exchange_cfg = config.get("exchange", {})
+        api_key = (
+            os.getenv("KRAKEN_API_KEY", "").strip() or str(exchange_cfg.get("api_key", "")).strip()
+        )
+        api_secret = (
+            os.getenv("KRAKEN_API_SECRET", "").strip()
+            or str(exchange_cfg.get("api_secret", "")).strip()
+        )
         if not api_key or not api_secret:
             logger.error(
-                "Live trading requires KRAKEN_API_KEY and KRAKEN_API_SECRET environment variables."
+                "Live trading requires Kraken API credentials via environment variables or configs.exchange."
             )
             raise SystemExit(1)
 
-    if ml_workers and not dryrun:
+    if ml_workers:
         try:
             with sqlite3.connect(DB_PATH) as connection:
                 cursor = connection.execute("SELECT COUNT(1) FROM market_features")
@@ -441,11 +427,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=["live", "backtest", "api"],
         default="live",
         help="Execution mode: live trading, API service, or historical backtest",
-    )
-    parser.add_argument(
-        "--dryrun",
-        action="store_true",
-        help="Enable dry-run mode (no database writes or live orders)",
     )
     parser.add_argument(
         "--workers",
@@ -616,37 +597,52 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
     worker_cfg = runtime_config.get("workers", {})
     logger.info("Tracking markets: %s", ", ".join(symbols))
 
-    trading_mode = str(trading_cfg.get("mode", "paper")).lower()
-    live_trading = trading_mode == "live"
-    if live_trading:
-        logger.info(
-            "🚀 Running in LIVE trading mode – Kraken API credentials will be pulled from environment variables."
-        )
-    else:
+    paper_mode = bool(trading_cfg.get("paper_trading", True))
+    trading_mode = "PAPER" if paper_mode else "LIVE"
+    trading_cfg["mode"] = trading_mode.lower()
+    if paper_mode:
         logger.info("🧪 Running in PAPER trading mode – no real funds at risk.")
+    else:
+        logger.info(
+            "🚀 Running in LIVE trading mode – Kraken orders will be routed to the exchange."
+        )
+
+    exchange_cfg = runtime_config.get("exchange", {})
+    default_rate_limit = runtime_config.get("kraken", {}).get("rest_rate_limit", 0.5)
+    rest_rate_limit = float(exchange_cfg.get("rest_rate_limit", default_rate_limit))
+    env_api_key = os.getenv("KRAKEN_API_KEY", "").strip()
+    env_api_secret = os.getenv("KRAKEN_API_SECRET", "").strip()
+    config_api_key = str(
+        exchange_cfg.get("api_key", runtime_config.get("kraken", {}).get("api_key", ""))
+    ).strip()
+    config_api_secret = str(
+        exchange_cfg.get("api_secret", runtime_config.get("kraken", {}).get("api_secret", ""))
+    ).strip()
+    broker_api_key = env_api_key or config_api_key
+    broker_api_secret = env_api_secret or config_api_secret
 
     broker = KrakenClient(
-        api_key=os.getenv("KRAKEN_API_KEY", runtime_config.get("kraken", {}).get("api_key", "")),
-        api_secret=os.getenv(
-            "KRAKEN_API_SECRET", runtime_config.get("kraken", {}).get("api_secret", "")
-        ),
+        api_key=broker_api_key,
+        api_secret=broker_api_secret,
         base_currency=trading_cfg.get("base_currency", "USD"),
-        rest_rate_limit=float(runtime_config.get("kraken", {}).get("rest_rate_limit", 0.5)),
-        paper_trading=False if live_trading else bool(trading_cfg.get("paper_trading", True)),
+        rest_rate_limit=rest_rate_limit,
+        paper_trading=paper_mode,
         paper_starting_equity=float(trading_cfg.get("paper_starting_equity", 10000.0)),
         allow_shorting=bool(trading_cfg.get("allow_shorting", False)),
     )
 
-    dryrun = bool(args.dryrun)
-    if dryrun:
-        trade_log = MemoryTradeLog()
-    else:
-        trade_log = TradeLog(DB_PATH)
+    trade_log = TradeLog(DB_PATH)
 
     notifier: Notifier | None = None
-    telegram_token = os.getenv("TELEGRAM_TOKEN", "").strip()
-    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if telegram_token and telegram_chat_id:
+    telegram_cfg = runtime_config.get("notifications", {}).get("telegram", {})
+    telegram_token = (
+        os.getenv("TELEGRAM_TOKEN", "").strip() or str(telegram_cfg.get("bot_token", "")).strip()
+    )
+    telegram_chat_id = (
+        os.getenv("TELEGRAM_CHAT_ID", "").strip() or str(telegram_cfg.get("chat_id", "")).strip()
+    )
+    telegram_enabled = bool(telegram_cfg.get("enabled", True))
+    if telegram_enabled and telegram_token and telegram_chat_id:
         try:
             notifier = Notifier(token=telegram_token, chat_id=telegram_chat_id)
             await notifier.start()
@@ -656,7 +652,7 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         else:
             logger.info("Telegram notifier enabled for chat %s", telegram_chat_id)
     else:
-        logger.info("Telegram notifier disabled – TELEGRAM_TOKEN/TELEGRAM_CHAT_ID not provided")
+        logger.info("Telegram notifier disabled – configure notifications.telegram or env vars")
     ml_cfg = runtime_config.get("ml", {})
     feature_keys = ml_cfg.get(
         "feature_keys",
@@ -758,7 +754,14 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         logger.info("Broker returned %d open position(s) for reconciliation", len(broker_positions))
     await engine.rehydrate_open_positions(broker_positions)
 
-    _validate_startup(engine, workers, researchers, runtime_config, ml_service, dryrun=dryrun)
+    _validate_startup(
+        engine,
+        workers,
+        researchers,
+        runtime_config,
+        ml_service,
+        paper_trading=paper_mode,
+    )
 
     stop_event = asyncio.Event()
 
@@ -772,8 +775,6 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         except NotImplementedError:
             signal.signal(sig, lambda *_: asyncio.create_task(engine.stop()))
 
-    if dryrun:
-        engine.enable_signal_only_mode("dry-run")
     bot_task = asyncio.create_task(engine.start())
     try:
         await stop_event.wait()
@@ -809,13 +810,16 @@ def run_api_server(config: Dict[str, Any]) -> None:
     trade_log = TradeLog(DB_PATH)
     attach_services(trade_log=trade_log, runtime_state=runtime_state, risk_manager=risk_manager)
 
-    host = os.getenv("AI_TRADER_API_HOST", "0.0.0.0")
-    port_value = os.getenv("AI_TRADER_API_PORT", "8000")
+    api_cfg = runtime_config.get("api", {})
+    host = os.getenv("AI_TRADER_API_HOST") or api_cfg.get("host", "0.0.0.0")
+    port_value = os.getenv("AI_TRADER_API_PORT") or str(api_cfg.get("port", 8000))
     try:
         port = int(port_value)
     except ValueError:
         port = 8000
-    reload_flag = os.getenv("AI_TRADER_API_RELOAD", "0").lower() in {"1", "true", "on"}
+    reload_env = os.getenv("AI_TRADER_API_RELOAD")
+    reload_value = reload_env if reload_env is not None else str(api_cfg.get("reload", False))
+    reload_flag = str(reload_value).lower() in {"1", "true", "on"}
 
     logger = get_logger(__name__)
     logger.info("Starting API server on %s:%d", host, port)

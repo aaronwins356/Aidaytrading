@@ -84,7 +84,7 @@ def api_context() -> tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTra
 
 
 def test_status_endpoint(
-    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]
+    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog],
 ) -> None:
     client, _, _, _ = api_context
     response = client.get("/status")
@@ -98,7 +98,7 @@ def test_status_endpoint(
 
 
 def test_profit_endpoint(
-    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]
+    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog],
 ) -> None:
     client, _, _, _ = api_context
     response = client.get("/profit")
@@ -111,7 +111,7 @@ def test_profit_endpoint(
 
 
 def test_trades_endpoint_limit(
-    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]
+    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog],
 ) -> None:
     client, _, _, _ = api_context
     response = client.get("/trades", params={"limit": 1})
@@ -126,7 +126,7 @@ def test_trades_endpoint_limit(
 
 
 def test_config_updates_risk_settings(
-    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog]
+    api_context: tuple[TestClient, RuntimeStateStore, RiskManager, MemoryTradeLog],
 ) -> None:
     client, runtime_state, risk_manager, _ = api_context
     response = client.post(
