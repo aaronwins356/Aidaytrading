@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import csv
 import os
 import signal
 import sqlite3
+import threading
 from collections import deque
+from datetime import datetime, timezone
 from logging import Logger
 from pathlib import Path
 from typing import Any, Dict, Iterable, Sequence
 
+from ai_trader.backtester import Backtester, BacktestResult
 from ai_trader.broker.kraken_client import KrakenClient
 from ai_trader.broker.websocket_manager import KrakenWebsocketManager
 from ai_trader.services.configuration import normalize_config, read_config_file
@@ -447,6 +451,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Path to configuration YAML file",
     )
     parser.add_argument(
+        "--mode",
+        choices=["live", "backtest"],
+        default="live",
+        help="Execution mode: live trading or historical backtest",
+    )
+    parser.add_argument(
         "--dryrun",
         action="store_true",
         help="Enable dry-run mode (no database writes or live orders)",
@@ -470,6 +480,89 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--ml-window-size", type=int, dest="ml_window_size")
     parser.add_argument("--ml-retrain-interval", type=int, dest="ml_retrain_interval")
+    parser.add_argument("--pair", type=str, help="Trading pair for backtests (e.g. BTC/USDT)")
+    parser.add_argument("--start", type=str, help="Backtest start date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, help="Backtest end date (YYYY-MM-DD)")
+    parser.add_argument("--timeframe", type=str, default="1h", help="Backtest timeframe for OHLCV data")
+    parser.add_argument(
+        "--backtest-csv",
+        dest="backtest_csv",
+        type=str,
+        help="Optional CSV file supplying OHLCV candles for backtesting",
+    )
+    parser.add_argument(
+        "--backtest-fee",
+        dest="backtest_fee",
+        type=float,
+        default=0.0026,
+        help="Taker fee rate applied during backtests (default 0.0026)",
+    )
+    parser.add_argument(
+        "--backtest-slippage-bps",
+        dest="backtest_slippage_bps",
+        type=float,
+        default=1.0,
+        help="Slippage applied during backtests in basis points",
+    )
+    parser.add_argument(
+        "--reports-dir",
+        dest="reports_dir",
+        type=str,
+        help="Override the reports output directory",
+    )
+    parser.add_argument(
+        "--parallel-backtest",
+        action="store_true",
+        help="Run a background backtest while live trading",
+    )
+    parser.add_argument(
+        "--parallel-backtest-pair",
+        dest="parallel_backtest_pair",
+        type=str,
+        help="Pair for parallel backtest (defaults to primary pair)",
+    )
+    parser.add_argument(
+        "--parallel-backtest-start",
+        dest="parallel_backtest_start",
+        type=str,
+        help="Start date for parallel backtest",
+    )
+    parser.add_argument(
+        "--parallel-backtest-end",
+        dest="parallel_backtest_end",
+        type=str,
+        help="End date for parallel backtest",
+    )
+    parser.add_argument(
+        "--parallel-backtest-timeframe",
+        dest="parallel_backtest_timeframe",
+        type=str,
+        help="Timeframe for the parallel backtest",
+    )
+    parser.add_argument(
+        "--parallel-backtest-csv",
+        dest="parallel_backtest_csv",
+        type=str,
+        help="CSV source for the parallel backtest",
+    )
+    parser.add_argument(
+        "--parallel-backtest-fee",
+        dest="parallel_backtest_fee",
+        type=float,
+        help="Fee rate for the parallel backtest",
+    )
+    parser.add_argument(
+        "--parallel-backtest-slippage-bps",
+        dest="parallel_backtest_slippage",
+        type=float,
+        help="Slippage basis points for the parallel backtest",
+    )
+    parser.add_argument(
+        "--parallel-backtest-label",
+        dest="parallel_backtest_label",
+        type=str,
+        help="Custom label for parallel backtest report artefacts",
+    )
     return parser.parse_args(argv)
 
 
@@ -521,22 +614,26 @@ def _apply_cli_overrides(config: Dict[str, Any], args: argparse.Namespace) -> No
         worker_cfg["definitions"] = filtered
 
 
-async def start_bot(args: argparse.Namespace) -> None:
+def prepare_config(args: argparse.Namespace) -> Dict[str, Any]:
     config_path = Path(args.config).expanduser().resolve()
     config = load_config(config_path)
     _apply_cli_overrides(config, args)
-    configure_logging()
+    return config
+
+
+async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> None:
+    runtime_config = copy.deepcopy(config)
     logger = get_logger(__name__)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    symbols = _collect_all_symbols(config)
+    symbols = _collect_all_symbols(runtime_config)
     if not symbols:
         logger.error("No trading symbols configured. Add at least one market pair to config.yaml")
         raise SystemExit(1)
-    config.setdefault("trading", {})["symbols"] = symbols
-    trading_cfg = config.get("trading", {})
-    risk_cfg = config.get("risk", {})
-    worker_cfg = config.get("workers", {})
+    runtime_config.setdefault("trading", {})["symbols"] = symbols
+    trading_cfg = runtime_config.get("trading", {})
+    risk_cfg = runtime_config.get("risk", {})
+    worker_cfg = runtime_config.get("workers", {})
     logger.info("Tracking markets: %s", ", ".join(symbols))
 
     trading_mode = str(trading_cfg.get("mode", "paper")).lower()
@@ -547,12 +644,12 @@ async def start_bot(args: argparse.Namespace) -> None:
         logger.info("🧪 Running in PAPER trading mode – no real funds at risk.")
 
     broker = KrakenClient(
-        api_key=os.getenv("KRAKEN_API_KEY", config.get("kraken", {}).get("api_key", "")),
+        api_key=os.getenv("KRAKEN_API_KEY", runtime_config.get("kraken", {}).get("api_key", "")),
         api_secret=os.getenv(
-            "KRAKEN_API_SECRET", config.get("kraken", {}).get("api_secret", "")
+            "KRAKEN_API_SECRET", runtime_config.get("kraken", {}).get("api_secret", "")
         ),
         base_currency=trading_cfg.get("base_currency", "USD"),
-        rest_rate_limit=float(config.get("kraken", {}).get("rest_rate_limit", 0.5)),
+        rest_rate_limit=float(runtime_config.get("kraken", {}).get("rest_rate_limit", 0.5)),
         paper_trading=False if live_trading else bool(trading_cfg.get("paper_trading", True)),
         paper_starting_equity=float(trading_cfg.get("paper_starting_equity", 10000.0)),
         allow_shorting=bool(trading_cfg.get("allow_shorting", False)),
@@ -563,7 +660,7 @@ async def start_bot(args: argparse.Namespace) -> None:
         trade_log = MemoryTradeLog()
     else:
         trade_log = TradeLog(DB_PATH)
-    ml_cfg = config.get("ml", {})
+    ml_cfg = runtime_config.get("ml", {})
     feature_keys = ml_cfg.get(
         "feature_keys",
         [
@@ -610,7 +707,9 @@ async def start_bot(args: argparse.Namespace) -> None:
 
     symbols = trading_cfg.get("symbols", [])
     websocket_manager = KrakenWebsocketManager(symbols)
-    worker_loader = WorkerLoader(worker_cfg, symbols, researcher_config=config.get("researcher"))
+    worker_loader = WorkerLoader(
+        worker_cfg, symbols, researcher_config=runtime_config.get("researcher")
+    )
     shared_services = {"ml_service": ml_service, "trade_log": trade_log}
     workers, researchers = worker_loader.load(shared_services)
 
@@ -655,7 +754,7 @@ async def start_bot(args: argparse.Namespace) -> None:
         logger.info("Broker returned %d open position(s) for reconciliation", len(broker_positions))
     await engine.rehydrate_open_positions(broker_positions)
 
-    _validate_startup(engine, workers, researchers, config, ml_service, dryrun=dryrun)
+    _validate_startup(engine, workers, researchers, runtime_config, ml_service, dryrun=dryrun)
 
     stop_event = asyncio.Event()
 
@@ -677,10 +776,137 @@ async def start_bot(args: argparse.Namespace) -> None:
     await bot_task
 
 
+def _resolve_path(value: str | None) -> Path | None:
+    if not value:
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def _parse_date(value: str | None, field_name: str) -> datetime:
+    if not value:
+        raise SystemExit(f"Missing required {field_name} date for backtest")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:  # noqa: B904 - re-raise with friendly hint
+        raise SystemExit(f"Invalid {field_name} date '{value}'. Use YYYY-MM-DD format.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed
+
+
+def run_backtest_cli(args: argparse.Namespace, config: Dict[str, Any]) -> BacktestResult:
+    logger = get_logger(__name__)
+    runtime_config = copy.deepcopy(config)
+    trading_cfg = runtime_config.get("trading", {})
+    default_pair = None
+    symbols = trading_cfg.get("symbols")
+    if isinstance(symbols, (list, tuple)) and symbols:
+        default_pair = symbols[0]
+    pair = args.pair or default_pair
+    if not pair:
+        raise SystemExit("Backtest mode requires --pair or a symbol in configuration")
+    start = _parse_date(args.start, "start")
+    end = _parse_date(args.end, "end")
+    if end <= start:
+        raise SystemExit("Backtest end date must be after the start date")
+
+    csv_path = _resolve_path(args.backtest_csv)
+    reports_dir = _resolve_path(args.reports_dir)
+    backtester = Backtester(
+        runtime_config,
+        pair,
+        start,
+        end,
+        timeframe=args.timeframe or "1h",
+        fee_rate=float(args.backtest_fee or 0.0),
+        slippage_bps=float(args.backtest_slippage_bps or 0.0),
+        csv_path=csv_path,
+        reports_dir=reports_dir,
+    )
+    result = asyncio.run(backtester.run())
+    summary_path = result.report_paths.get("summary_json")
+    if summary_path:
+        logger.info("Backtest summary saved to %s", summary_path)
+    return result
+
+
+def _spawn_parallel_backtest(args: argparse.Namespace, config: Dict[str, Any]) -> threading.Thread | None:
+    if not args.parallel_backtest:
+        return None
+    logger = get_logger(__name__)
+    runtime_config = copy.deepcopy(config)
+    trading_cfg = runtime_config.get("trading", {})
+    default_pair = None
+    symbols = trading_cfg.get("symbols")
+    if isinstance(symbols, (list, tuple)) and symbols:
+        default_pair = symbols[0]
+    pair = args.parallel_backtest_pair or args.pair or default_pair
+    start_value = args.parallel_backtest_start or args.start
+    end_value = args.parallel_backtest_end or args.end
+    if not (pair and start_value and end_value):
+        logger.warning(
+            "Parallel backtest requested but pair/start/end parameters are incomplete. Skipping shadow run."
+        )
+        return None
+    try:
+        start = _parse_date(start_value, "parallel backtest start")
+        end = _parse_date(end_value, "parallel backtest end")
+    except SystemExit as exc:
+        logger.warning("Parallel backtest parameter error: %s", exc)
+        return None
+    if end <= start:
+        logger.warning("Parallel backtest end date must be after start date. Skipping background run.")
+        return None
+
+    timeframe = args.parallel_backtest_timeframe or args.timeframe or "1h"
+    csv_path = _resolve_path(args.parallel_backtest_csv)
+    reports_dir = _resolve_path(args.reports_dir)
+    fee = float(args.parallel_backtest_fee) if args.parallel_backtest_fee is not None else float(args.backtest_fee or 0.0)
+    slippage = float(args.parallel_backtest_slippage) if args.parallel_backtest_slippage is not None else float(args.backtest_slippage_bps or 0.0)
+    label = args.parallel_backtest_label or "parallel"
+
+    def _runner() -> None:
+        thread_logger = get_logger(__name__ + ".parallel")
+        try:
+            backtester = Backtester(
+                runtime_config,
+                pair,
+                start,
+                end,
+                timeframe=timeframe,
+                fee_rate=fee,
+                slippage_bps=slippage,
+                csv_path=csv_path,
+                reports_dir=reports_dir,
+                label=label,
+            )
+            asyncio.run(backtester.run())
+            thread_logger.info("Parallel backtest '%s' finished", label)
+        except Exception as exc:  # noqa: BLE001 - never crash main loop due to background run
+            thread_logger.exception("Parallel backtest '%s' failed: %s", label, exc)
+
+    thread = threading.Thread(target=_runner, name="parallel-backtest", daemon=True)
+    thread.start()
+    logger.info(
+        "Spawned parallel backtest thread for %s (%s to %s)",
+        pair,
+        start.date(),
+        end.date(),
+    )
+    return thread
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    config = prepare_config(args)
+    configure_logging()
     try:
-        asyncio.run(start_bot(args))
+        if args.mode == "backtest":
+            run_backtest_cli(args, config)
+        else:
+            _spawn_parallel_backtest(args, config)
+            asyncio.run(start_trading(args, config))
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - catch-all for a clean shutdown message
