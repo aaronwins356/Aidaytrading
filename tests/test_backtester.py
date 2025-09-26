@@ -178,5 +178,5 @@ workers:
 
     from ai_trader import main as main_module
 
-    main_module.main(["--mode", "live", "--config", str(config_path), "--dryrun"])
+    main_module.main(["--mode", "live", "--config", str(config_path)])
     assert live_called["invoked"]

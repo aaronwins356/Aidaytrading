@@ -13,7 +13,7 @@ from ai_trader.services.worker_loader import WorkerLoader
 def test_worker_loader_smoke(tmp_path) -> None:
     """Ensure the default configuration produces active workers."""
 
-    config_path = Path(__file__).resolve().parents[1] / "ai_trader" / "config.yaml"
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "config.yaml"
     raw_config = read_config_file(config_path)
     config = normalize_config(raw_config)
 

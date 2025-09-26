@@ -74,7 +74,7 @@ class BacktestResult:
     metrics: Dict[str, float]
     trades: List[BacktestTrade]
     equity_curve: List[Dict[str, Any]]
-    report_paths: Dict[str, Path]
+    report_paths: Dict[str, Path] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -262,6 +262,7 @@ class Backtester:
         candles: Sequence[Mapping[str, Any]] | None = None,
         reports_dir: Path | None = None,
         label: str | None = None,
+        generate_reports: bool = True,
     ) -> None:
         if start >= end:
             raise ValueError("Backtest start date must be earlier than end date")
@@ -278,8 +279,10 @@ class Backtester:
         self._logger = get_logger(__name__)
         self._candles_input = list(candles) if candles is not None else None
         self._label = label
+        self._generate_reports = bool(generate_reports)
         self._reports_dir = reports_dir or REPORTS_DIR
-        self._reports_dir.mkdir(parents=True, exist_ok=True)
+        if self._generate_reports:
+            self._reports_dir.mkdir(parents=True, exist_ok=True)
 
         trading_cfg = self._config.setdefault("trading", {})
         trading_cfg["symbols"] = [self._pair]
@@ -688,7 +691,9 @@ class Backtester:
             "fees_paid": sum(trade.entry_fee + trade.exit_fee for trade in self._closed_trades),
         }
 
-        report_paths = self._export_reports(metrics)
+        report_paths: Dict[str, Path] = {}
+        if self._generate_reports:
+            report_paths = self._export_reports(metrics)
         equity_curve = [
             {
                 **row,
