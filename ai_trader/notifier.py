@@ -10,6 +10,7 @@ from typing import Mapping, MutableMapping, Optional
 
 from telegram import Bot
 
+from ai_trader.services.monitoring import get_monitoring_center
 from ai_trader.services.types import TradeIntent
 
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class Notifier:
         self._stop_event = asyncio.Event()
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._last_heartbeat: datetime | None = None
+        self._monitoring = get_monitoring_center()
 
     async def start(self) -> None:
         """Begin the background heartbeat scheduler."""
@@ -98,7 +100,17 @@ class Notifier:
         body = "\n".join(line for line in lines if line)
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         message = f"{body}\n<sub>{timestamp}</sub>"
-        await self._send_message(message, parse_mode="HTML")
+        await self._send_message(
+            message,
+            parse_mode="HTML",
+            event_type="notifier_trade",
+            metadata={
+                "symbol": symbol,
+                "worker": worker,
+                "action": action,
+                "mode": metadata.get("mode") if isinstance(metadata, Mapping) else None,
+            },
+        )
 
     async def send_error(self, error: Exception | str) -> None:
         """Send a critical error notification."""
@@ -107,7 +119,12 @@ class Notifier:
             message = f"⚠️ <b>Trading bot error:</b> {error}"
         else:
             message = f"⚠️ <b>Trading bot error:</b> {error}"
-        await self._send_message(message, parse_mode="HTML")
+        await self._send_message(
+            message,
+            parse_mode="HTML",
+            event_type="notifier_error",
+            severity="ERROR",
+        )
 
     async def send_heartbeat(self) -> None:
         """Send a periodic heartbeat to confirm liveness."""
@@ -115,9 +132,77 @@ class Notifier:
         now = datetime.now(timezone.utc)
         self._last_heartbeat = now
         message = now.strftime("✅ Heartbeat — bot online at %H:%M UTC (%Y-%m-%d)")
-        await self._send_message(message)
+        await self._send_message(
+            message,
+            event_type="notifier_heartbeat",
+            metadata={"timestamp": now.isoformat()},
+        )
 
-    async def _send_message(self, text: str, *, parse_mode: str | None = None) -> None:
+    async def send_startup_heartbeat(
+        self,
+        *,
+        equity: float,
+        open_positions: int,
+        mode: str,
+        currency: str = "USD",
+    ) -> None:
+        """Send an immediate startup heartbeat before scheduling periodic beats."""
+
+        now = datetime.now(timezone.utc)
+        summary = (
+            f"🚀 Startup heartbeat — mode: {mode.upper()}\n"
+            f"Equity: {equity:,.2f} {currency}\n"
+            f"Open positions: {open_positions}"
+        )
+        await self._send_message(
+            summary,
+            event_type="notifier_startup",
+            metadata={
+                "equity": float(equity),
+                "open_positions": int(open_positions),
+                "mode": mode,
+                "currency": currency,
+                "timestamp": now.isoformat(),
+            },
+        )
+
+    async def send_watchdog_alert(
+        self, timeout_seconds: float, last_update: datetime | None
+    ) -> None:
+        """Send a watchdog alert when the runtime stalls."""
+
+        last_update_text = last_update.isoformat() if last_update is not None else "unknown"
+        message = (
+            f"⚠️ Bot stalled: no runtime update in {timeout_seconds:.0f} seconds"
+            f" (last update: {last_update_text})"
+        )
+        await self._send_message(
+            message,
+            event_type="notifier_watchdog",
+            severity="WARNING",
+            metadata={
+                "timeout_seconds": float(timeout_seconds),
+                "last_update_time": last_update_text,
+            },
+        )
+
+    async def _send_message(
+        self,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+        event_type: str | None = None,
+        severity: str = "INFO",
+        metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        if event_type:
+            self._monitoring.record_event(
+                event_type,
+                severity,
+                text,
+                metadata=metadata,
+                symbol=(metadata or {}).get("symbol") if metadata else None,
+            )
         try:
             async with self._lock:
                 await self._bot.send_message(
@@ -128,6 +213,13 @@ class Notifier:
                 )
         except Exception as exc:  # noqa: BLE001 - logging only; notifier must not crash loop
             LOGGER.warning("Failed to send Telegram message: %s", exc)
+            if event_type:
+                self._monitoring.record_event(
+                    f"{event_type}_failure",
+                    "ERROR",
+                    f"Failed to deliver notifier message: {exc}",
+                    metadata={"original_message": text},
+                )
 
     def _normalize_trade(
         self, trade: TradeIntent | Mapping[str, object]

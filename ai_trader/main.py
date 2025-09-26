@@ -31,9 +31,11 @@ from ai_trader.services.logging import configure_logging, get_logger
 from ai_trader.services.ml import MLService
 from ai_trader.services.risk import RiskManager
 from ai_trader.services.schema import ALL_TABLES
+from ai_trader.services.monitoring import get_monitoring_center
 from ai_trader.services.trade_engine import TradeEngine
 from ai_trader.services.trade_log import TradeLog
 from ai_trader.services.worker_loader import WorkerLoader
+from ai_trader.services.watchdog import RuntimeWatchdog
 from ai_trader.workers.researcher import MarketResearchWorker
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "config.yaml"
@@ -635,6 +637,8 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
     trade_log = TradeLog(DB_PATH)
 
     notifier: Notifier | None = None
+    monitoring_center = get_monitoring_center()
+    monitoring_center.set_runtime_degraded(False, None)
     telegram_cfg = runtime_config.get("notifications", {}).get("telegram", {})
     telegram_token = (
         os.getenv("TELEGRAM_TOKEN", "").strip() or str(telegram_cfg.get("bot_token", "")).strip()
@@ -646,7 +650,6 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
     if telegram_enabled and telegram_token and telegram_chat_id:
         try:
             notifier = Notifier(token=telegram_token, chat_id=telegram_chat_id)
-            await notifier.start()
         except Exception as exc:  # noqa: BLE001 - network/setup issues should not abort startup
             logger.warning("Failed to initialise Telegram notifier: %s", exc)
             notifier = None
@@ -755,6 +758,37 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
     else:
         logger.info("Broker returned %d open position(s) for reconciliation", len(broker_positions))
     await engine.rehydrate_open_positions(broker_positions)
+    runtime_state.mark_runtime_update()
+
+    if notifier is not None:
+        snapshot = runtime_state.status_snapshot()
+        equity_value = snapshot.get("equity") or snapshot.get("balance") or broker.starting_equity
+        try:
+            equity = float(equity_value)
+        except (TypeError, ValueError):
+            equity = broker.starting_equity
+        open_positions_count = len(snapshot.get("open_positions") or [])
+        await notifier.send_startup_heartbeat(
+            equity=equity,
+            open_positions=open_positions_count,
+            mode=trading_mode.lower(),
+            currency=broker.base_currency,
+        )
+        await notifier.start()
+
+    watchdog: RuntimeWatchdog | None = None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    watchdog_timeout = float(runtime_config.get("watchdog_timeout_seconds", 60.0))
+    watchdog = RuntimeWatchdog(
+        runtime_state,
+        timeout_seconds=watchdog_timeout,
+        alert_callback=notifier.send_watchdog_alert if notifier is not None else None,
+        event_loop=loop,
+    )
+    watchdog.start()
 
     _validate_startup(
         engine,
@@ -784,6 +818,8 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         await engine.stop()
         if notifier is not None:
             await notifier.stop()
+        if watchdog is not None:
+            watchdog.stop()
     await bot_task
 
 
