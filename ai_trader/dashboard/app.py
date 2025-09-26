@@ -35,7 +35,7 @@ if not st.session_state.get("_page_configured", False):
     st.session_state["_page_configured"] = True
 
 DB_PATH = BASE_DIR / "data" / "trades.db"
-CONFIG_PATH = BASE_DIR / "config.yaml"
+CONFIG_PATH = PROJECT_ROOT / "configs" / "config.yaml"
 MODULE_DISPLAY_NAMES = {
     "ai_trader.workers.momentum.MomentumWorker": "Momentum Scout",
     "ai_trader.workers.mean_reversion.MeanReversionWorker": "Mean Reverter",
@@ -496,9 +496,9 @@ def render_equity_curve(equity_df: pd.DataFrame) -> None:
 
 def render_runtime_status(config: Dict, bot_states: pd.DataFrame, ml_service: MLService) -> None:
     st.subheader("Runtime Status")
-    trading_mode = str(config.get("trading", {}).get("mode", "paper")).lower()
-    mode_label = "Live Trading" if trading_mode == "live" else "Paper Trading"
-    badge = "🟢" if trading_mode == "live" else "🧪"
+    paper_trading = bool(config.get("trading", {}).get("paper_trading", True))
+    mode_label = "Live Trading" if not paper_trading else "Paper Trading"
+    badge = "🟢" if not paper_trading else "🧪"
     st.markdown(f"**Mode:** {badge} {mode_label}")
     st.markdown("**Long-only policy:** ✅ Strategies and broker reject shorts by design.")
 
@@ -619,10 +619,8 @@ def render_bot_cards(
     name_lookup = {
         _display_name_for_definition(definition): definition for definition in definitions.values()
     }
-    trading_mode = str(config.get("trading", {}).get("mode", "paper")).lower()
-    mode_sentence = (
-        "live trading with the broker" if trading_mode == "live" else "paper simulation mode"
-    )
+    paper_trading = bool(config.get("trading", {}).get("paper_trading", True))
+    mode_sentence = "live trading with the broker" if not paper_trading else "paper simulation mode"
 
     def _status_sentence(raw_status: str) -> str:
         status_key = (raw_status or "").lower()
@@ -1234,7 +1232,7 @@ def render_sidebar(config: Dict) -> str:
 
     control_flags = load_control_flags()
 
-    trading_mode_default = config["trading"].get("mode", "paper")
+    trading_mode_default = "paper" if config["trading"].get("paper_trading", True) else "live"
     initial_mode = st.session_state.get("trading_mode_radio", trading_mode_default)
     if initial_mode not in {"paper", "live"}:
         initial_mode = trading_mode_default
@@ -1245,9 +1243,9 @@ def render_sidebar(config: Dict) -> str:
         key="trading_mode_radio",
     )
     trading_mode = st.session_state.get("trading_mode_radio", initial_mode)
-    if trading_mode != config["trading"].get("mode"):
-        config["trading"]["mode"] = trading_mode
+    if trading_mode != trading_mode_default:
         config["trading"]["paper_trading"] = trading_mode == "paper"
+        config["trading"].pop("mode", None)
         save_config(config)
         st.sidebar.success("Trading mode updated. Restart engine to take effect.")
 

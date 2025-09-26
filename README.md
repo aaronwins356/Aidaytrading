@@ -9,15 +9,17 @@ A streamlined, modular crypto trading bot that connects to Kraken, executes mult
 - **Risk-aware** – configurable drawdown, daily loss, and position-duration guardrails.
 - **Equity engine** – tracks live account equity (paper or live), stores history, and calculates total P/L.
 - **Dashboard** – Streamlit UI with overview metrics, equity curve, trade log, worker cards, and adjustable risk controls.
-- **Paper + live trading** – toggle via `config.yaml`. Paper mode simulates balances; live mode submits real orders.
+- **Paper + live trading** – toggle via `configs/config.yaml`. Paper mode simulates balances; live mode submits real orders.
 - **Historical backtesting** – simulate strategies against Kraken OHLCV data or local CSVs with configurable fees/slippage.
 
 ## Project Layout
 
 ```
+configs/
+└── config.yaml         # API keys, trading symbols, risk config including paper/live toggle
+
 ai_trader/
 ├── main.py             # Runtime loop and orchestration
-├── config.yaml         # API keys, trading symbols, risk config
 ├── broker/             # Kraken REST + WebSocket integrations
 ├── workers/            # Strategy workers implementing BaseWorker
 ├── services/           # Trade engine, equity, logging, risk, trade log
@@ -30,14 +32,17 @@ ai_trader/
 
 ```bash
 .venv\\Scripts\\Activate.ps1
-python -m ai_trader.main
+python -m ai_trader.main --config configs/config.yaml
 ```
 
-**Dry run (no SQLite or live orders)**
+Paper trading vs live execution is controlled via the `trading.paper_trading` flag in
+`configs/config.yaml`. Set it to `false` when you are ready to route orders to Kraken.
 
-```bash
-python -m ai_trader.main --dryrun --config ai_trader/config.yaml
-```
+**Windows one-click launchers**
+
+- `trade.bat` – activates `.venv` and starts the trading loop in the selected mode.
+- `dash.bat` – activates `.venv` and launches the Streamlit dashboard.
+- `api.bat` – activates `.venv` and exposes the monitoring API.
 
 **Enable the ML ensemble worker only**
 
@@ -56,7 +61,7 @@ python -m ai_trader.main --risk-per-trade 0.015 --risk-max-drawdown 12 --ml-wind
 ```bash
 python -m ai_trader.main \
   --mode backtest \
-  --config ai_trader/config.yaml \
+  --config configs/config.yaml \
   --pair BTC/USDT \
   --start 2022-01-01 \
   --end 2022-12-31 \
@@ -138,9 +143,9 @@ The included paper mode initializes with `$10,000` USD and honours Kraken minimu
 
 ## Extending the Bot
 
-- **Add a worker:** drop a new module in `ai_trader/workers/`, subclass `BaseWorker`, and append the dotted path to `workers.modules` in `config.yaml`.
+- **Add a worker:** drop a new module in `ai_trader/workers/`, subclass `BaseWorker`, and append the dotted path to `workers.modules` in `configs/config.yaml`.
 - **Leverage ML:** create workers that learn from the SQLite trade history. The logging schema stores entry/exit data ready for pandas modelling.
-- **Risk tuning:** adjust sliders in the dashboard, then update `config.yaml` to persist changes for the runtime loop.
+- **Risk tuning:** adjust sliders in the dashboard, then update `configs/config.yaml` to persist changes for the runtime loop.
 
 ## Monitoring & Notifications
 
@@ -149,8 +154,9 @@ The included paper mode initializes with `$10,000` USD and honours Kraken minimu
 - Start the UI with `streamlit run ai_trader/streamlit_app.py`.
 - The **Portfolio Overview** tab surfaces equity, PnL, daily return histogram, and drawdown curve.
 - **Trades Log** exposes rich filtering (symbol, strategy, date) with export to CSV.
-- **Risk Controls** persists stop-loss, risk-per-trade, and drawdown guardrails directly into `config.yaml` and live control flags.
+- **Risk Controls** persists stop-loss, risk-per-trade, and drawdown guardrails directly into `configs/config.yaml` and live control flags.
 - **Strategy Manager** toggles rule-based and ML workers on/off while updating runtime control flags.
+- **On-demand Backtests** are available from the sidebar. Select a symbol, choose a lookback window, and Streamlit runs the simulation in a background thread before plotting the equity curve, trade log, and performance metrics in-line.
 - Screenshot the dashboard after launching with seeded data for runbooks or documentation (e.g. `streamlit run ...` then capture via your OS screenshot tool).
 
 ### Telegram live alerts

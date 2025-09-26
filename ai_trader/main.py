@@ -28,12 +28,12 @@ from ai_trader.services.ml import MLService
 from ai_trader.services.risk import RiskManager
 from ai_trader.services.schema import ALL_TABLES
 from ai_trader.services.trade_engine import TradeEngine
-from ai_trader.services.trade_log import MemoryTradeLog, TradeLog
+from ai_trader.services.trade_log import TradeLog
 from ai_trader.services.worker_loader import WorkerLoader
 from ai_trader.workers.researcher import MarketResearchWorker
 
-CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
-CONFIG_LIVE_PATH = Path(__file__).resolve().parent / "config.live.yaml"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = PROJECT_ROOT / "configs" / "config.yaml"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DB_PATH = DATA_DIR / "trades.db"
 
@@ -43,31 +43,13 @@ def load_config(config_path: Path) -> Dict[str, Any]:
 
     logger = get_logger(__name__)
     base_config = read_config_file(config_path)
-    profile = os.getenv("AI_TRADER_ENV", os.getenv("AI_TRADER_MODE", "")).lower()
-    if profile == "live":
-        live_overrides = read_config_file(CONFIG_LIVE_PATH)
-        if live_overrides:
-            logger.info("Applying live configuration overrides from %s", CONFIG_LIVE_PATH)
-            base_config = _merge_dicts(base_config, live_overrides)
-        else:
-            logger.warning(
-                "AI_TRADER_ENV=live but %s is missing – proceeding with base configuration",
-                CONFIG_LIVE_PATH,
-            )
+    if not base_config:
+        logger.warning(
+            "Configuration file at %s is empty or missing; using default values where possible.",
+            config_path,
+        )
     normalised = normalize_config(base_config)
     return normalised
-
-
-def _merge_dicts(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively merge ``overrides`` into ``base`` without mutating inputs."""
-
-    merged: Dict[str, Any] = {**base}
-    for key, value in overrides.items():
-        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
-            merged[key] = _merge_dicts(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
 
 
 def _normalize_symbol(symbol: object) -> str | None:
@@ -317,8 +299,6 @@ def _validate_startup(
     researchers: Sequence[object],
     config: Dict[str, Any],
     ml_service: MLService,
-    *,
-    dryrun: bool = False,
 ) -> None:
     """Ensure critical services and configuration are ready before trading."""
 
@@ -350,28 +330,27 @@ def _validate_startup(
                 "Researcher will build the initial dataset before trades execute."
             )
 
-    if not dryrun:
-        _ensure_sqlite_schema(logger)
+    _ensure_sqlite_schema(logger)
 
-    if not dryrun:
-        try:
-            with sqlite3.connect(DB_PATH) as connection:
-                exists = connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='market_features'"
-                ).fetchone()
-        except sqlite3.Error as exc:
-            logger.error("Failed to verify market_features table: %s", exc)
-            raise SystemExit(1) from exc
-        if exists is None:
-            logger.error(
-                "Required SQLite table 'market_features' is missing. Run initialisation before starting the bot."
-            )
-            raise SystemExit(1)
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            exists = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='market_features'"
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.error("Failed to verify market_features table: %s", exc)
+        raise SystemExit(1) from exc
+    if exists is None:
+        logger.error(
+            "Required SQLite table 'market_features' is missing. Run initialisation before starting the bot."
+        )
+        raise SystemExit(1)
 
     trading_cfg = config.get("trading", {})
-    trading_mode = str(trading_cfg.get("mode", "paper")).lower()
+    paper_trading = bool(trading_cfg.get("paper_trading", True))
+    trading_mode = "paper" if paper_trading else "live"
     logger.info("Trading mode: %s", trading_mode.upper())
-    if trading_mode == "live":
+    if not paper_trading:
         api_key = os.getenv("KRAKEN_API_KEY", "").strip()
         api_secret = os.getenv("KRAKEN_API_SECRET", "").strip()
         if not api_key or not api_secret:
@@ -380,7 +359,7 @@ def _validate_startup(
             )
             raise SystemExit(1)
 
-    if ml_workers and not dryrun:
+    if ml_workers:
         try:
             with sqlite3.connect(DB_PATH) as connection:
                 cursor = connection.execute("SELECT COUNT(1) FROM market_features")
@@ -441,11 +420,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=["live", "backtest", "api"],
         default="live",
         help="Execution mode: live trading, API service, or historical backtest",
-    )
-    parser.add_argument(
-        "--dryrun",
-        action="store_true",
-        help="Enable dry-run mode (no database writes or live orders)",
     )
     parser.add_argument(
         "--workers",
@@ -608,7 +582,9 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
 
     symbols = _collect_all_symbols(runtime_config)
     if not symbols:
-        logger.error("No trading symbols configured. Add at least one market pair to config.yaml")
+        logger.error(
+            "No trading symbols configured. Add at least one market pair to configs/config.yaml"
+        )
         raise SystemExit(1)
     runtime_config.setdefault("trading", {})["symbols"] = symbols
     trading_cfg = runtime_config.get("trading", {})
@@ -616,8 +592,8 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
     worker_cfg = runtime_config.get("workers", {})
     logger.info("Tracking markets: %s", ", ".join(symbols))
 
-    trading_mode = str(trading_cfg.get("mode", "paper")).lower()
-    live_trading = trading_mode == "live"
+    paper_trading_flag = bool(trading_cfg.get("paper_trading", True))
+    live_trading = not paper_trading_flag
     if live_trading:
         logger.info(
             "🚀 Running in LIVE trading mode – Kraken API credentials will be pulled from environment variables."
@@ -632,16 +608,11 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         ),
         base_currency=trading_cfg.get("base_currency", "USD"),
         rest_rate_limit=float(runtime_config.get("kraken", {}).get("rest_rate_limit", 0.5)),
-        paper_trading=False if live_trading else bool(trading_cfg.get("paper_trading", True)),
+        paper_trading=paper_trading_flag,
         paper_starting_equity=float(trading_cfg.get("paper_starting_equity", 10000.0)),
         allow_shorting=bool(trading_cfg.get("allow_shorting", False)),
     )
-
-    dryrun = bool(args.dryrun)
-    if dryrun:
-        trade_log = MemoryTradeLog()
-    else:
-        trade_log = TradeLog(DB_PATH)
+    trade_log = TradeLog(DB_PATH)
 
     notifier: Notifier | None = None
     telegram_token = os.getenv("TELEGRAM_TOKEN", "").strip()
@@ -758,7 +729,7 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         logger.info("Broker returned %d open position(s) for reconciliation", len(broker_positions))
     await engine.rehydrate_open_positions(broker_positions)
 
-    _validate_startup(engine, workers, researchers, runtime_config, ml_service, dryrun=dryrun)
+    _validate_startup(engine, workers, researchers, runtime_config, ml_service)
 
     stop_event = asyncio.Event()
 
@@ -772,8 +743,6 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         except NotImplementedError:
             signal.signal(sig, lambda *_: asyncio.create_task(engine.stop()))
 
-    if dryrun:
-        engine.enable_signal_only_mode("dry-run")
     bot_task = asyncio.create_task(engine.start())
     try:
         await stop_event.wait()

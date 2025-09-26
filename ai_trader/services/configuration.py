@@ -108,7 +108,6 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     normalised["ml"] = ml_cfg
 
     trading_cfg = dict(normalised.get("trading", {}))
-    trading_cfg.setdefault("mode", "paper")
     trading_cfg.setdefault("paper_trading", True)
     trading_cfg.setdefault("equity_allocation_percent", 2.0)
     trading_cfg.setdefault("paper_starting_equity", 25000.0)
@@ -141,9 +140,15 @@ def normalize_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         logger.warning(
             "Trading symbols must be a sequence; received %s", type(raw_symbols).__name__
         )
+    trading_mode = str(trading_cfg.get("mode", "")).strip().lower()
+    if trading_mode in {"paper", "live"}:
+        trading_cfg["paper_trading"] = trading_mode != "live"
+    paper_flag = bool(trading_cfg.get("paper_trading", True))
+    trading_cfg["paper_trading"] = paper_flag
+    if "mode" in trading_cfg:
+        trading_cfg["mode"] = "paper" if paper_flag else "live"
     trading_cfg["symbols"] = normalised_symbols
     trading_cfg.setdefault("allow_shorting", False)
-    trading_cfg["paper_trading"] = bool(trading_cfg.get("paper_trading", True))
     trading_cfg["allow_shorting"] = bool(trading_cfg.get("allow_shorting", False))
     trading_cfg["equity_allocation_percent"] = float(
         trading_cfg.get("equity_allocation_percent", 2.0)

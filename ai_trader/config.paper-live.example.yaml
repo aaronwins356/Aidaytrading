@@ -2,7 +2,7 @@
 # 1. Start in paper mode to validate signals and confidence while using paper balances.
 # 2. Once satisfied, switch to live mode and ensure KRAKEN_API_KEY / KRAKEN_API_SECRET env vars are set.
 #
-# Copy this file to config.yaml and adjust symbols/risk per your strategy profile.
+# Copy this file to configs/config.yaml and adjust symbols/risk per your strategy profile.
 kraken:
   api_key: ""  # Leave blank – bot reads from environment variables in production.
   api_secret: ""
@@ -22,7 +22,6 @@ trading:
   min_cash_per_trade: 10.0
   max_cash_per_trade: 20.0
   trade_confidence_min: 0.5
-  mode: "paper"  # Toggle to "live" only after credentials + production risk checks.
 
 risk:
   max_drawdown_percent: 10.0

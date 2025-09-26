@@ -123,11 +123,18 @@ class DummyColumn:
 class DummyStreamlit:
     def __init__(self) -> None:
         self.session_state: dict[str, Any] = {}
+        self.sidebar = self
 
     def set_page_config(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
     def markdown(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def caption(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def header(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
     def subheader(self, *_args: Any, **_kwargs: Any) -> None:
@@ -144,6 +151,21 @@ class DummyStreamlit:
 
     def expander(self, *_args: Any, **_kwargs: Any) -> DummyContext:
         return DummyContext()
+
+    def selectbox(
+        self, _label: str, options: Iterable[Any], index: int = 0, **_kwargs: Any
+    ) -> Any:
+        choices = list(options)
+        if not choices:
+            return None
+        index = max(0, min(index, len(choices) - 1))
+        return choices[index]
+
+    def number_input(self, _label: str, value: Any = 0, **_kwargs: Any) -> Any:
+        return value
+
+    def button(self, *_args: Any, **_kwargs: Any) -> bool:
+        return False
 
     def multiselect(
         self, _label: str, options: Iterable[Any], default: Iterable[Any] | None = None
