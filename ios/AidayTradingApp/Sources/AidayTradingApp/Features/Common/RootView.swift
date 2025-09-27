@@ -10,19 +10,20 @@ struct RootView: View {
                 ProgressView("Loading session…")
             case .loggedOut:
                 AuthenticationFlowView()
-            case .pendingApproval(let email):
-                PendingApprovalView(email: email) {
+            case .pendingApproval(let context):
+                PendingApprovalView(context: context) {
                     session.refreshProfile()
                 }
             case .authenticated(let context):
                 MainTabView(context: context)
             }
         }
+        .background(Theme.background.ignoresSafeArea())
         .task {
             await session.bootstrap()
         }
-        .alert(item: $session.error) { error in
-            Alert(title: Text("Error"), message: Text(error.message), dismissButton: .default(Text("OK")))
+        .alert(item: $session.alert) { alert in
+            Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("OK")))
         }
     }
 }

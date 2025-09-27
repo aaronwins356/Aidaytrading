@@ -23,28 +23,20 @@ struct MainTabView: View {
     var body: some View {
         TabView(selection: $selection) {
             HomeView(context: context, reportingService: reportingService)
-                .tabItem {
-                    Label("Home", systemImage: "chart.line.uptrend.xyaxis")
-                }
+                .tabItem { Label("Home", systemImage: "chart.line.uptrend.xyaxis") }
                 .tag(Tab.home)
 
             CalendarView(context: context, reportingService: reportingService)
-                .tabItem {
-                    Label("Calendar", systemImage: "calendar")
-                }
+                .tabItem { Label("Calendar", systemImage: "calendar") }
                 .tag(Tab.calendar)
 
             TradesView(context: context, reportingService: reportingService)
-                .tabItem {
-                    Label("Trades", systemImage: "list.bullet.rectangle")
-                }
+                .tabItem { Label("Trades", systemImage: "list.bullet.rectangle") }
                 .tag(Tab.trades)
 
-            if context.profile.role == .admin {
+            if RoleManager.isAdmin(context.profile) {
                 AdminView()
-                    .tabItem {
-                        Label("Admin", systemImage: "lock.shield")
-                    }
+                    .tabItem { Label("Admin", systemImage: "lock.shield") }
                     .tag(Tab.admin)
             }
         }
@@ -58,7 +50,9 @@ struct MainTabView: View {
         }
         .onChange(of: notificationController.pendingTab) { _, newValue in
             guard let tab = newValue else { return }
-            selection = tab
+            if RoleManager.accessibleTabs(for: context.profile).contains(tab) {
+                selection = tab
+            }
             _ = notificationController.consumePendingTab()
         }
         .toolbar {

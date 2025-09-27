@@ -16,10 +16,11 @@ final class LoginFlowTests: XCTestCase {
             tokenStorage: tokenStorage,
             biometricAuthenticator: MockBiometricAuthenticator(),
             idleManager: idleManager,
+            approvalService: MockApprovalService(),
             previewState: .loggedOut
         )
 
-        await session.login(email: profile.email, password: "Secure123")
+        await session.login(username: profile.username, password: "Secure123")
 
         XCTAssertTrue(tokenStorage.saveCalled)
         guard case let .authenticated(sessionContext) = session.state else {
@@ -39,14 +40,33 @@ final class LoginFlowTests: XCTestCase {
             tokenStorage: tokenStorage,
             biometricAuthenticator: MockBiometricAuthenticator(),
             idleManager: MockIdleTimeoutManager(),
+            approvalService: MockApprovalService(),
             previewState: .loggedOut
         )
 
-        await session.login(email: "user@example.com", password: "bad")
+        await session.login(username: "user", password: "bad")
 
         XCTAssertTrue(tokenStorage.deleteCalled)
         guard case .loggedOut = session.state else {
             return XCTFail("Expected logged out state")
         }
+    }
+
+    func testPasswordResetShowsSuccessAlert() async throws {
+        let authService = MockAuthService()
+        let session = SessionStore(
+            authService: authService,
+            tokenStorage: MockTokenStorage(),
+            biometricAuthenticator: MockBiometricAuthenticator(),
+            idleManager: MockIdleTimeoutManager(),
+            approvalService: MockApprovalService(),
+            previewState: .loggedOut
+        )
+
+        session.requestPasswordReset(email: "reset@example.com")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(authService.passwordResetEmails.first, "reset@example.com")
+        XCTAssertEqual(session.alert?.title, "Reset email sent")
     }
 }

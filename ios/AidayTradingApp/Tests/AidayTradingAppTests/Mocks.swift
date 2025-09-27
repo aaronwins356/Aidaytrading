@@ -6,12 +6,14 @@ final class MockAuthService: AuthServiceProtocol {
     var signupResult: Result<UserProfile, Error> = .failure(MockError.notConfigured)
     var refreshResult: Result<AuthTokens, Error> = .failure(MockError.notConfigured)
     var profileResult: Result<UserProfile, Error> = .failure(MockError.notConfigured)
+    var logoutCalled = false
+    var passwordResetEmails: [String] = []
 
     func signup(username: String, email: String, password: String) async throws -> UserProfile {
         try await signupResult.get()
     }
 
-    func login(email: String, password: String) async throws -> UserSessionContext {
+    func login(username: String, password: String) async throws -> UserSessionContext {
         try await loginResult.get()
     }
 
@@ -21,6 +23,14 @@ final class MockAuthService: AuthServiceProtocol {
 
     func loadProfile(accessToken: String) async throws -> UserProfile {
         try await profileResult.get()
+    }
+
+    func logout(accessToken: String) async throws {
+        logoutCalled = true
+    }
+
+    func requestPasswordReset(email: String) async throws {
+        passwordResetEmails.append(email)
     }
 }
 
@@ -76,6 +86,14 @@ final class MockIdleTimeoutManager: IdleTimeoutHandling {
 enum MockError: Error {
     case notConfigured
     case biometricFailed
+}
+
+final class MockApprovalService: ApprovalServiceProtocol {
+    var statusResult: Result<UserProfile.ApprovalStatus, Error> = .failure(MockError.notConfigured)
+
+    func fetchStatus(username: String, email: String) async throws -> UserProfile.ApprovalStatus {
+        try await statusResult.get()
+    }
 }
 
 final class MockLocalNotificationScheduler: LocalNotificationScheduling {

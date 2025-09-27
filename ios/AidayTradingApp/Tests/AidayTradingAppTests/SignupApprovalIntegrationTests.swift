@@ -18,16 +18,17 @@ final class SignupApprovalIntegrationTests: XCTestCase {
             tokenStorage: MockTokenStorage(),
             biometricAuthenticator: MockBiometricAuthenticator(),
             idleManager: MockIdleTimeoutManager(),
+            approvalService: MockApprovalService(),
             previewState: .loggedOut
         )
 
         await session.signup(username: "NewUser", email: pendingProfile.email, password: "Password1")
-        guard case let .pendingApproval(email) = session.state else {
+        guard case let .pendingApproval(pendingContext) = session.state else {
             return XCTFail("Expected pending approval state")
         }
-        XCTAssertEqual(email, pendingProfile.email)
+        XCTAssertEqual(pendingContext.email, pendingProfile.email)
 
-        await session.login(email: approvedProfile.email, password: "Password1")
+        await session.login(username: approvedProfile.username, password: "Password1")
         guard case let .authenticated(authenticatedContext) = session.state else {
             return XCTFail("Expected authenticated state")
         }

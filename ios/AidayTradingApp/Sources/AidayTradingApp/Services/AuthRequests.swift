@@ -2,9 +2,11 @@ import Foundation
 
 enum AuthRequest: APIRequestConvertible {
     case signup(username: String, email: String, password: String)
-    case login(email: String, password: String)
+    case login(username: String, password: String)
     case refresh(refreshToken: String)
     case profile(accessToken: String)
+    case logout(accessToken: String)
+    case forgotPassword(email: String)
 
     var urlRequest: URLRequest {
         get throws {
@@ -19,12 +21,12 @@ enum AuthRequest: APIRequestConvertible {
                     "email": email,
                     "password": password
                 ])
-            case let .login(email, password):
+            case let .login(username, password):
                 let url = APIEnvironment.baseURL.appending(path: "/auth/login")
                 request = URLRequest(url: url)
                 request.httpMethod = "POST"
                 request.httpBody = try JSONEncoder().encode([
-                    "email": email,
+                    "username": username,
                     "password": password
                 ])
             case let .refresh(refreshToken):
@@ -39,6 +41,18 @@ enum AuthRequest: APIRequestConvertible {
                 request = URLRequest(url: url)
                 request.httpMethod = "GET"
                 request.addValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            case let .logout(accessToken):
+                let url = APIEnvironment.baseURL.appending(path: "/auth/logout")
+                request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.addValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            case let .forgotPassword(email):
+                let url = APIEnvironment.baseURL.appending(path: "/auth/forgot-password")
+                request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.httpBody = try JSONEncoder().encode([
+                    "email": email
+                ])
             }
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             request.addValue("application/json", forHTTPHeaderField: "Accept")

@@ -11,6 +11,7 @@ struct AuthenticationFlowView: View {
             .navigationDestination(isPresented: $isPresentingSignup) {
                 SignupView()
             }
+            .toolbar(.hidden, for: .automatic)
         }
     }
 }

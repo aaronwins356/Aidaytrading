@@ -2,9 +2,11 @@ import Foundation
 
 protocol AuthServiceProtocol {
     func signup(username: String, email: String, password: String) async throws -> UserProfile
-    func login(email: String, password: String) async throws -> UserSessionContext
+    func login(username: String, password: String) async throws -> UserSessionContext
     func refresh(using refreshToken: String) async throws -> AuthTokens
     func loadProfile(accessToken: String) async throws -> UserProfile
+    func logout(accessToken: String) async throws
+    func requestPasswordReset(email: String) async throws
 }
 
 struct AuthService: AuthServiceProtocol {
@@ -19,8 +21,8 @@ struct AuthService: AuthServiceProtocol {
         return response.user
     }
 
-    func login(email: String, password: String) async throws -> UserSessionContext {
-        let response: AuthResponse = try await apiClient.send(AuthRequest.login(email: email, password: password), decode: AuthResponse.self)
+    func login(username: String, password: String) async throws -> UserSessionContext {
+        let response: AuthResponse = try await apiClient.send(AuthRequest.login(username: username, password: password), decode: AuthResponse.self)
         return UserSessionContext(profile: response.user, tokens: response.tokens)
     }
 
@@ -31,5 +33,13 @@ struct AuthService: AuthServiceProtocol {
 
     func loadProfile(accessToken: String) async throws -> UserProfile {
         try await apiClient.send(AuthRequest.profile(accessToken: accessToken), decode: UserProfile.self)
+    }
+
+    func logout(accessToken: String) async throws {
+        try await apiClient.send(AuthRequest.logout(accessToken: accessToken))
+    }
+
+    func requestPasswordReset(email: String) async throws {
+        try await apiClient.send(AuthRequest.forgotPassword(email: email))
     }
 }
