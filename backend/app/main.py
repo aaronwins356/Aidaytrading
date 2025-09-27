@@ -7,7 +7,18 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import auth, bot, devices, equity, monitoring, risk, trades, websocket, users
+from .api import (
+    auth,
+    bot,
+    devices,
+    equity,
+    monitoring,
+    notifications,
+    risk,
+    trades,
+    websocket,
+    users,
+)
 from .config import get_settings
 from .database import Base, engine
 from .services.notifications import notification_service
@@ -48,6 +59,7 @@ def create_app() -> FastAPI:
     investor_router.include_router(equity.router)
     investor_router.include_router(trades.router)
     investor_router.include_router(devices.router)
+    investor_router.include_router(notifications.router)
 
     admin_router = APIRouter(prefix="/admin", tags=["admin"])
     admin_router.include_router(users.admin_router)

@@ -51,3 +51,23 @@ class PasswordResetRequest(BaseModel):
 class DeviceRegisterRequest(BaseModel):
     token: str = Field(max_length=512)
     platform: Literal["ios", "android"] = "ios"
+    timezone: str | None = Field(default=None, max_length=64)
+
+
+class DeviceDeregisterRequest(BaseModel):
+    token: str = Field(max_length=512)
+
+
+class NotificationPreferences(BaseModel):
+    heartbeat_push: bool = True
+    trade_alert_push: bool = True
+    system_alert_push: bool = True
+
+    class Config:
+        orm_mode = True
+
+
+class NotificationPreferencesUpdate(BaseModel):
+    heartbeat_push: bool | None = None
+    trade_alert_push: bool | None = None
+    system_alert_push: bool | None = None
