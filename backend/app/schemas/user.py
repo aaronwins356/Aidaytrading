@@ -33,6 +33,17 @@ class UserOut(BaseModel):
         from_attributes = True
 
 
+class UserProfile(BaseModel):
+    id: str
+    username: str
+    email: EmailStr
+    role: UserRole
+    approval_status: UserStatus
+
+    class Config:
+        from_attributes = True
+
+
 class PasswordResetRequest(BaseModel):
     reset_link: str
 

@@ -7,14 +7,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models.user import User
-from ..schemas.user import PasswordResetRequest, UserOut, UserUpdate
-from ..security.auth import require_admin, to_user_out
+from ..schemas.user import PasswordResetRequest, UserOut, UserUpdate, UserProfile
+from ..security.auth import get_current_user, require_admin, to_user_out, to_user_profile
 from ..services.brevo import brevo_service
 
 router = APIRouter(prefix="/users", tags=["users"])
+admin_router = APIRouter(prefix="/users", tags=["users-admin"])
 
 
-@router.get("", response_model=list[UserOut])
+@router.get("/me", response_model=UserProfile)
+async def read_current_user(user: User = Depends(get_current_user)) -> UserProfile:
+    return to_user_profile(user)
+
+
+@admin_router.get("", response_model=list[UserOut])
 async def list_users(
     _: User = Depends(require_admin), session: AsyncSession = Depends(get_db)
 ) -> list[UserOut]:
@@ -23,7 +29,7 @@ async def list_users(
     return [to_user_out(user) for user in users]
 
 
-@router.patch("/{user_id}", response_model=UserOut)
+@admin_router.patch("/{user_id}", response_model=UserOut)
 async def update_user(
     user_id: str,
     payload: UserUpdate,
@@ -42,7 +48,7 @@ async def update_user(
     return to_user_out(user)
 
 
-@router.post("/{user_id}/reset-password", status_code=status.HTTP_202_ACCEPTED)
+@admin_router.post("/{user_id}/reset-password", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_password_reset(
     user_id: str,
     payload: PasswordResetRequest,
