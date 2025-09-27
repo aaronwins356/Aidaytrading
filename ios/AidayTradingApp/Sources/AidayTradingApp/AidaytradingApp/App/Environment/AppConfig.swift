@@ -11,6 +11,16 @@ struct AppConfig {
         #endif
     }()
 
+    static let webSocketURL: URL = {
+        #if DEBUG
+        URL(string: "wss://api.example.com/ws")!
+        #elseif STAGING
+        URL(string: "wss://api.example.com/ws")!
+        #else
+        URL(string: "wss://api.example.com/ws")!
+        #endif
+    }()
+
     static let pollingInterval: TimeInterval = 600
     static let centralTimeZone: TimeZone = TimeZone(identifier: "America/Chicago")!
 }

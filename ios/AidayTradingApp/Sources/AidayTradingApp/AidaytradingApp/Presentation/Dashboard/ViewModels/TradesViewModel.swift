@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 @MainActor
@@ -29,6 +30,8 @@ final class TradesViewModel: ObservableObject {
     private var allTrades: [Trade] = []
     private var isLoadingMore = false
     private let pageSize = 50
+    private var cancellables = Set<AnyCancellable>()
+    private weak var realtimeClient: TradingWebSocketClientProtocol?
 
     init(repository: TradesRepository = TradesRepositoryImpl()) {
         self.repository = repository
@@ -62,6 +65,21 @@ final class TradesViewModel: ObservableObject {
             self.error = error.localizedDescription
         }
         isLoadingMore = false
+    }
+
+    func attachRealtime(_ client: TradingWebSocketClientProtocol) {
+        guard realtimeClient === nil else { return }
+        realtimeClient = client
+        client.tradePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] trade in
+                guard let self else { return }
+                guard !self.allTrades.contains(where: { $0.id == trade.id }) else { return }
+                self.allTrades.insert(trade, at: 0)
+                self.applyFilters()
+                self.refreshSymbols()
+            }
+            .store(in: &cancellables)
     }
 
     func apply(filters: TradesFilters) {

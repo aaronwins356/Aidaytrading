@@ -3,6 +3,7 @@ import SwiftUI
 struct TradesListView: View {
     @StateObject private var viewModel: TradesViewModel
     @State private var filters: TradesViewModel.TradesFilters = .empty
+    @EnvironmentObject private var realtimeClient: TradingWebSocketClient
 
     init(viewModel: TradesViewModel = TradesViewModel()) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -35,6 +36,9 @@ struct TradesListView: View {
             }
             .refreshable {
                 await viewModel.loadFirstPage()
+            }
+            .onAppear {
+                viewModel.attachRealtime(realtimeClient)
             }
         }
         .preferredColorScheme(.dark)

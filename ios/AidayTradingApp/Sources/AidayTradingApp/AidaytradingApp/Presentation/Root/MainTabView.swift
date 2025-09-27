@@ -3,12 +3,14 @@ import SwiftUI
 struct MainTabView: View {
     let context: UserSessionContext
     @EnvironmentObject private var session: SessionStore
-    @EnvironmentObject private var notificationController: NotificationController
+    @EnvironmentObject private var notificationManager: NotificationManager
+    @EnvironmentObject private var realtimeClient: TradingWebSocketClient
 
     enum Tab: Hashable {
         case home
         case calendar
         case trades
+        case notifications
         case admin
     }
 
@@ -28,6 +30,10 @@ struct MainTabView: View {
                 .tabItem { Label("Trades", systemImage: "list.bullet.rectangle") }
                 .tag(Tab.trades)
 
+            NotificationCenterView()
+                .tabItem { Label("Alerts", systemImage: "bell.badge") }
+                .tag(Tab.notifications)
+
             if RoleManager.isAdmin(context.profile) {
                 AdminView()
                     .tabItem { Label("Admin", systemImage: "lock.shield") }
@@ -41,13 +47,14 @@ struct MainTabView: View {
         }
         .onAppear {
             session.registerInteraction()
+            notificationManager.bind(to: realtimeClient)
         }
-        .onChange(of: notificationController.pendingTab) { _, newValue in
+        .onChange(of: notificationManager.pendingTab) { _, newValue in
             guard let tab = newValue else { return }
             if RoleManager.accessibleTabs(for: context.profile).contains(tab) {
                 selection = tab
             }
-            _ = notificationController.consumePendingTab()
+            _ = notificationManager.consumePendingTab()
         }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -56,5 +63,13 @@ struct MainTabView: View {
                 }
             }
         }
+        .overlay(alignment: .top) {
+            if let banner = notificationManager.activeBanner {
+                NotificationBannerView(notification: banner)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .padding(.top, 8)
+            }
+        }
+        .animation(.spring(response: 0.5, dampingFraction: 0.8), value: notificationManager.activeBanner)
     }
 }

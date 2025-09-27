@@ -109,13 +109,30 @@ final class MockLocalNotificationScheduler: LocalNotificationScheduling {
     }
 }
 
-final class MockPushNotificationService: PushNotificationRegistering {
+final class MockPushNotificationService: PushNotificationRegistering, NotificationPreferencesServicing {
     private(set) var lastToken: String?
     private(set) var registerCallCount = 0
+    private(set) var updateCallCount = 0
+    private(set) var unregisterCallCount = 0
+    var preferences: NotificationPreferences = .default
 
     func register(deviceToken: String, accessToken: String) async throws {
         lastToken = deviceToken
         registerCallCount += 1
+    }
+
+    func fetchPreferences(accessToken: String) async throws -> NotificationPreferences {
+        preferences
+    }
+
+    func update(preferences: NotificationPreferences, accessToken: String) async throws -> NotificationPreferences {
+        updateCallCount += 1
+        self.preferences = preferences
+        return preferences
+    }
+
+    func unregister(deviceToken: String, accessToken: String) async throws {
+        unregisterCallCount += 1
     }
 }
 

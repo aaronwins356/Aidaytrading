@@ -13,9 +13,10 @@ This SwiftUI application provides the secure mobile entry point for the AidayTra
 - Guided password reset experience wired to `/auth/forgot-password` and delivered via secure email.
 - Unit and integration tests covering authentication, token handling, role detection, and approval workflow.
 - Viewer dashboards with an equity curve chart, calendar heatmap computed in Central Time, and a paginated trade ledger.
-- Data refresh every ten minutes using authenticated REST polling with offline cache fallbacks.
-- Push notifications delivered via Firebase Cloud Messaging, including deep linking into the correct tab when tapped.
-- Local notification fallback that warns the operator if the realtime feed stalls.
+- Live WebSocket streaming keeps status, equity, and trades current without 10-minute polling delays while retaining disk-cache fallbacks for offline resilience.
+- Push notifications delivered via Firebase Cloud Messaging with in-app banners, deep linking into the correct tab, and background delivery when the app is terminated.
+- A first-class Notifications tab aggregates push payloads and realtime system events with filtering, swipe-to-delete, and JSON inspection.
+- Local notification fallback warns the operator if the realtime feed stalls or reconnect attempts exceed the backoff window.
 
 ## Project structure
 
@@ -35,7 +36,7 @@ ios/AidayTradingApp
 
 ## Viewer dashboards
 
-- **Dashboard tab** – Presents the latest system status, balance, P/L metrics, and equity curve using the finance-grade theme in `AidaytradingApp/Foundation/DesignSystem`. Data loads instantly from disk cache and refreshes every ten minutes through `HomeViewModel`.
+- **Dashboard tab** – Presents the latest system status, balance, P/L metrics, and equity curve using the finance-grade theme in `AidaytradingApp/Foundation/DesignSystem`. Data loads instantly from disk cache and streams live via `TradingWebSocketClient` so charts animate as soon as backend telemetry arrives.
 - **Calendar tab** – Uses `CalendarViewModel` and `CalendarPnLComputer` to group closed trades into Central Time day buckets. Tapping a day reveals trade-level details.
 - **Trades tab** – Driven by `TradesViewModel` with client-side filters (symbol, outcome, date range) and infinite scroll pagination backed by `TradesRepositoryImpl`.
 - Snapshot test fixtures in `Tests/AidayTradingAppTests/UI/Snapshot` render light-weight previews for the Dashboard and Calendar tabs.
@@ -51,10 +52,13 @@ ios/AidayTradingApp
 - `TradesListView` hosts `FiltersView`, allowing symbol selection, win/loss toggles, and optional date range filtering.
 - `TradesViewModel` keeps an in-memory trade cache, applies filters client-side, and requests the next page when the user nears the end of the list.
 
-## Polling & caching
+## Realtime streaming & notification center
 
-- `HomeViewModel` starts a ten-minute polling cycle defined by `AppConfig.pollingInterval` and cancels the task on disappear.
-- Network fetches are persisted to disk through `DiskCache` (`equity_latest.json`, `profit_latest.json`, `trades_page_1.json`) and replayed immediately on launch.
+- `TradingWebSocketClient` maintains a TLS-secured connection to `AppConfig.webSocketURL`, authenticating with the user's JWT and emitting strongly typed Combine publishers for equity, trades, and status.
+- Exponential backoff (1s → 60s) drives reconnection attempts; the client deduplicates equity snapshots, trade IDs, and bot status timestamps to prevent jitter.
+- `HomeViewModel` and `TradesViewModel` subscribe to the publishers so UI state updates within ~100ms of a server event, animating the equity curve and appending trades in place.
+- `NotificationManager` bridges APNs/FCM push tokens to the backend, stores payloads in a Core Data SQLite store, and binds to realtime publishers to mirror important events as in-app alerts.
+- The Notifications tab displays historical alerts with Central Time annotations, emoji status icons (🚀, ✋, 📊), and a JSON detail view, giving operators a compliant audit trail without relying on Telegram.
 
 ## Accessibility & localization
 
@@ -93,11 +97,12 @@ The app expects the backend (Prompt A) to expose HTTPS endpoints:
 - `POST /auth/login`  → `{ "tokens": { ... }, "user": { ... } }`
 - `POST /auth/refresh`
 - `GET /users/me`
-- `GET /ws/status` (authenticated WebSocket channel publishing `{ "running": bool, "uptime_seconds": int }` updates)
-- `GET /ws/equity` (authenticated WebSocket channel emitting equity curve points as `[timestamp, equity]` arrays at 10 minute cadence)
-- `GET /ws/trades` (authenticated WebSocket channel streaming trade executions in real-time)
+- `GET /ws` (authenticated WebSocket that multiplexes JSON envelopes such as `{ "type": "equity_update", "ts": 1695866400000, "equity": 12432.55 }`, `{ "type": "trade_executed", ... }`, and `{ "type": "bot_status", ... }`)
 - `POST /api/v1/notifications/devices` expecting `{ "token": string, "platform": "ios", "timezone": string }`
-- Remote notification payloads should include a `target` field (`home`, `trades`, `calendar`, or `admin`) so the app can deep link when the user taps alerts. Schedule balance/PnL recaps at 8am, 2pm, 8pm, and 2am Central Time and send bot state changes via FCM topics or user-specific tokens.
+- `GET /api/v1/notifications/preferences`
+- `PUT /api/v1/notifications/preferences` with `{ "botEventsEnabled": bool, "reportsEnabled": bool }`
+- `DELETE /api/v1/notifications/devices` with `{ "token": string }` to unregister stale tokens when an admin toggles delivery off.
+- Remote notification payloads should include a `target` field (`home`, `trades`, `calendar`, `notifications`, or `admin`) so the app can deep link when the user taps alerts. Schedule balance/PnL recaps at 8am, 2pm, 8pm, and 2am Central Time (US Central) and send bot state changes via FCM topics or user-specific tokens. Payloads must omit secrets and include a unique `notification_id` for deduplication.
 
 Responses should encode dates using ISO-8601 to match the bundled `JSONDecoder` configuration.
 
@@ -122,6 +127,8 @@ xcodebuild \
   test
 ```
 
+To validate push payload rendering in the simulator, craft an `.apns` file and execute `xcrun simctl push booted com.aidaytrading.app payload.apns` after launching the app.
+
 Static analysis can be plugged in using SwiftLint by adding a `.swiftlint.yml` configuration at the project root. Ensure your CI environment runs:
 
 ```bash
@@ -140,7 +147,7 @@ xcodebuild \
   test
 ```
 
-The mocked realtime layer lives in `Tests/AidayTradingAppTests/RealtimeServiceTests.swift`.
+Realtime streaming and push notification logic are exercised via Combine-driven tests in `NotificationManagerTests` and `TradesViewModelRealtimeTests`, which rely on mocked WebSocket publishers and an in-memory Core Data store.
 
 ## Environment configuration
 
@@ -151,8 +158,6 @@ The mocked realtime layer lives in `Tests/AidayTradingAppTests/RealtimeServiceTe
 
 ## Next steps
 
-- Wire dashboard, calendar, and trade list views to live backend data.
-- Extend admin tooling with approval actions (approve/reject users, manage risk limits).
+- Expand admin tooling with approval actions (approve/reject users, manage risk limits).
 - Add push notification support for approval status changes.
-- Expand dashboard analytics with additional strategy drill-downs.
-- Add per-strategy real-time feeds and refine notification targeting for complex user roles.
+- Expose per-strategy realtime feeds and fine-grained notification routing once additional bot telemetry is available.

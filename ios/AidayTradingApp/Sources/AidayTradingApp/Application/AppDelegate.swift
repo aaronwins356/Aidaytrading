@@ -5,7 +5,7 @@ import UIKit
 import UserNotifications
 
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate, MessagingDelegate {
-    weak var notificationController: NotificationController?
+    weak var notificationManager: NotificationManager?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         FirebaseApp.configure()
@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        Messaging.messaging().apnsToken = deviceToken
+        notificationManager?.didRegisterForRemoteNotificationsWithDeviceToken(deviceToken)
     }
 
     func userNotificationCenter(
@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        notificationManager?.handleRemoteNotification(userInfo: notification.request.content.userInfo)
         completionHandler([.banner, .sound])
     }
 
@@ -33,7 +34,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     ) {
         let userInfo = response.notification.request.content.userInfo
         Task { @MainActor in
-            notificationController?.handleRemoteNotification(userInfo: userInfo)
+            notificationManager?.handleRemoteNotification(userInfo: userInfo)
         }
         completionHandler()
     }
@@ -41,7 +42,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
         guard let token = fcmToken else { return }
         Task { @MainActor in
-            notificationController?.registerFCMToken(token)
+            notificationManager?.handleFCMToken(token)
         }
     }
 }
