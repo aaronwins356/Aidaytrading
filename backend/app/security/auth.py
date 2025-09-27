@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models.user import RefreshToken, User, UserRole, UserStatus
-from ..schemas.user import UserOut
+from ..schemas.auth import TokenBundle
+from ..schemas.user import UserOut, UserProfile
 from ..utils.logger import get_logger
 from .jwt import TokenError, create_access_token, create_refresh_token, decode_token
 
@@ -52,7 +53,7 @@ async def authenticate_user(session: AsyncSession, username: str, password: str)
     return user
 
 
-async def create_tokens(session: AsyncSession, user: User) -> dict[str, str]:
+async def create_tokens(session: AsyncSession, user: User) -> TokenBundle:
     access_token, access_jti, access_exp = create_access_token(
         user.id, {"role": user.role.value, "username": user.username}
     )
@@ -75,13 +76,13 @@ async def create_tokens(session: AsyncSession, user: User) -> dict[str, str]:
     await session.commit()
     access_expires_in = int((access_exp_dt - datetime.now(timezone.utc)).total_seconds())
     refresh_expires_in = int((refresh_exp_dt - datetime.now(timezone.utc)).total_seconds())
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "expires_in": max(access_expires_in, 0),
-        "refresh_expires_in": max(refresh_expires_in, 0),
-    }
+    return TokenBundle(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=max(access_expires_in, 0),
+        refresh_expires_in=max(refresh_expires_in, 0),
+    )
 
 
 async def revoke_refresh_token(session: AsyncSession, jti: str) -> None:
@@ -156,4 +157,16 @@ def to_user_out(user: User) -> UserOut:
         role=user.role,
         created_at=user.created_at,
         updated_at=user.updated_at,
+    )
+
+
+def to_user_profile(user: User) -> UserProfile:
+    """Serialize a user into a lightweight profile response."""
+
+    return UserProfile(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        role=user.role,
+        approval_status=user.status,
     )

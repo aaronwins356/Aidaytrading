@@ -50,12 +50,13 @@ def create_app() -> FastAPI:
     investor_router.include_router(devices.router)
 
     admin_router = APIRouter(prefix="/admin", tags=["admin"])
-    admin_router.include_router(users.router)
+    admin_router.include_router(users.admin_router)
     admin_router.include_router(risk.router)
     admin_router.include_router(bot.router)
     admin_router.include_router(monitoring.router)
 
     api_v1_router.include_router(auth.router)
+    api_v1_router.include_router(users.router)
     api_v1_router.include_router(investor_router)
     api_v1_router.include_router(admin_router)
 

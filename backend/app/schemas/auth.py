@@ -1,7 +1,9 @@
 """Authentication schemas."""
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
+
+from .user import UserProfile
 
 
 class SignupRequest(BaseModel):
@@ -15,7 +17,7 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class TokenResponse(BaseModel):
+class TokenBundle(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
@@ -28,4 +30,18 @@ class RefreshRequest(BaseModel):
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str | None = None
+
+
+class AuthResponse(BaseModel):
+    tokens: TokenBundle
+    user: UserProfile
+
+
+class AuthStatusResponse(BaseModel):
+    status: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+    reset_link: str = Field(min_length=1)
