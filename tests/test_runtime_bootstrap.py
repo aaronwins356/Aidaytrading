@@ -92,7 +92,9 @@ def test_initialise_notifier_failure_returns_none(monkeypatch: pytest.MonkeyPatc
     assert notifier is None
 
 
-def test_warm_start_workers_ignores_malformed_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_warm_start_workers_ignores_malformed_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     symbol = "BTC/USD"
     bundle = RuntimeConfigBundle(
         config={"trading": {"symbols": [symbol]}},
@@ -114,9 +116,7 @@ def test_warm_start_workers_ignores_malformed_cache(tmp_path: Path, monkeypatch:
         def __init__(self) -> None:
             self.preloaded: list[tuple[str, list[dict[str, float]]]] = []
 
-        def preload_candles(
-            self, symbol_name: str, candles: list[dict[str, float]]
-        ) -> None:
+        def preload_candles(self, symbol_name: str, candles: list[dict[str, float]]) -> None:
             self.preloaded.append((symbol_name, candles))
 
     monkeypatch.setattr(bootstrap, "MarketResearchWorker", DummyResearcherBase)
