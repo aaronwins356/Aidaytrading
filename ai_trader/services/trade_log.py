@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import logging
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -17,15 +19,20 @@ from ai_trader.services.types import TradeIntent
 class TradeLog:
     """Persist trades and equity metrics in SQLite."""
 
+    _WRITE_RETRY_ATTEMPTS: int = 3
+    _WRITE_RETRY_DELAY_SECONDS: float = 0.2
+
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._logger = logging.getLogger(__name__)
+        self._wal_initialized = False
         self._init_db()
 
     def _init_db(self) -> None:
         with self._connect() as conn:
             for statement in TRADE_LOG_TABLES.values():
-                conn.execute(statement)
+                self._execute_with_retry(conn, statement)
             self._ensure_market_feature_columns(conn)
             self._ensure_trade_columns(conn)
             conn.commit()
@@ -34,10 +41,45 @@ class TradeLog:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
+        if not self._wal_initialized:
+            # Enable WAL once to improve concurrent writer safety.
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.commit()
+            self._wal_initialized = True
+        conn.execute("PRAGMA busy_timeout = 5000;")
         try:
             yield conn
         finally:
             conn.close()
+
+    def _execute_with_retry(
+        self,
+        conn: sqlite3.Connection,
+        statement: str,
+        parameters: Iterable[object] | None = None,
+    ) -> sqlite3.Cursor:
+        """Execute a write statement with retry/backoff on transient locks."""
+
+        params = tuple(parameters or ())
+        last_error: Exception | None = None
+        for attempt in range(1, self._WRITE_RETRY_ATTEMPTS + 1):
+            try:
+                return conn.execute(statement, params)
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" not in message and "busy" not in message:
+                    raise
+                last_error = exc
+                conn.rollback()
+                self._logger.warning(
+                    "SQLite write contention on %s (attempt %d/%d)",
+                    self._db_path,
+                    attempt,
+                    self._WRITE_RETRY_ATTEMPTS,
+                )
+                time.sleep(self._WRITE_RETRY_DELAY_SECONDS)
+        assert last_error is not None
+        raise last_error
 
     def record_trade(self, trade: TradeIntent) -> None:
         """Persist a trade intent to the database."""
@@ -55,7 +97,8 @@ class TradeLog:
             validation_value = self._coerce_float(validation_snapshot.get("reward"))
 
         with self._connect() as conn:
-            conn.execute(
+            self._execute_with_retry(
+                conn,
                 """
                 INSERT INTO trades (
                     timestamp, worker, symbol, side, cash_spent,
@@ -109,7 +152,8 @@ class TradeLog:
         """Store an equity snapshot."""
 
         with self._connect() as conn:
-            conn.execute(
+            self._execute_with_retry(
+                conn,
                 "INSERT INTO equity_curve (timestamp, equity, pnl_percent, pnl_usd) VALUES (?, ?, ?, ?)",
                 (datetime.utcnow().isoformat(), equity, pnl_percent, pnl_usd),
             )
@@ -147,7 +191,8 @@ class TradeLog:
         close = payload.get("close")
         volume = payload.get("volume")
         with self._connect() as conn:
-            conn.execute(
+            self._execute_with_retry(
+                conn,
                 """
                 INSERT INTO market_features(
                     timestamp, symbol, timeframe, open, high, low, close, volume, features_json, label
@@ -185,7 +230,8 @@ class TradeLog:
             row = cursor.fetchone()
             if row is None:
                 return
-            conn.execute(
+            self._execute_with_retry(
+                conn,
                 "UPDATE market_features SET label = ? WHERE id = ?",
                 (float(label), int(row["id"])),
             )
@@ -209,7 +255,8 @@ class TradeLog:
         """Persist the broker balances for dashboard consumption."""
 
         with self._connect() as conn:
-            conn.execute(
+            self._execute_with_retry(
+                conn,
                 """
                 INSERT INTO account_snapshots(timestamp, equity, balances_json)
                 VALUES(?, ?, ?)
@@ -244,7 +291,9 @@ class TradeLog:
         existing: List[str] = [row[1] for row in cursor.fetchall()]
         for column in ["open", "high", "low", "close", "volume"]:
             if column not in existing:
-                conn.execute(f"ALTER TABLE market_features ADD COLUMN {column} REAL")
+                self._execute_with_retry(
+                    conn, f"ALTER TABLE market_features ADD COLUMN {column} REAL"
+                )
 
     def _ensure_trade_columns(self, conn: sqlite3.Connection) -> None:
         """Ensure optional trade auditing columns exist for legacy installs."""
@@ -252,19 +301,19 @@ class TradeLog:
         cursor = conn.execute("PRAGMA table_info(trades)")
         existing = {row[1] for row in cursor.fetchall()}
         if "reason" not in existing:
-            conn.execute("ALTER TABLE trades ADD COLUMN reason TEXT")
+            self._execute_with_retry(conn, "ALTER TABLE trades ADD COLUMN reason TEXT")
         if "metadata_json" not in existing:
-            conn.execute("ALTER TABLE trades ADD COLUMN metadata_json TEXT")
+            self._execute_with_retry(conn, "ALTER TABLE trades ADD COLUMN metadata_json TEXT")
         if "confidence" not in existing:
-            conn.execute("ALTER TABLE trades ADD COLUMN confidence REAL")
+            self._execute_with_retry(conn, "ALTER TABLE trades ADD COLUMN confidence REAL")
         if "atr_stop" not in existing:
-            conn.execute("ALTER TABLE trades ADD COLUMN atr_stop REAL")
+            self._execute_with_retry(conn, "ALTER TABLE trades ADD COLUMN atr_stop REAL")
         if "atr_target" not in existing:
-            conn.execute("ALTER TABLE trades ADD COLUMN atr_target REAL")
+            self._execute_with_retry(conn, "ALTER TABLE trades ADD COLUMN atr_target REAL")
         if "atr_value" not in existing:
-            conn.execute("ALTER TABLE trades ADD COLUMN atr_value REAL")
+            self._execute_with_retry(conn, "ALTER TABLE trades ADD COLUMN atr_value REAL")
         if "validation_score" not in existing:
-            conn.execute("ALTER TABLE trades ADD COLUMN validation_score REAL")
+            self._execute_with_retry(conn, "ALTER TABLE trades ADD COLUMN validation_score REAL")
 
     @staticmethod
     def _coerce_float(*values: object | None) -> float | None:
@@ -289,7 +338,8 @@ class TradeLog:
                 row = cursor.fetchone()
                 latest_revision = int(row[0]) if row and row[0] is not None else 0
                 revision = latest_revision + 1
-            conn.execute(
+            self._execute_with_retry(
+                conn,
                 """
                 INSERT INTO risk_settings(revision, settings_json, updated_at)
                 VALUES(?, ?, ?)
