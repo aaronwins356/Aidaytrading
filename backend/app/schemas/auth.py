@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 
 class SignupRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=30)
+    username: str = Field(min_length=3, max_length=30, pattern=r"^[A-Za-z0-9_]+$")
     email: str
     password: str
 
@@ -16,7 +16,7 @@ class SignupResponse(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str
+    username: str = Field(pattern=r"^[A-Za-z0-9_]+$")
     password: str
 
 

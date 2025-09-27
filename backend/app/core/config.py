@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     refresh_token_expires_days: int = Field(default=7, ge=1, validation_alias="REFRESH_TOKEN_EXPIRES_DAYS")
     env: Literal["local", "dev", "prod"] = Field(default="local", validation_alias="ENV")
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost", "http://localhost:3000"])
+    brevo_api_key: SecretStr = Field(validation_alias="BREVO_API_KEY")
+    brevo_smtp_server: str = Field(validation_alias="BREVO_SMTP_SERVER")
+    brevo_port: int = Field(validation_alias="BREVO_PORT")
+    brevo_sender_email: str = Field(validation_alias="BREVO_SENDER_EMAIL")
+    brevo_sender_name: str = Field(validation_alias="BREVO_SENDER_NAME")
+    admin_notification_email: str = Field(validation_alias="ADMIN_NOTIFICATION_EMAIL")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", case_sensitive=False)
 

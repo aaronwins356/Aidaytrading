@@ -35,9 +35,17 @@ class TokenPayload(TypedDict, total=False):
     token_type: str
     exp: int
     iat: int
+    token_version: int
 
 
-def _create_token(subject: str, token_type: TokenType, *, role: str, status: str) -> TokenDetails:
+def _create_token(
+    subject: str,
+    token_type: TokenType,
+    *,
+    role: str,
+    status: str,
+    token_version: int,
+) -> TokenDetails:
     now = dt.datetime.now(dt.timezone.utc)
     if token_type is TokenType.ACCESS:
         expires = now + dt.timedelta(minutes=settings.access_token_expires_min)
@@ -53,22 +61,23 @@ def _create_token(subject: str, token_type: TokenType, *, role: str, status: str
         "token_type": token_type.value,
         "iat": int(now.timestamp()),
         "exp": int(expires.timestamp()),
+        "token_version": token_version,
     }
 
     token = jwt.encode(payload, settings.jwt_secret.get_secret_value(), algorithm=settings.jwt_algorithm)
     return {"token": token, "expires_at": expires, "jti": jti}
 
 
-def create_access_token(subject: str, *, role: str, status: str) -> TokenDetails:
+def create_access_token(subject: str, *, role: str, status: str, token_version: int) -> TokenDetails:
     """Create an access token for the given identity."""
 
-    return _create_token(subject, TokenType.ACCESS, role=role, status=status)
+    return _create_token(subject, TokenType.ACCESS, role=role, status=status, token_version=token_version)
 
 
-def create_refresh_token(subject: str, *, role: str, status: str) -> TokenDetails:
+def create_refresh_token(subject: str, *, role: str, status: str, token_version: int) -> TokenDetails:
     """Create a refresh token for the given identity."""
 
-    return _create_token(subject, TokenType.REFRESH, role=role, status=status)
+    return _create_token(subject, TokenType.REFRESH, role=role, status=status, token_version=token_version)
 
 
 def decode_token(token: str) -> TokenPayload:

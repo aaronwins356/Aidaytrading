@@ -12,6 +12,7 @@ async def _create_active_user(session: AsyncSession, username: str, email: str, 
     user = User(
         username=username,
         email=email,
+        email_canonical=email.lower(),
         password_hash=hash_password(password),
         role=UserRole.VIEWER,
         status=UserStatus.ACTIVE,

@@ -11,7 +11,13 @@ This directory houses the production-ready FastAPI backend for the Aidaytrading 
 - Structured JSON logging middleware safe for PII.
 - Developer tooling via Poetry, Makefile, and pre-commit along with Black, isort, Flake8, MyPy, and pytest + coverage.
 - Comprehensive async API tests (`pytest-asyncio` + `httpx`) with >80% coverage of new modules.
-- Brevo email notification interface stub (full implementation lands in Prompt 2).
+
+## Prompt 2 Enhancements
+
+- Production Brevo SMTP integration with templated HTML notifications and exponential retry logic.
+- Admin-only API surface for approving, disabling, and re-assigning users with enforced role/status checks.
+- Token versioning strategy that revokes existing access/refresh tokens when roles or status change.
+- Append-only audit logging of privileged actions with pagination for compliance review.
 
 ## Project Structure
 
@@ -58,6 +64,12 @@ backend/
    - `ACCESS_TOKEN_EXPIRES_MIN`: Minutes before access tokens expire (default `15`).
    - `REFRESH_TOKEN_EXPIRES_DAYS`: Days before refresh tokens expire (default `7`).
    - `ENV`: `local`, `dev`, or `prod`. Non-local environments must not use `CHANGE_ME` secrets.
+   - `BREVO_API_KEY`: Brevo transactional email API key (used as the SMTP password).
+   - `BREVO_SMTP_SERVER`: Brevo SMTP hostname (e.g. `smtp-relay.brevo.com`).
+   - `BREVO_PORT`: Brevo SMTP port (typically `587`).
+   - `BREVO_SENDER_EMAIL`: Verified Gmail/Brevo sender address for outbound mail.
+   - `BREVO_SENDER_NAME`: Friendly display name shown in email headers.
+   - `ADMIN_NOTIFICATION_EMAIL`: Destination mailbox for new-signup alerts.
 
 2. **Install dependencies**
 
@@ -202,6 +214,42 @@ Requires a valid (non-blacklisted) access token. Returns the authenticated user'
 }
 ```
 
+### Admin API (all routes require an active admin access token)
+
+| Method & Path | Description |
+| --- | --- |
+| `GET /api/v1/admin/pending-users` | List users awaiting approval. |
+| `POST /api/v1/admin/approve/{id}` | Promote a pending user to `active`. |
+| `POST /api/v1/admin/disable/{id}` | Disable an account and immediately revoke existing tokens. |
+| `POST /api/v1/admin/role/{id}` | Change a user's role between `viewer` and `admin`. |
+| `GET /api/v1/admin/audit-logs?limit=&offset=` | Paginated view of admin actions (append-only). |
+
+All admin mutations run inside a single transaction, write an `admin_actions` audit entry, and bump the target user's
+`token_version` so any existing tokens become invalid. Safeguards prevent self-disabling and ensure at least one active admin
+remains.
+
+## Email Notifications
+
+- New user signups persist with `pending` status and trigger an HTML email to `ADMIN_NOTIFICATION_EMAIL`.
+- Templates are rendered with Jinja2 and include a branded header, body copy, and footer.
+- Delivery uses Brevo's SMTP relay (`username=apikey`) with TLS. Transient failures retry with exponential backoff and jitter;
+  persistent failures emit structured logs but do not fail the originating request.
+
+## Audit Logging
+
+- `admin_actions` captures `{admin_id, action, target_user_id, metadata, created_at}` with append-only semantics.
+- `metadata` stores contextual JSON (previous/new role or status) to simplify investigations.
+- Indexes on `admin_id`, `target_user_id`, and `created_at` enable efficient filtering for compliance reviews.
+
+## Security Decisions
+
+- Emails are normalised to lowercase (`email_canonical`) with a unique index for case-insensitive deduplication.
+- JWTs embed `token_version`; any role/status change increments the value so stale access/refresh tokens are rejected. Logout
+  still blacklists explicit JTIs for immediate revocation of the active session.
+- Usernames are trimmed and validated against `^[A-Za-z0-9_]+$` to eliminate unsafe characters.
+- `require_active_user` / `require_admin_active_user` dependencies centralise JWT decoding, blacklist checks, role validation,
+  and status enforcement.
+
 ## Logging
 
 Requests are logged as single-line JSON with fields for timestamp, log level, message, request ID, method, path, status code, and latency. Sensitive information (passwords, full email addresses, tokens) is never written to logs. Use `tail -f` on your server logs to observe structured output in real time.
@@ -218,4 +266,5 @@ The hooks enforce formatting (Black, isort), linting (Flake8), and guard against
 
 ## Next Steps
 
-Prompt 2 will provide the concrete Brevo email integration that consumes the `BrevoEmailService` interface exposed in this prompt.
+Future work can focus on richer admin tooling (e.g. frontend UI), granular token/session management, and automated escalation
+rules for high-risk signups.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -38,6 +39,14 @@ async def signup(
 ) -> auth_schema.SignupResponse:
     """Register a new user account with pending status."""
 
+    username = payload.username.strip()
+    if not re.fullmatch(r"^[A-Za-z0-9_]{3,30}$", username):
+        record_validation_error(request, "invalid_username", {"username": payload.username})
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "invalid_username", "message": "Username must contain only letters, numbers, or underscores."}},
+        )
+
     try:
         email_normalized = payload.email.strip().lower()
         validate_email_format(email_normalized)
@@ -55,26 +64,30 @@ async def signup(
             detail={"error": {"code": "invalid_email", "message": "Email address is invalid."}},
         ) from exc
 
-    stmt = select(User).where(or_(User.username == payload.username, User.email == email_normalized))
+    stmt = select(User).where(or_(User.username == username, User.email_canonical == email_normalized))
     existing = await session.execute(stmt)
     if existing.scalar_one_or_none():
-        record_validation_error(request, "duplicate_user", {"username": payload.username})
+        record_validation_error(request, "duplicate_user", {"username": username})
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": {"code": "user_exists", "message": "Username or email already registered."}},
         )
 
     user = User(
-        username=payload.username,
+        username=username,
         email=email_normalized,
+        email_canonical=email_normalized,
         password_hash=password_hash,
         role=UserRole.VIEWER,
         status=UserStatus.PENDING,
     )
     session.add(user)
     await session.commit()
+    await session.refresh(user)
 
-    await email_service.notify_admin_of_signup(username=user.username, email=user.email)
+    await email_service.notify_admin_of_signup(
+        user_id=user.id, username=user.username, email=user.email
+    )
 
     return auth_schema.SignupResponse(message="Signup received. Await approval.", status=user.status.value)
 
@@ -83,7 +96,8 @@ async def signup(
 async def login(payload: auth_schema.LoginRequest, session: DBSession) -> auth_schema.TokenPairResponse:
     """Authenticate a user and return an access/refresh token pair."""
 
-    stmt = select(User).where(User.username == payload.username)
+    username = payload.username.strip()
+    stmt = select(User).where(User.username == username)
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
     if not user or not verify_password(payload.password, user.password_hash):
@@ -98,8 +112,12 @@ async def login(payload: auth_schema.LoginRequest, session: DBSession) -> auth_s
             detail={"error": {"code": "inactive_account", "message": "Invalid credentials or inactive account."}},
         )
 
-    access = jwt.create_access_token(str(user.id), role=user.role.value, status=user.status.value)
-    refresh = jwt.create_refresh_token(str(user.id), role=user.role.value, status=user.status.value)
+    access = jwt.create_access_token(
+        str(user.id), role=user.role.value, status=user.status.value, token_version=user.token_version
+    )
+    refresh = jwt.create_refresh_token(
+        str(user.id), role=user.role.value, status=user.status.value, token_version=user.token_version
+    )
 
     return auth_schema.TokenPairResponse(access_token=access["token"], refresh_token=refresh["token"])
 
@@ -161,7 +179,19 @@ async def refresh_token(
             detail={"error": {"code": "inactive_account", "message": "Invalid credentials or inactive account."}},
         )
 
-    access = jwt.create_access_token(str(user.id), role=user.role.value, status=user.status.value)
+    token_version = decoded.get("token_version")
+    if token_version is None or token_version != user.token_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": {"code": "token_revoked", "message": "Token has been revoked."}},
+        )
+
+    access = jwt.create_access_token(
+        str(user.id),
+        role=user.role.value,
+        status=user.status.value,
+        token_version=user.token_version,
+    )
     return auth_schema.AccessTokenResponse(access_token=access["token"])
 
 
