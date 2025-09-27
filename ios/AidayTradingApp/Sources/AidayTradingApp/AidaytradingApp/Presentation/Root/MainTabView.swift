@@ -35,7 +35,7 @@ struct MainTabView: View {
                 .tag(Tab.notifications)
 
             if RoleManager.isAdmin(context.profile) {
-                AdminView()
+                AdminView(context: context)
                     .tabItem { Label("Admin", systemImage: "lock.shield") }
                     .tag(Tab.admin)
             }

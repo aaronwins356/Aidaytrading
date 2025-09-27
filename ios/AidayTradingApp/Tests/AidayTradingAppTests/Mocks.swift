@@ -88,6 +88,91 @@ enum MockError: Error {
     case biometricFailed
 }
 
+final class MockAdminRepository: AdminRepository {
+    var riskConfiguration: RiskConfiguration = .default
+    var users: [AdminUser] = []
+    var botStatus: BotStatus = BotStatus(running: false, mode: .paper, lastUpdated: Date())
+    var resetPasswordInvocations: [UUID] = []
+
+    func fetchRiskConfiguration() async throws -> RiskConfiguration { riskConfiguration }
+
+    func updateRiskConfiguration(_ configuration: RiskConfiguration) async throws -> RiskConfiguration {
+        riskConfiguration = configuration
+        return configuration
+    }
+
+    func fetchUsers() async throws -> [AdminUser] { users }
+
+    func updateUser(id: UUID, role: AdminUser.Role?, status: AdminUser.Status?) async throws -> AdminUser {
+        guard let index = users.firstIndex(where: { $0.id == id }) else {
+            throw MockError.notConfigured
+        }
+        var updated = users[index]
+        if let role { updated.role = role }
+        if let status { updated.status = status }
+        users[index] = updated
+        return updated
+    }
+
+    func resetPassword(id: UUID) async throws {
+        resetPasswordInvocations.append(id)
+    }
+
+    func fetchBotStatus() async throws -> BotStatus { botStatus }
+
+    func startBot() async throws -> BotStatus {
+        botStatus.running = true
+        botStatus.lastUpdated = Date()
+        return botStatus
+    }
+
+    func stopBot() async throws -> BotStatus {
+        botStatus.running = false
+        botStatus.lastUpdated = Date()
+        return botStatus
+    }
+
+    func setBotMode(_ mode: BotMode) async throws -> BotStatus {
+        botStatus.mode = mode
+        botStatus.lastUpdated = Date()
+        return botStatus
+    }
+}
+
+final class MockAdminChangeLogRepository: AdminChangeLogRepositoryProtocol {
+    private(set) var entries: [AdminChangeLogEntry] = []
+
+    func record(_ entry: AdminChangeLogEntry) throws {
+        entries.append(entry)
+    }
+
+    func fetchLatest(limit: Int) throws -> [AdminChangeLogEntry] {
+        Array(entries.suffix(limit).reversed())
+    }
+}
+
+final class SpyActionRecorder: AdminActionRecording {
+    private(set) var recorded: [AdminChangeLogEntry] = []
+
+    func recordChange(
+        category: AdminChangeLogEntry.Category,
+        summary: String,
+        details: String,
+        payload: [String: Any],
+        showBanner: Bool
+    ) {
+        let entry = AdminChangeLogEntry(
+            id: UUID(),
+            timestamp: Date(),
+            actor: "tester",
+            summary: summary,
+            details: details,
+            category: category
+        )
+        recorded.append(entry)
+    }
+}
+
 final class MockApprovalService: ApprovalServiceProtocol {
     var statusResult: Result<UserProfile.ApprovalStatus, Error> = .failure(MockError.notConfigured)
 

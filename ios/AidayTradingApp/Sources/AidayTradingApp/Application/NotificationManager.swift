@@ -155,6 +155,29 @@ final class NotificationManager: NSObject, ObservableObject {
         }
     }
 
+    func recordAdminEvent(
+        title: String,
+        body: String,
+        payload: [String: Any] = [:],
+        kind: AppNotification.Kind = .system,
+        showBanner: Bool = true
+    ) {
+        guard let payloadData = try? JSONSerialization.data(withJSONObject: payload, options: []) else { return }
+        let notification = AppNotification(
+            id: "admin_\(UUID().uuidString)",
+            title: title,
+            body: body,
+            timestamp: Date(),
+            kind: kind,
+            origin: .realtime,
+            payload: payloadData
+        )
+        store(notification: notification)
+        if showBanner {
+            presentBanner(for: notification)
+        }
+    }
+
     func setBotEvents(enabled: Bool) {
         guard canModifyPreferences else { return }
         var updated = preferences
