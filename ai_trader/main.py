@@ -9,10 +9,11 @@ import os
 import signal
 import sqlite3
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from logging import Logger
 from pathlib import Path
-from typing import Any, Dict, Iterable, Sequence
+from typing import Any, Callable, Dict, Iterable, Sequence
 
 from ai_trader.api_service import attach_services, get_runtime_state
 from ai_trader.backtester import Backtester, BacktestResult
@@ -30,6 +31,7 @@ from ai_trader.services.equity import EquityEngine
 from ai_trader.services.logging import configure_logging, get_logger
 from ai_trader.services.ml import MLService
 from ai_trader.services.risk import RiskManager
+from ai_trader.services.runtime_state import RuntimeStateStore
 from ai_trader.services.schema import ALL_TABLES
 from ai_trader.services.trade_engine import TradeEngine
 from ai_trader.services.trade_log import TradeLog
@@ -38,6 +40,38 @@ from ai_trader.workers.researcher import MarketResearchWorker
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "config.yaml"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DB_PATH = DATA_DIR / "trades.db"
+
+
+@dataclass(slots=True)
+class StartTradingOverrides:
+    """Optional dependency overrides for :func:`start_trading`.
+
+    The live runtime wires together a substantial stack of services. For
+    integration testing we want to exercise the full event loop without
+    talking to real exchanges or Telegram. Allowing targeted overrides keeps
+    the production path unchanged while letting tests supply lightweight
+    stand-ins.
+    """
+
+    bundle: "RuntimeConfigBundle" | None = None
+    broker: "KrakenClient" | None = None
+    websocket_manager: "KrakenWebsocketManager" | None = None
+    notifier: "Notifier" | None = None
+    trade_log: TradeLog | None = None
+    runtime_state: RuntimeStateStore | None = None
+    workers: Sequence[object] | None = None
+    researchers: Sequence[object] | None = None
+    ml_service: MLService | None = None
+    risk_manager: RiskManager | None = None
+    equity_engine: EquityEngine | None = None
+    watchdog_factory: (
+        Callable[["RuntimeConfigBundle", RuntimeStateStore, "Notifier" | None], object | None]
+        | None
+    ) = None
+    stop_event: asyncio.Event | None = None
+    skip_validation: bool = False
+    skip_warm_start: bool = False
+    install_signal_handlers: bool = True
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -456,9 +490,12 @@ def prepare_config(args: argparse.Namespace) -> Dict[str, Any]:
     return config
 
 
-async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> None:
+async def start_trading(
+    args: argparse.Namespace, config: Dict[str, Any], overrides: StartTradingOverrides | None = None
+) -> None:
     logger = get_logger(__name__)
-    bundle = prepare_runtime_config(config, data_dir=DATA_DIR, logger=logger)
+    overrides = overrides or StartTradingOverrides()
+    bundle = overrides.bundle or prepare_runtime_config(config, data_dir=DATA_DIR, logger=logger)
     runtime_config = bundle.config
     trading_cfg = bundle.trading
     risk_cfg = bundle.risk
@@ -471,64 +508,75 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
             "🚀 Running in LIVE trading mode – Kraken orders will be routed to the exchange."
         )
 
-    broker = create_broker(bundle, logger=logger)
-    trade_log = TradeLog(DB_PATH)
-    notifier = initialise_notifier(bundle, logger=logger)
+    broker = overrides.broker or create_broker(bundle, logger=logger)
+    trade_log = overrides.trade_log or TradeLog(DB_PATH)
+    if overrides.notifier is not None:
+        notifier = overrides.notifier
+    else:
+        notifier = initialise_notifier(bundle, logger=logger)
     ml_cfg = runtime_config.get("ml", {})
-    feature_keys = ml_cfg.get(
-        "feature_keys",
-        [
-            "momentum_1",
-            "momentum_3",
-            "momentum_5",
-            "momentum_10",
-            "rolling_volatility",
-            "atr",
-            "volume_delta",
-            "volume_ratio",
-            "volume_ratio_3",
-            "volume_ratio_10",
-            "body_pct",
-            "upper_wick_pct",
-            "lower_wick_pct",
-            "wick_close_ratio",
-            "range_pct",
-            "ema_fast",
-            "ema_slow",
-            "macd",
-            "macd_hist",
-            "rsi",
-            "zscore",
-            "close_to_high",
-            "close_to_low",
-        ],
-    )
-    ml_service = MLService(
-        db_path=DB_PATH,
-        feature_keys=feature_keys,
-        learning_rate=float(ml_cfg.get("learning_rate", ml_cfg.get("lr", 0.03))),
-        regularization=float(ml_cfg.get("regularization", 0.0005)),
-        threshold=float(ml_cfg.get("threshold", 0.25)),
-        ensemble=bool(ml_cfg.get("ensemble", True)),
-        forest_size=int(ml_cfg.get("forest_size", 10)),
-        random_state=int(ml_cfg.get("random_state", 7)),
-        warmup_target=int(ml_cfg.get("warmup_target", 200)),
-        warmup_samples=int(ml_cfg.get("warmup_samples", 25)),
-        confidence_stall_limit=int(ml_cfg.get("confidence_stall_limit", 5)),
-    )
-    equity_engine = EquityEngine(trade_log, broker.starting_equity)
-    risk_manager = RiskManager(risk_cfg)
-    runtime_state = get_runtime_state()
+    if overrides.ml_service is not None:
+        ml_service = overrides.ml_service
+    else:
+        feature_keys = ml_cfg.get(
+            "feature_keys",
+            [
+                "momentum_1",
+                "momentum_3",
+                "momentum_5",
+                "momentum_10",
+                "rolling_volatility",
+                "atr",
+                "volume_delta",
+                "volume_ratio",
+                "volume_ratio_3",
+                "volume_ratio_10",
+                "body_pct",
+                "upper_wick_pct",
+                "lower_wick_pct",
+                "wick_close_ratio",
+                "range_pct",
+                "ema_fast",
+                "ema_slow",
+                "macd",
+                "macd_hist",
+                "rsi",
+                "zscore",
+                "close_to_high",
+                "close_to_low",
+            ],
+        )
+        ml_service = MLService(
+            db_path=DB_PATH,
+            feature_keys=feature_keys,
+            learning_rate=float(ml_cfg.get("learning_rate", ml_cfg.get("lr", 0.03))),
+            regularization=float(ml_cfg.get("regularization", 0.0005)),
+            threshold=float(ml_cfg.get("threshold", 0.25)),
+            ensemble=bool(ml_cfg.get("ensemble", True)),
+            forest_size=int(ml_cfg.get("forest_size", 10)),
+            random_state=int(ml_cfg.get("random_state", 7)),
+            warmup_target=int(ml_cfg.get("warmup_target", 200)),
+            warmup_samples=int(ml_cfg.get("warmup_samples", 25)),
+            confidence_stall_limit=int(ml_cfg.get("confidence_stall_limit", 5)),
+        )
+    equity_engine = overrides.equity_engine or EquityEngine(trade_log, broker.starting_equity)
+    risk_manager = overrides.risk_manager or RiskManager(risk_cfg)
+    runtime_state = overrides.runtime_state or get_runtime_state()
     runtime_state.set_base_currency(broker.base_currency)
     runtime_state.set_starting_equity(broker.starting_equity)
     runtime_state.update_risk_settings(risk_manager.config_dict())
     attach_services(trade_log=trade_log, runtime_state=runtime_state, risk_manager=risk_manager)
 
-    websocket_manager = KrakenWebsocketManager(bundle.symbols)
+    websocket_manager = overrides.websocket_manager or KrakenWebsocketManager(bundle.symbols)
     shared_services = {"ml_service": ml_service, "trade_log": trade_log}
-    workers, researchers = load_workers(bundle, shared_services)
+    if overrides.workers is not None or overrides.researchers is not None:
+        workers = list(overrides.workers or [])
+        researchers = list(overrides.researchers or [])
+    else:
+        workers, researchers = load_workers(bundle, shared_services)
 
-    warm_start_workers(bundle, workers, researchers, data_dir=DATA_DIR, logger=logger)
+    if not overrides.skip_warm_start:
+        warm_start_workers(bundle, workers, researchers, data_dir=DATA_DIR, logger=logger)
 
     engine = TradeEngine(
         broker=broker,
@@ -577,28 +625,33 @@ async def start_trading(args: argparse.Namespace, config: Dict[str, Any]) -> Non
         )
         await notifier.start()
 
-    watchdog = start_watchdog(bundle, runtime_state, notifier)
+    if overrides.watchdog_factory is not None:
+        watchdog = overrides.watchdog_factory(bundle, runtime_state, notifier)
+    else:
+        watchdog = start_watchdog(bundle, runtime_state, notifier)
 
-    _validate_startup(
-        engine,
-        workers,
-        researchers,
-        runtime_config,
-        ml_service,
-        paper_trading=bundle.paper_mode,
-    )
+    if not overrides.skip_validation:
+        _validate_startup(
+            engine,
+            workers,
+            researchers,
+            runtime_config,
+            ml_service,
+            paper_trading=bundle.paper_mode,
+        )
 
-    stop_event = asyncio.Event()
+    stop_event = overrides.stop_event or asyncio.Event()
 
     def _shutdown(*_: int) -> None:
         logger.info("Shutdown signal received. Closing bot...")
         stop_event.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            asyncio.get_running_loop().add_signal_handler(sig, _shutdown, sig)
-        except NotImplementedError:
-            signal.signal(sig, lambda *_: asyncio.create_task(engine.stop()))
+    if overrides.install_signal_handlers:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                asyncio.get_running_loop().add_signal_handler(sig, _shutdown, sig)
+            except NotImplementedError:
+                signal.signal(sig, lambda *_: asyncio.create_task(engine.stop()))
 
     bot_task = asyncio.create_task(engine.start())
     try:
