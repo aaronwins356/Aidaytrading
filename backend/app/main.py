@@ -1,94 +1,57 @@
-"""FastAPI application entrypoint."""
+"""FastAPI application entry point."""
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from loguru import logger
 
-from app.api.v1 import api_router
-from app.api.ws import register_websocket_routes
-from app.core import jwt
-from app.core.config import get_settings
-from app.core.database import get_session_factory
-from app.core.logging import RequestLoggingMiddleware, configure_logging, record_validation_error
-from app.tasks.scheduler import shutdown_scheduler, start_scheduler
+from .api import auth, bot, devices, equity, monitoring, risk, trades, websocket, users
+from .config import get_settings
+from .database import Base, engine
+from .services.notifications import notification_service
+from .utils.logger import get_logger
 
-configure_logging()
-settings = get_settings()
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        deleted = await jwt.cleanup_expired_tokens(session)
-        if deleted:
-            logger.info("expired_tokens_cleaned", count=deleted)
-        await session.commit()
-    start_scheduler()
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    app.state.start_time = datetime.now(timezone.utc)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    if settings.debug:
+        logger.info("Application started with debug mode")
+    notification_service.start()
     try:
         yield
     finally:
-        await shutdown_scheduler()
+        await notification_service.shutdown()
 
 
-app = FastAPI(title="Aidaytrading Backend", version="1.0.0", lifespan=lifespan)
-
-app.add_middleware(RequestLoggingMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
-
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
-    detail = exc.detail
-    if isinstance(detail, dict) and "error" in detail:
-        content = detail
-    else:
-        content = {"error": {"code": "http_error", "message": str(detail)}}
-    return JSONResponse(status_code=exc.status_code, content=content)
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    record_validation_error(request, "validation_error", exc.errors())
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={
-            "error": {
-                "code": "validation_error",
-                "message": "Request validation failed.",
-                "details": exc.errors(),
-            }
-        },
-    )
+def create_app() -> FastAPI:
+    settings = get_settings()
+    app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[str(origin) for origin in settings.cors_origins],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    app.include_router(auth.router)
+    app.include_router(users.router)
+    app.include_router(risk.router)
+    app.include_router(bot.router)
+    app.include_router(trades.router)
+    app.include_router(equity.router)
+    app.include_router(devices.router)
+    app.include_router(monitoring.router)
+    app.include_router(websocket.router)
+    return app
 
 
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("Unhandled application error")
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": {"code": "server_error", "message": "Internal server error."}},
-    )
-
-
-app.include_router(api_router)
-register_websocket_routes(app)
-
-
-@app.get("/health", tags=["health"])
-async def health() -> dict[str, str]:
-    """Simple service health check."""
-
-    return {"status": "ok"}
+app = create_app()
