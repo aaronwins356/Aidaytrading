@@ -36,5 +36,11 @@
 <key>NSExceptionDomains</key>
 <dict/>
 </dict>
+<key>UIBackgroundModes</key>
+<array>
+    <string>remote-notification</string>
+</array>
+<key>FirebaseAppDelegateProxyEnabled</key>
+<false/>
 </dict>
 </plist>

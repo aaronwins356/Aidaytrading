@@ -44,9 +44,20 @@ struct TradesView: View {
             .onChange(of: viewModel.outcomeFilter) { _, _ in
                 Task { await viewModel.loadInitial() }
             }
+            .onDisappear {
+                viewModel.stop()
+            }
             .overlay(alignment: .bottom) {
-                if let error = viewModel.errorMessage {
-                    errorBanner(message: error)
+                if viewModel.realtimeWarningMessage != nil || viewModel.errorMessage != nil {
+                    VStack(spacing: 8) {
+                        if let realtimeWarning = viewModel.realtimeWarningMessage {
+                            errorBanner(message: realtimeWarning)
+                        }
+                        if let error = viewModel.errorMessage {
+                            errorBanner(message: error)
+                        }
+                    }
+                    .padding(.bottom, 16)
                 }
             }
         }

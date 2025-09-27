@@ -4,6 +4,7 @@ struct MainTabView: View {
     let context: UserSessionContext
     private let reportingService: ReportingServiceProtocol
     @EnvironmentObject private var session: SessionStore
+    @EnvironmentObject private var notificationController: NotificationController
 
     enum Tab: Hashable {
         case home
@@ -55,6 +56,11 @@ struct MainTabView: View {
         .onAppear {
             session.registerInteraction()
         }
+        .onChange(of: notificationController.pendingTab) { _, newValue in
+            guard let tab = newValue else { return }
+            selection = tab
+            _ = notificationController.consumePendingTab()
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button("Logout") {
@@ -76,4 +82,5 @@ struct MainTabView: View {
     let tokens = AuthTokens(accessToken: "token", refreshToken: "refresh", accessTokenExpiry: .distantFuture)
     return MainTabView(context: UserSessionContext(profile: profile, tokens: tokens))
         .environmentObject(SessionStore(previewState: .authenticated(UserSessionContext(profile: profile, tokens: tokens))))
+        .environmentObject(NotificationController())
 }

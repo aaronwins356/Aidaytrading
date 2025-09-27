@@ -78,6 +78,43 @@ enum MockError: Error {
     case biometricFailed
 }
 
+final class MockLocalNotificationScheduler: LocalNotificationScheduling {
+    private(set) var scheduleCallCount = 0
+    private(set) var cancelCallCount = 0
+
+    func scheduleRealtimeStallNotification() async {
+        scheduleCallCount += 1
+    }
+
+    func cancelRealtimeStallNotification() {
+        cancelCallCount += 1
+    }
+}
+
+final class MockPushNotificationService: PushNotificationRegistering {
+    private(set) var lastToken: String?
+    private(set) var registerCallCount = 0
+
+    func register(deviceToken: String, accessToken: String) async throws {
+        lastToken = deviceToken
+        registerCallCount += 1
+    }
+}
+
+final class MockRealtimeService: RealtimeServiceProtocol {
+    weak var delegate: RealtimeServiceDelegate?
+    private(set) var connectCallCount = 0
+    private(set) var disconnectCallCount = 0
+
+    func connect(accessToken: String) {
+        connectCallCount += 1
+    }
+
+    func disconnect() {
+        disconnectCallCount += 1
+    }
+}
+
 final class MockReportingService: ReportingServiceProtocol {
     var statusResult: Result<SystemStatus, Error> = .failure(MockError.notConfigured)
     var profitResult: Result<ProfitSummary, Error> = .failure(MockError.notConfigured)

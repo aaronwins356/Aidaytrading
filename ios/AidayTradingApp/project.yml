@@ -4,6 +4,10 @@ options:
   developmentRegion: en
   deploymentTarget:
     iOS: 16.0
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    from: 10.22.0
 settings:
   BASE_SDK: iphoneos
   SWIFT_VERSION: 5.9
@@ -18,6 +22,11 @@ targets:
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.aidaytrading.app
       INFOPLIST_FILE: Sources/AidayTradingApp/Application/Info.plist
+    dependencies:
+      - package: Firebase
+        product: FirebaseMessaging
+      - package: Firebase
+        product: FirebaseCore
     scheme:
       testTargets:
         - AidayTradingAppTests
