@@ -24,6 +24,12 @@ os.environ.setdefault("BREVO_PORT", "587")
 os.environ.setdefault("BREVO_SENDER_EMAIL", "alerts@example.com")
 os.environ.setdefault("BREVO_SENDER_NAME", "Aidaytrading Alerts")
 os.environ.setdefault("ADMIN_NOTIFICATION_EMAIL", "admin@example.com")
+os.environ.setdefault("BASELINE_EQUITY", "10000")
+os.environ.setdefault("CORS_ALLOWED_ORIGINS", '["http://testserver"]')
+os.environ.setdefault("SCHEDULER_ENABLED", "false")
+os.environ.setdefault("HEARTBEAT_CRON", "0 2,8,14,20 * * *")
+os.environ.setdefault("FIREBASE_CREDENTIALS", "")
+os.environ.setdefault("EQUITY_SNAPSHOT_INTERVAL_MINUTES", "10")
 
 from app.core.database import get_session_factory  # noqa: E402
 from app.main import app  # noqa: E402

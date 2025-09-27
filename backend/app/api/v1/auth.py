@@ -20,6 +20,7 @@ from app.core.security import (
 from app.models.user import User, UserRole, UserStatus
 from app.schemas import auth as auth_schema
 from app.services.brevo_email import BrevoEmailService
+from app.services.ratelimiter import login_rate_limiter
 
 router = APIRouter()
 
@@ -92,9 +93,36 @@ async def signup(
     return auth_schema.SignupResponse(message="Signup received. Await approval.", status=user.status.value)
 
 
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    if request.client:
+        return request.client.host or "unknown"
+    return "unknown"
+
+
 @router.post("/login", response_model=auth_schema.TokenPairResponse)
-async def login(payload: auth_schema.LoginRequest, session: DBSession) -> auth_schema.TokenPairResponse:
+async def login(
+    payload: auth_schema.LoginRequest,
+    request: Request,
+    session: DBSession,
+) -> auth_schema.TokenPairResponse:
     """Authenticate a user and return an access/refresh token pair."""
+
+    key = _client_ip(request)
+    allowed, retry_after = await login_rate_limiter.check(key)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": {
+                    "code": "too_many_attempts",
+                    "message": "Too many login attempts. Please try again later.",
+                    "retry_after": retry_after,
+                }
+            },
+        )
 
     username = payload.username.strip()
     stmt = select(User).where(User.username == username)
@@ -118,6 +146,8 @@ async def login(payload: auth_schema.LoginRequest, session: DBSession) -> auth_s
     refresh = jwt.create_refresh_token(
         str(user.id), role=user.role.value, status=user.status.value, token_version=user.token_version
     )
+
+    await login_rate_limiter.reset(key)
 
     return auth_schema.TokenPairResponse(access_token=access["token"], refresh_token=refresh["token"])
 
