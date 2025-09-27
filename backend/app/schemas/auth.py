@@ -5,35 +5,27 @@ from pydantic import BaseModel, Field
 
 
 class SignupRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=30, pattern=r"^[A-Za-z0-9_]+$")
+    username: str = Field(min_length=3, max_length=64)
     email: str
-    password: str
-
-
-class SignupResponse(BaseModel):
-    message: str
-    status: str
+    password: str = Field(min_length=8, max_length=128)
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(pattern=r"^[A-Za-z0-9_]+$")
+    username: str
     password: str
 
 
-class TokenPairResponse(BaseModel):
+class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+    expires_in: int
+    refresh_expires_in: int
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str | None = None
-
-
-class AccessTokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+    refresh_token: str
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str | None = None
+    refresh_token: str

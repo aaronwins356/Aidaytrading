@@ -1,24 +1,42 @@
-"""User Pydantic schemas."""
+"""User related schemas."""
 from __future__ import annotations
 
-import datetime as dt
+from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 
-from app.models.user import UserRole, UserStatus
+from ..models.user import UserRole, UserStatus
 
 
-class UserRead(BaseModel):
-    """Representation of a user returned to clients."""
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
 
-    id: int
+
+class UserUpdate(BaseModel):
+    status: UserStatus | None = None
+    role: UserRole | None = None
+
+
+class UserOut(BaseModel):
+    id: str
     username: str
-    email: str
-    role: UserRole
+    email: EmailStr
     status: UserStatus
-    created_at: dt.datetime
-    updated_at: dt.datetime
+    role: UserRole
+    created_at: datetime
+    updated_at: datetime
 
-    model_config = {
-        "from_attributes": True,
-    }
+    class Config:
+        from_attributes = True
+
+
+class PasswordResetRequest(BaseModel):
+    reset_link: str
+
+
+class DeviceRegisterRequest(BaseModel):
+    token: str = Field(max_length=512)
+    platform: Literal["ios", "android"] = "ios"
