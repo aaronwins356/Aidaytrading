@@ -1,0 +1,13 @@
+included:
+  - Sources
+  - Tests
+opt_in_rules:
+  - empty_count
+  - explicit_init
+  - force_unwrapping
+  - strict_fileprivate
+  - unused_declaration
+  - unused_import
+line_length:
+  ignores_comments: true
+  ignores_urls: true

@@ -1,0 +1,30 @@
+name: AidayTradingApp
+options:
+  minimumXcodeGenVersion: 2.37.0
+  developmentRegion: en
+  deploymentTarget:
+    iOS: 16.0
+settings:
+  BASE_SDK: iphoneos
+  SWIFT_VERSION: 5.9
+  CODE_SIGN_STYLE: Automatic
+  DEVELOPMENT_TEAM: ""
+targets:
+  AidayTradingApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/AidayTradingApp
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.aidaytrading.app
+      INFOPLIST_FILE: Sources/AidayTradingApp/Application/Info.plist
+    scheme:
+      testTargets:
+        - AidayTradingAppTests
+  AidayTradingAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/AidayTradingAppTests
+    dependencies:
+      - target: AidayTradingApp
