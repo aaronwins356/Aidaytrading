@@ -36,7 +36,12 @@ final class DashboardSnapshotTests: XCTestCase {
             EquityCurvePoint(timestamp: Date(), equity: Decimal(string: "10500")!)
         ])
 
-        let viewModel = HomeDashboardViewModel(accessToken: context.tokens.accessToken, reportingService: service)
+        let viewModel = HomeDashboardViewModel(
+            accessToken: context.tokens.accessToken,
+            reportingService: service,
+            realtimeService: MockRealtimeService(),
+            notificationScheduler: MockLocalNotificationScheduler()
+        )
         await viewModel.loadData()
 
         let view = HomeView(context: context, viewModel: viewModel)

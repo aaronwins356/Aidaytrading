@@ -28,21 +28,34 @@ final class TradesViewModel: ObservableObject {
     @Published var hasMorePages = true
     @Published var symbolFilter: String = ""
     @Published var outcomeFilter: TradeOutcomeFilter = .all
+    @Published var realtimeWarningMessage: String?
 
     private let accessToken: String
     private let reportingService: ReportingServiceProtocol
     private var currentPage = 1
     private let pageSize = 50
+    private let realtimeService: RealtimeServiceProtocol
+    private let notificationScheduler: LocalNotificationScheduling
 
-    init(accessToken: String, reportingService: ReportingServiceProtocol) {
+    init(
+        accessToken: String,
+        reportingService: ReportingServiceProtocol,
+        realtimeService: RealtimeServiceProtocol = RealtimeService(),
+        notificationScheduler: LocalNotificationScheduling = LocalNotificationScheduler()
+    ) {
         self.accessToken = accessToken
         self.reportingService = reportingService
+        self.realtimeService = realtimeService
+        self.notificationScheduler = notificationScheduler
+        self.realtimeService.delegate = self
     }
 
     func loadInitial() async {
         currentPage = 1
         hasMorePages = true
         trades = []
+        realtimeService.disconnect()
+        realtimeService.connect(accessToken: accessToken)
         repeat {
             await loadMore()
         } while outcomeFilter != .all && filteredTrades.isEmpty && hasMorePages
@@ -82,6 +95,49 @@ final class TradesViewModel: ObservableObject {
             case .losers:
                 return trade.pnl < 0
             }
+        }
+    }
+
+    func stop() {
+        realtimeService.disconnect()
+        notificationScheduler.cancelRealtimeStallNotification()
+    }
+
+    deinit {
+        realtimeService.disconnect()
+    }
+}
+
+extension TradesViewModel: RealtimeServiceDelegate {
+    func realtimeServiceDidConnect(_ service: RealtimeServiceProtocol) {
+        realtimeWarningMessage = nil
+        notificationScheduler.cancelRealtimeStallNotification()
+    }
+
+    func realtimeService(_ service: RealtimeServiceProtocol, didDisconnectWith error: Error?) {
+        realtimeWarningMessage = "Realtime feed disconnected."
+    }
+
+    func realtimeService(_ service: RealtimeServiceProtocol, didReceiveStatus status: SystemStatus) {
+        // No-op for the trades ledger.
+    }
+
+    func realtimeService(_ service: RealtimeServiceProtocol, didReceiveEquityPoint point: EquityCurvePoint) {
+        // No-op for the trades ledger.
+    }
+
+    func realtimeService(_ service: RealtimeServiceProtocol, didReceiveTrade trade: TradeRecord) {
+        if !trades.contains(where: { $0.id == trade.id }) {
+            trades.insert(trade, at: 0)
+        }
+        notificationScheduler.cancelRealtimeStallNotification()
+    }
+
+    func realtimeServiceDidDetectStall(_ service: RealtimeServiceProtocol) {
+        realtimeWarningMessage = "Realtime feed disconnected."
+        notificationScheduler.cancelRealtimeStallNotification()
+        Task {
+            await notificationScheduler.scheduleRealtimeStallNotification()
         }
     }
 }

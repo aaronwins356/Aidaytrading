@@ -20,7 +20,12 @@ final class HomeDashboardViewModelTests: XCTestCase {
             EquityCurvePoint(timestamp: Date(), equity: Decimal(string: "10000")!)
         ])
 
-        let viewModel = HomeDashboardViewModel(accessToken: tokens.accessToken, reportingService: service)
+        let viewModel = HomeDashboardViewModel(
+            accessToken: tokens.accessToken,
+            reportingService: service,
+            realtimeService: MockRealtimeService(),
+            notificationScheduler: MockLocalNotificationScheduler()
+        )
         await viewModel.loadData()
 
         XCTAssertEqual(viewModel.profitSummary?.currentBalance, profit.currentBalance)

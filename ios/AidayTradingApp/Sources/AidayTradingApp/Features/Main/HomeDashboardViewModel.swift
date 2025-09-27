@@ -9,18 +9,30 @@ final class HomeDashboardViewModel: ObservableObject {
     @Published var balance: Decimal?
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published var realtimeWarningMessage: String?
 
     private let accessToken: String
     private let reportingService: ReportingServiceProtocol
     private var refreshTask: Task<Void, Never>?
+    private let realtimeService: RealtimeServiceProtocol
+    private let notificationScheduler: LocalNotificationScheduling
 
-    init(accessToken: String, reportingService: ReportingServiceProtocol) {
+    init(
+        accessToken: String,
+        reportingService: ReportingServiceProtocol,
+        realtimeService: RealtimeServiceProtocol = RealtimeService(),
+        notificationScheduler: LocalNotificationScheduling = LocalNotificationScheduler()
+    ) {
         self.accessToken = accessToken
         self.reportingService = reportingService
+        self.realtimeService = realtimeService
+        self.notificationScheduler = notificationScheduler
+        self.realtimeService.delegate = self
     }
 
     func start() {
         guard refreshTask == nil else { return }
+        realtimeService.connect(accessToken: accessToken)
         refreshTask = Task { [weak self] in
             await self?.loadData()
             while !(Task.isCancelled) {
@@ -33,6 +45,8 @@ final class HomeDashboardViewModel: ObservableObject {
     func stop() {
         refreshTask?.cancel()
         refreshTask = nil
+        realtimeService.disconnect()
+        notificationScheduler.cancelRealtimeStallNotification()
     }
 
     deinit {
@@ -59,5 +73,41 @@ final class HomeDashboardViewModel: ObservableObject {
             errorMessage = (error as? APIErrorResponse)?.message ?? error.localizedDescription
         }
         isLoading = false
+    }
+}
+
+extension HomeDashboardViewModel: RealtimeServiceDelegate {
+    func realtimeServiceDidConnect(_ service: RealtimeServiceProtocol) {
+        realtimeWarningMessage = nil
+        notificationScheduler.cancelRealtimeStallNotification()
+    }
+
+    func realtimeService(_ service: RealtimeServiceProtocol, didDisconnectWith error: Error?) {
+        realtimeWarningMessage = "Realtime feed disconnected."
+    }
+
+    func realtimeService(_ service: RealtimeServiceProtocol, didReceiveStatus status: SystemStatus) {
+        systemStatus = status
+        notificationScheduler.cancelRealtimeStallNotification()
+    }
+
+    func realtimeService(_ service: RealtimeServiceProtocol, didReceiveEquityPoint point: EquityCurvePoint) {
+        if !equitySeries.contains(where: { $0.timestamp == point.timestamp }) {
+            equitySeries.append(point)
+            equitySeries.sort(by: { $0.timestamp < $1.timestamp })
+        }
+        notificationScheduler.cancelRealtimeStallNotification()
+    }
+
+    func realtimeService(_ service: RealtimeServiceProtocol, didReceiveTrade trade: TradeRecord) {
+        // Home dashboard does not display trade level data.
+    }
+
+    func realtimeServiceDidDetectStall(_ service: RealtimeServiceProtocol) {
+        realtimeWarningMessage = "Realtime feed disconnected."
+        notificationScheduler.cancelRealtimeStallNotification()
+        Task {
+            await notificationScheduler.scheduleRealtimeStallNotification()
+        }
     }
 }

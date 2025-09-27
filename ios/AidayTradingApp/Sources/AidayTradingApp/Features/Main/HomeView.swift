@@ -37,8 +37,16 @@ struct HomeView: View {
                 viewModel.stop()
             }
             .overlay(alignment: .bottom) {
-                if let error = viewModel.errorMessage {
-                    errorBanner(message: error)
+                if viewModel.realtimeWarningMessage != nil || viewModel.errorMessage != nil {
+                    VStack(spacing: 8) {
+                        if let realtimeWarning = viewModel.realtimeWarningMessage {
+                            errorBanner(message: realtimeWarning)
+                        }
+                        if let error = viewModel.errorMessage {
+                            errorBanner(message: error)
+                        }
+                    }
+                    .padding(.bottom, 16)
                 }
             }
         }
