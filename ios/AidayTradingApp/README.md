@@ -12,8 +12,8 @@ This SwiftUI application provides the secure mobile entry point for the AidayTra
 - Sensitive screen protections including Face ID / Touch ID gating, idle-timeout logout, and screen capture monitoring.
 - Guided password reset experience wired to `/auth/forgot-password` and delivered via secure email.
 - Unit and integration tests covering authentication, token handling, role detection, and approval workflow.
-- Viewer dashboards with equity charts, calendar PnL heatmap, and a paginated trade ledger consuming `/api/v1` reporting endpoints.
-- Real-time dashboards sourced from authenticated WebSocket feeds with automatic reconnect and disconnect banners.
+- Viewer dashboards with an equity curve chart, calendar heatmap computed in Central Time, and a paginated trade ledger.
+- Data refresh every ten minutes using authenticated REST polling with offline cache fallbacks.
 - Push notifications delivered via Firebase Cloud Messaging, including deep linking into the correct tab when tapped.
 - Local notification fallback that warns the operator if the realtime feed stalls.
 
@@ -32,6 +32,35 @@ ios/AidayTradingApp
 └── Tests
     └── AidayTradingAppTests    # XCTest targets with mocks and coverage for critical flows
 ```
+
+## Viewer dashboards
+
+- **Dashboard tab** – Presents the latest system status, balance, P/L metrics, and equity curve using the finance-grade theme in `AidaytradingApp/Foundation/DesignSystem`. Data loads instantly from disk cache and refreshes every ten minutes through `HomeViewModel`.
+- **Calendar tab** – Uses `CalendarViewModel` and `CalendarPnLComputer` to group closed trades into Central Time day buckets. Tapping a day reveals trade-level details.
+- **Trades tab** – Driven by `TradesViewModel` with client-side filters (symbol, outcome, date range) and infinite scroll pagination backed by `TradesRepositoryImpl`.
+- Snapshot test fixtures in `Tests/AidayTradingAppTests/UI/Snapshot` render light-weight previews for the Dashboard and Calendar tabs.
+
+## Calendar PnL computation
+
+- `Domain/Repositories/CalendarPnLComputer.swift` aggregates closed trades by Central Time midnight using timezone-safe helpers.
+- Open trades (`closed_at == nil`) are ignored until they settle.
+- Unit tests in `CalendarPnLComputerTests` cover timezone boundaries and edge cases.
+
+## Trades filters & pagination
+
+- `TradesListView` hosts `FiltersView`, allowing symbol selection, win/loss toggles, and optional date range filtering.
+- `TradesViewModel` keeps an in-memory trade cache, applies filters client-side, and requests the next page when the user nears the end of the list.
+
+## Polling & caching
+
+- `HomeViewModel` starts a ten-minute polling cycle defined by `AppConfig.pollingInterval` and cancels the task on disappear.
+- Network fetches are persisted to disk through `DiskCache` (`equity_latest.json`, `profit_latest.json`, `trades_page_1.json`) and replayed immediately on launch.
+
+## Accessibility & localization
+
+- All metrics and heatmap cells expose VoiceOver labels describing amounts and sentiment.
+- Dynamic Type and right-to-left layout are supported across the dashboard module.
+- Currency formatting respects the user's locale while forcing USD as the currency code, and percent formatting includes explicit sign handling for clarity.
 
 ## Getting started
 
