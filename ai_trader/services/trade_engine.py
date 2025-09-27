@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 import json
 import math
 from datetime import datetime, timedelta
@@ -727,7 +728,12 @@ class TradeEngine:
 
     async def _open_trade(self, intent: TradeIntent, key: Tuple[str, str]) -> None:
         mode = "paper" if self._paper_trading else "live"
-        cash_spent = float(intent.cash_spent)
+        try:
+            cash_target = Decimal(str(intent.cash_spent))
+        except (InvalidOperation, TypeError, ValueError):
+            cash_target = Decimal("0")
+        fee_rate = Decimal(str(self._trade_fee_rate))
+        cash_spent = float(cash_target)
         confidence = float(intent.confidence)
         self._logger.info(
             "[TRADE] %s submitting %s order for %s size=$%.2f confidence=%.3f mode=%s",
@@ -739,11 +745,27 @@ class TradeEngine:
             mode,
         )
         try:
+            if fee_rate > 0:
+                # Reserve fees up-front so the executed notional honours the
+                # configured cash target. ``cash_target`` reflects the total
+                # outlay including fees, therefore we divide by ``1 + fee`` to
+                # determine the spendable amount for the asset itself.
+                spendable_cash = cash_target / (Decimal("1") + fee_rate)
+            else:
+                spendable_cash = cash_target
+            if spendable_cash <= 0:
+                self._logger.warning(
+                    "Skipping order for %s on %s – spendable cash %.4f is non-positive after fees.",
+                    intent.worker,
+                    intent.symbol,
+                    float(spendable_cash),
+                )
+                return
             reduce_only = False if intent.side == "sell" else None
             price, quantity = await self._broker.place_order(
                 intent.symbol,
                 intent.side,
-                cash_spent,
+                float(spendable_cash),
                 reduce_only=reduce_only,
             )
         except Exception as exc:  # noqa: BLE001 - broker errors should not crash engine
@@ -759,9 +781,16 @@ class TradeEngine:
             return
         price = float(price)
         quantity = float(quantity)
-        cost = float(price * quantity)
-        entry_fee = cost * self._trade_fee_rate
-        total_cost = cost + entry_fee
+        price_dec = Decimal(str(price))
+        quantity_dec = Decimal(str(quantity))
+        cost_dec = price_dec * quantity_dec
+        if fee_rate > 0:
+            entry_fee_dec = cost_dec * fee_rate
+        else:
+            entry_fee_dec = Decimal("0")
+        total_cost_dec = cost_dec + entry_fee_dec
+        entry_fee = float(entry_fee_dec)
+        total_cost = float(total_cost_dec)
         position = OpenPosition(
             worker=intent.worker,
             symbol=intent.symbol,
@@ -854,14 +883,21 @@ class TradeEngine:
             return
         price = float(price)
         quantity = float(quantity)
-        gross_pnl = (
-            (price - position.entry_price) * position.quantity
-            if position.side == "buy"
-            else (position.entry_price - price) * position.quantity
-        )
-        exit_fee = price * quantity * self._trade_fee_rate
-        total_fees = position.fees_paid + exit_fee
-        pnl = gross_pnl - total_fees
+        price_dec = Decimal(str(price))
+        quantity_dec = Decimal(str(quantity))
+        fee_rate = Decimal(str(self._trade_fee_rate))
+        entry_price_dec = Decimal(str(position.entry_price))
+        quantity_pos_dec = Decimal(str(position.quantity))
+        if position.side == "buy":
+            gross_pnl_dec = (price_dec - entry_price_dec) * quantity_pos_dec
+        else:
+            gross_pnl_dec = (entry_price_dec - price_dec) * quantity_pos_dec
+        exit_fee_dec = (price_dec * quantity_dec * fee_rate) if fee_rate > 0 else Decimal("0")
+        total_fees_dec = Decimal(str(position.fees_paid)) + exit_fee_dec
+        pnl_dec = gross_pnl_dec - total_fees_dec
+        pnl = float(pnl_dec)
+        exit_fee = float(exit_fee_dec)
+        total_fees = float(total_fees_dec)
         pnl_percent = pnl / position.cash_spent * 100 if position.cash_spent else 0.0
         reason = intent.reason or "exit"
         metadata = dict(intent.metadata or {})
@@ -874,6 +910,7 @@ class TradeEngine:
                 "pnl_percent": pnl_percent,
                 "reason": reason,
                 "exit_fee": exit_fee,
+                "entry_fee": float(position.fees_paid),
                 "fees_total": total_fees,
             }
         )
