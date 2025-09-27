@@ -10,6 +10,7 @@ This SwiftUI application provides the secure mobile entry point for the AidayTra
 - Automatic session bootstrap with refresh token handling and biometric re-authentication.
 - Role-based UI that surfaces Admin tooling only for approved administrators.
 - Sensitive screen protections including Face ID / Touch ID gating, idle-timeout logout, and screen capture monitoring.
+- Guided password reset experience wired to `/auth/forgot-password` and delivered via secure email.
 - Unit and integration tests covering authentication, token handling, role detection, and approval workflow.
 - Viewer dashboards with equity charts, calendar PnL heatmap, and a paginated trade ledger consuming `/api/v1` reporting endpoints.
 - Real-time dashboards sourced from authenticated WebSocket feeds with automatic reconnect and disconnect banners.
