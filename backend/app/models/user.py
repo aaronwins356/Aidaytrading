@@ -5,7 +5,8 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, JSON, String
+from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
@@ -48,6 +49,12 @@ class User(Base):
     devices: Mapped[list["DeviceToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", lazy="selectin"
     )
+    notification_preferences: Mapped[NotificationPreference | None] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        uselist=False,
+    )
 
 
 class RefreshToken(Base):
@@ -75,10 +82,53 @@ class DeviceToken(Base):
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"))
     token: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
     platform: Mapped[str] = mapped_column(String(32), default="ios", nullable=False)
+    timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     user: Mapped[User] = relationship(back_populates="devices")
 
+
+def _default_notification_preferences() -> dict[str, bool]:
+    """Factory for default notification preference payloads."""
+
+    return {
+        "heartbeat_push": True,
+        "trade_alert_push": True,
+        "system_alert_push": True,
+    }
+
+
+class NotificationPreference(Base):
+    """Per-user notification channel preferences."""
+
+    __tablename__ = "notification_preferences"
+
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    preferences: Mapped[dict[str, bool]] = mapped_column(
+        MutableDict.as_mutable(JSON),
+        default=_default_notification_preferences,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user: Mapped[User] = relationship(back_populates="notification_preferences")
+
+    @staticmethod
+    def default_preferences() -> dict[str, bool]:
+        """Return a copy of default notification preferences."""
+
+        return dict(_default_notification_preferences())
+
+    def merged_preferences(self) -> dict[str, bool]:
+        """Merge stored preferences with defaults, giving precedence to stored values."""
+
+        merged = self.default_preferences()
+        merged.update(self.preferences)
+        return merged
 
 class NotificationLog(Base):
     """History of push and email notifications."""
