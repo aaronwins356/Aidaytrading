@@ -74,6 +74,17 @@ The compose file provisions three services that share the SQLite database via th
 
 SQLite artefacts and runtime state are mounted at `/app/ai_trader/data`, so all services read and write the same ledger. Override image commands or environment variables per service as needed for your deployment target.
 
+### SQLite resilience & backups
+
+The bundled SQLite ledger now runs in **WAL (write-ahead logging) mode** with retry-on-lock protection so the trading loop, API, and dashboard can write concurrently without spurious `database is locked` errors. For additional safety, schedule periodic cold copies using the helper script:
+
+```bash
+python scripts/backup_sqlite.py                     # writes ai_trader/data/backups/trades-<timestamp>.bak
+python scripts/backup_sqlite.py /path/to/trades.db --output /secure/location/trades-latest.bak
+```
+
+The backup script leverages SQLite's native backup API so it can run while the bot is live. Store the resulting `.bak` file off-host (object storage, NAS, etc.) to guard against disk failure. For higher availability or multi-writer deployments plan a future migration to PostgreSQL.
+
 ## Dependency tiers
 
 Dependencies are split to keep production images light:
