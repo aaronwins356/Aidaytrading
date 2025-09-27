@@ -11,6 +11,7 @@ This SwiftUI application provides the secure mobile entry point for the AidayTra
 - Role-based UI that surfaces Admin tooling only for approved administrators.
 - Sensitive screen protections including Face ID / Touch ID gating, idle-timeout logout, and screen capture monitoring.
 - Unit and integration tests covering authentication, token handling, role detection, and approval workflow.
+- Viewer dashboards with equity charts, calendar PnL heatmap, and a paginated trade ledger consuming `/api/v1` reporting endpoints.
 
 ## Project structure
 
@@ -100,3 +101,4 @@ xcodebuild test
 - Wire dashboard, calendar, and trade list views to live backend data.
 - Extend admin tooling with approval actions (approve/reject users, manage risk limits).
 - Add push notification support for approval status changes.
+- Expand dashboard analytics with additional strategy drill-downs.
