@@ -77,3 +77,39 @@ enum MockError: Error {
     case notConfigured
     case biometricFailed
 }
+
+final class MockReportingService: ReportingServiceProtocol {
+    var statusResult: Result<SystemStatus, Error> = .failure(MockError.notConfigured)
+    var profitResult: Result<ProfitSummary, Error> = .failure(MockError.notConfigured)
+    var balanceResult: Result<Decimal, Error> = .failure(MockError.notConfigured)
+    var equityResult: Result<[EquityCurvePoint], Error> = .failure(MockError.notConfigured)
+    var tradesResult: Result<TradesPage, Error> = .failure(MockError.notConfigured)
+
+    func fetchSystemStatus(accessToken: String) async throws -> SystemStatus {
+        try statusResult.get()
+    }
+
+    func fetchProfitSummary(accessToken: String) async throws -> ProfitSummary {
+        try profitResult.get()
+    }
+
+    func fetchCurrentBalance(accessToken: String) async throws -> Decimal {
+        try balanceResult.get()
+    }
+
+    func fetchEquityCurve(accessToken: String, start: Date?, end: Date?, limit: Int?) async throws -> [EquityCurvePoint] {
+        try equityResult.get()
+    }
+
+    func fetchTrades(
+        accessToken: String,
+        page: Int,
+        pageSize: Int,
+        symbol: String?,
+        side: TradeSide?,
+        start: Date?,
+        end: Date?
+    ) async throws -> TradesPage {
+        try tradesResult.get()
+    }
+}

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MainTabView: View {
     let context: UserSessionContext
+    private let reportingService: ReportingServiceProtocol
     @EnvironmentObject private var session: SessionStore
 
     enum Tab: Hashable {
@@ -13,21 +14,26 @@ struct MainTabView: View {
 
     @State private var selection: Tab = .home
 
+    init(context: UserSessionContext, reportingService: ReportingServiceProtocol = ReportingService()) {
+        self.context = context
+        self.reportingService = reportingService
+    }
+
     var body: some View {
         TabView(selection: $selection) {
-            HomeView()
+            HomeView(context: context, reportingService: reportingService)
                 .tabItem {
                     Label("Home", systemImage: "chart.line.uptrend.xyaxis")
                 }
                 .tag(Tab.home)
 
-            CalendarView()
+            CalendarView(context: context, reportingService: reportingService)
                 .tabItem {
                     Label("Calendar", systemImage: "calendar")
                 }
                 .tag(Tab.calendar)
 
-            TradesView()
+            TradesView(context: context, reportingService: reportingService)
                 .tabItem {
                     Label("Trades", systemImage: "list.bullet.rectangle")
                 }
@@ -42,6 +48,7 @@ struct MainTabView: View {
             }
         }
         .sensitive()
+        .tint(Theme.accentGreen)
         .onChange(of: selection) { _, _ in
             session.registerInteraction()
         }
