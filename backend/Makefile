@@ -7,6 +7,10 @@ install:
 	$(POETRY) install
 
 fmt:
+	$(POETRY) run isort --check-only app
+	$(POETRY) run black --check app
+
+fmt-apply:
 	$(POETRY) run isort app
 	$(POETRY) run black app
 
@@ -26,4 +30,4 @@ migrate:
 revision:
 	$(POETRY) run alembic revision --autogenerate -m "Auto"
 
-.PHONY: install fmt lint test run migrate revision
+.PHONY: install fmt fmt-apply lint test run migrate revision

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import jwt
+from app.core.rate_limiter import login_rate_limiter
 from app.core.security import hash_password
+from app.models.token_blacklist import TokenBlacklist
 from app.models.user import User, UserRole, UserStatus
 
 
@@ -39,8 +43,6 @@ async def test_signup_duplicate_username(client: AsyncClient) -> None:
     assert response.json()["error"]["code"] == "user_exists"
 
 
-
-
 @pytest.mark.asyncio
 async def test_signup_duplicate_email(client: AsyncClient) -> None:
     await client.post(
@@ -53,6 +55,23 @@ async def test_signup_duplicate_email(client: AsyncClient) -> None:
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "user_exists"
+
+
+@pytest.mark.asyncio
+async def test_signup_trimmed_email_case_insensitive(client: AsyncClient) -> None:
+    first = await client.post(
+        "/api/v1/signup",
+        json={"username": "caseuser1", "email": "User@example.com ", "password": "StrongPass1"},
+    )
+    assert first.status_code == 201
+
+    duplicate = await client.post(
+        "/api/v1/signup",
+        json={"username": "caseuser2", "email": " user@EXAMPLE.com", "password": "StrongPass1"},
+    )
+    assert duplicate.status_code == 400
+    assert duplicate.json()["error"]["code"] == "user_exists"
+
 
 @pytest.mark.asyncio
 async def test_signup_invalid_email(client: AsyncClient) -> None:
@@ -98,7 +117,7 @@ async def _create_user(
 
 @pytest.mark.asyncio
 async def test_login_active_user(client: AsyncClient, session: AsyncSession) -> None:
-    user = await _create_user(
+    await _create_user(
         session,
         username="activeuser",
         email="active@example.com",
@@ -171,6 +190,28 @@ async def test_refresh_token(client: AsyncClient, session: AsyncSession) -> None
 
 
 @pytest.mark.asyncio
+async def test_cleanup_expired_tokens(session: AsyncSession) -> None:
+    expired = TokenBlacklist(
+        jti="expired",
+        expires_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5),
+    )
+    active = TokenBlacklist(
+        jti="active",
+        expires_at=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5),
+    )
+    session.add_all([expired, active])
+    await session.commit()
+
+    removed = await jwt.cleanup_expired_tokens(session)
+    await session.commit()
+
+    assert removed == 1
+    remaining = (await session.execute(select(TokenBlacklist))).scalars().all()
+    assert len(remaining) == 1
+    assert remaining[0].jti == "active"
+
+
+@pytest.mark.asyncio
 async def test_logout_blacklists_tokens(client: AsyncClient, session: AsyncSession) -> None:
     await _create_user(
         session,
@@ -200,6 +241,39 @@ async def test_logout_blacklists_tokens(client: AsyncClient, session: AsyncSessi
     )
     assert protected.status_code == 401
     assert protected.json()["error"]["code"] == "token_revoked"
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limited_after_excessive_attempts(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    original_limit = login_rate_limiter.limit
+    login_rate_limiter.limit = 2
+    try:
+        await _create_user(
+            session,
+            username="ratelimituser",
+            email="ratelimit@example.com",
+            password="StrongPass1",
+            status=UserStatus.ACTIVE,
+        )
+        for _ in range(2):
+            response = await client.post(
+                "/api/v1/login",
+                json={"username": "ratelimituser", "password": "wrong"},
+            )
+            assert response.status_code == 401
+
+        blocked = await client.post(
+            "/api/v1/login",
+            json={"username": "ratelimituser", "password": "StrongPass1"},
+        )
+        assert blocked.status_code == 429
+        assert blocked.headers.get("Retry-After") is not None
+        payload = blocked.json()
+        assert payload["error"]["code"] == "rate_limited"
+    finally:
+        login_rate_limiter.limit = original_limit
 
 
 @pytest.mark.asyncio

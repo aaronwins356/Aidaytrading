@@ -14,18 +14,49 @@ class Settings(BaseSettings):
     db_url: str = Field(validation_alias="DB_URL")
     jwt_secret: SecretStr = Field(validation_alias="JWT_SECRET")
     jwt_algorithm: str = Field(default="HS256", validation_alias="JWT_ALGORITHM")
-    access_token_expires_min: int = Field(default=15, ge=1, validation_alias="ACCESS_TOKEN_EXPIRES_MIN")
-    refresh_token_expires_days: int = Field(default=7, ge=1, validation_alias="REFRESH_TOKEN_EXPIRES_DAYS")
+    access_token_expires_min: int = Field(
+        default=15,
+        ge=1,
+        validation_alias="ACCESS_TOKEN_EXPIRES_MIN",
+    )
+    refresh_token_expires_days: int = Field(
+        default=7,
+        ge=1,
+        validation_alias="REFRESH_TOKEN_EXPIRES_DAYS",
+    )
     env: Literal["local", "dev", "prod"] = Field(default="local", validation_alias="ENV")
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost", "http://localhost:3000"])
+    cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost", "http://localhost:3000"]
+    )
     brevo_api_key: SecretStr = Field(validation_alias="BREVO_API_KEY")
     brevo_smtp_server: str = Field(validation_alias="BREVO_SMTP_SERVER")
     brevo_port: int = Field(validation_alias="BREVO_PORT")
     brevo_sender_email: str = Field(validation_alias="BREVO_SENDER_EMAIL")
     brevo_sender_name: str = Field(validation_alias="BREVO_SENDER_NAME")
     admin_notification_email: str = Field(validation_alias="ADMIN_NOTIFICATION_EMAIL")
+    login_rate_limit_attempts: int = Field(
+        default=5,
+        ge=1,
+        validation_alias="LOGIN_RATE_LIMIT_ATTEMPTS",
+    )
+    login_rate_limit_window_seconds: int = Field(
+        default=60,
+        ge=1,
+        validation_alias="LOGIN_RATE_LIMIT_WINDOW_SECONDS",
+    )
+    login_rate_limit_block_seconds: int = Field(
+        default=300,
+        ge=1,
+        validation_alias="LOGIN_RATE_LIMIT_BLOCK_SECONDS",
+    )
+    git_sha: str | None = Field(default=None, validation_alias="GIT_SHA")
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
     @property
     def is_local(self) -> bool:

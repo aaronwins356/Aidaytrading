@@ -26,6 +26,8 @@ os.environ.setdefault("BREVO_SENDER_NAME", "Aidaytrading Alerts")
 os.environ.setdefault("ADMIN_NOTIFICATION_EMAIL", "admin@example.com")
 
 from app.core.database import get_session_factory  # noqa: E402
+from app.core.metrics import reset_metrics  # noqa: E402
+from app.core.rate_limiter import login_rate_limiter  # noqa: E402
 from app.main import app  # noqa: E402
 
 
@@ -59,6 +61,20 @@ async def session() -> AsyncIterator[AsyncSession]:
     session_factory = get_session_factory()
     async with session_factory() as session:
         yield session
+
+
+@pytest.fixture(autouse=True)
+async def reset_rate_limits() -> AsyncIterator[None]:
+    await login_rate_limiter.reset()
+    yield
+    await login_rate_limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_prometheus_metrics() -> Iterator[None]:
+    reset_metrics()
+    yield
+    reset_metrics()
 
 
 @pytest.fixture(autouse=True)

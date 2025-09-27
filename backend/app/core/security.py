@@ -8,8 +8,8 @@ from passlib.context import CryptContext  # type: ignore[import-untyped]
 
 PASSWORD_REGEX: Final[re.Pattern[str]] = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$")
 EMAIL_REGEX: Final[re.Pattern[str]] = re.compile(
-    r"^(?:[a-zA-Z0-9_'^&+/=?`{|}~-]+(?:\.[a-zA-Z0-9_'^&+/=?`{|}~-]+)*|\"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*\")@"
-    r"(?:(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}|\[(?:[0-9]{1,3}\.){3}[0-9]{1,3}\])$"
+    r"^(?:[a-zA-Z0-9_'^&+/=?`{|}~-]+(?:\.[a-zA-Z0-9_'^&+/=?`{|}~-]+)*|\"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*\")@"  # noqa: E501
+    r"(?:(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}|\[(?:[0-9]{1,3}\.){3}[0-9]{1,3}\])$"  # noqa: E501
 )
 
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -24,7 +24,8 @@ def validate_password_strength(password: str) -> None:
 
     if not PASSWORD_REGEX.match(password):
         raise PasswordValidationError(
-            "Password must be at least 8 characters long and include one uppercase letter, one lowercase letter, and one digit."
+            "Password must be at least 8 characters long and include one uppercase letter, "
+            "one lowercase letter, and one digit."
         )
 
 

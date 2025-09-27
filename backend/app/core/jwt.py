@@ -64,27 +64,63 @@ def _create_token(
         "token_version": token_version,
     }
 
-    token = jwt.encode(payload, settings.jwt_secret.get_secret_value(), algorithm=settings.jwt_algorithm)
-    return {"token": token, "expires_at": expires, "jti": jti}
+    token = jwt.encode(
+        payload,
+        settings.jwt_secret.get_secret_value(),
+        algorithm=settings.jwt_algorithm,
+    )
+    return {
+        "token": token,
+        "expires_at": expires,
+        "jti": jti,
+    }
 
 
-def create_access_token(subject: str, *, role: str, status: str, token_version: int) -> TokenDetails:
+def create_access_token(
+    subject: str,
+    *,
+    role: str,
+    status: str,
+    token_version: int,
+) -> TokenDetails:
     """Create an access token for the given identity."""
 
-    return _create_token(subject, TokenType.ACCESS, role=role, status=status, token_version=token_version)
+    return _create_token(
+        subject,
+        TokenType.ACCESS,
+        role=role,
+        status=status,
+        token_version=token_version,
+    )
 
 
-def create_refresh_token(subject: str, *, role: str, status: str, token_version: int) -> TokenDetails:
+def create_refresh_token(
+    subject: str,
+    *,
+    role: str,
+    status: str,
+    token_version: int,
+) -> TokenDetails:
     """Create a refresh token for the given identity."""
 
-    return _create_token(subject, TokenType.REFRESH, role=role, status=status, token_version=token_version)
+    return _create_token(
+        subject,
+        TokenType.REFRESH,
+        role=role,
+        status=status,
+        token_version=token_version,
+    )
 
 
 def decode_token(token: str) -> TokenPayload:
     """Decode a JWT token and validate signature."""
 
     try:
-        payload = jwt.decode(token, settings.jwt_secret.get_secret_value(), algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret.get_secret_value(),
+            algorithms=[settings.jwt_algorithm],
+        )
         return cast(TokenPayload, payload)
     except JWTError as exc:  # pragma: no cover - specific error message not needed in tests
         raise ValueError("Invalid token.") from exc

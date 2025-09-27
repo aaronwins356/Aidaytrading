@@ -20,7 +20,17 @@ class AdminAction(TimestampMixin, Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    admin_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    admin_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     action: Mapped[str] = mapped_column(String(64), nullable=False)
-    target_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
-    details: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, nullable=True)
+    target_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    details: Mapped[dict[str, Any] | None] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=True,
+    )

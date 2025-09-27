@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import smtplib
-from typing import Any
+from types import TracebackType
+from typing import Any, Literal
 
 import pytest
 
@@ -17,7 +18,12 @@ class DummySMTP:
     def __enter__(self) -> "DummySMTP":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[override]
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> Literal[False]:
         return False
 
     def starttls(self, context: Any) -> None:
@@ -90,18 +96,28 @@ async def test_brevo_service_handles_failure(monkeypatch: pytest.MonkeyPatch) ->
     captured: list[str] = []
 
     class FailingClient(EmailClient):
-        async def send_html_email(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+        async def send_html_email(
+            self,
+            to: str,
+            subject: str,
+            html_body: str,
+            *,
+            retries: int = 3,
+            backoff_base: float = 1.0,
+        ) -> None:
             captured.append("called")
             raise EmailSendError("boom")
 
-    service = BrevoEmailService(client=FailingClient(
-        host="smtp.example.com",
-        port=587,
-        username="apikey",
-        password="secret",
-        sender_email="from@example.com",
-        sender_name="Example",
-    ))
+    service = BrevoEmailService(
+        client=FailingClient(
+            host="smtp.example.com",
+            port=587,
+            username="apikey",
+            password="secret",
+            sender_email="from@example.com",
+            sender_name="Example",
+        )
+    )
 
     await service.notify_admin_of_signup(user_id=1, username="user", email="user@example.com")
     assert captured == ["called"]

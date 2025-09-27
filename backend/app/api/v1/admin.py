@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from loguru import logger
 from sqlalchemy import func, select
 
 from app.core.dependencies import DBSession, require_admin_active_user
@@ -76,12 +77,22 @@ async def approve_user(
         if user.status == UserStatus.ACTIVE:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={"error": {"code": "already_active", "message": "User already active."}},
+                detail={
+                    "error": {
+                        "code": "already_active",
+                        "message": "User already active.",
+                    }
+                },
             )
         if user.status == UserStatus.DISABLED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={"error": {"code": "disabled_user", "message": "Disabled accounts cannot be approved."}},
+                detail={
+                    "error": {
+                        "code": "disabled_user",
+                        "message": "Disabled accounts cannot be approved.",
+                    }
+                },
             )
 
         previous_status = user.status
@@ -104,6 +115,14 @@ async def approve_user(
         await session.rollback()
         raise
 
+    logger.bind(
+        event="admin.action",
+        admin_id=current_admin.id,
+        target_user_id=user.id,
+        action="approve_user",
+        previous_status=previous_status.value,
+        new_status=user.status.value,
+    ).info("admin_user_approved")
     return admin_schema.StatusChangeResponse(
         message="User approved.",
         user_id=user_id,
@@ -120,7 +139,12 @@ async def disable_user(
     if user_id == current_admin.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": {"code": "forbidden", "message": "You cannot disable your own account."}},
+            detail={
+                "error": {
+                    "code": "forbidden",
+                    "message": "You cannot disable your own account.",
+                }
+            },
         )
 
     try:
@@ -128,7 +152,12 @@ async def disable_user(
         if user.status == UserStatus.DISABLED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={"error": {"code": "already_disabled", "message": "User already disabled."}},
+                detail={
+                    "error": {
+                        "code": "already_disabled",
+                        "message": "User already disabled.",
+                    }
+                },
             )
 
         if user.role == UserRole.ADMIN and user.status == UserStatus.ACTIVE:
@@ -154,6 +183,14 @@ async def disable_user(
         await session.rollback()
         raise
 
+    logger.bind(
+        event="admin.action",
+        admin_id=current_admin.id,
+        target_user_id=user.id,
+        action="disable_user",
+        previous_status=previous_status.value,
+        new_status=user.status.value,
+    ).info("admin_user_disabled")
     return admin_schema.StatusChangeResponse(
         message="User disabled.",
         user_id=user_id,
@@ -171,7 +208,12 @@ async def change_role(
     if user_id == current_admin.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": {"code": "forbidden", "message": "You cannot change your own role."}},
+            detail={
+                "error": {
+                    "code": "forbidden",
+                    "message": "You cannot change your own role.",
+                }
+            },
         )
 
     try:
@@ -180,10 +222,19 @@ async def change_role(
         if user.role == new_role:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={"error": {"code": "no_role_change", "message": "User already in requested role."}},
+                detail={
+                    "error": {
+                        "code": "no_role_change",
+                        "message": "User already in requested role.",
+                    }
+                },
             )
 
-        if user.role == UserRole.ADMIN and new_role != UserRole.ADMIN and user.status == UserStatus.ACTIVE:
+        if (
+            user.role == UserRole.ADMIN
+            and new_role != UserRole.ADMIN
+            and user.status == UserStatus.ACTIVE
+        ):
             await _ensure_additional_admin(session, user.id)
 
         previous_role = user.role
@@ -206,6 +257,14 @@ async def change_role(
         await session.rollback()
         raise
 
+    logger.bind(
+        event="admin.action",
+        admin_id=current_admin.id,
+        target_user_id=user.id,
+        action="change_role",
+        previous_role=previous_role.value,
+        new_role=new_role.value,
+    ).info("admin_user_role_changed")
     return admin_schema.RoleChangeResponse(
         message="Role updated.",
         user_id=user_id,

@@ -1,270 +1,242 @@
 # Aidaytrading Backend
 
-This directory houses the production-ready FastAPI backend for the Aidaytrading project. The legacy trading bot and research code remains in the top-level `ai_trader/` package; only the backend services have been reorganised under `backend/` in this prompt.
+FastAPI-powered authentication and admin service for the Aidaytrading platform. The legacy trading runtime (`ai_trader/`) ships alongside this backend; both can be deployed independently.
 
-## What Prompt 1 Delivers
+## Quick Start (≈5 minutes)
 
-- Fully typed FastAPI application exposing `/api/v1/signup`, `/api/v1/login`, `/api/v1/refresh`, `/api/v1/logout`, and `/api/v1/me` endpoints with consistent error envelopes.
-- Secure authentication/authorisation flow with bcrypt password hashing, access and refresh JWTs, and a blacklist table for revocation.
-- Deterministic Alembic migrations and asynchronous SQLAlchemy models for `users` and `token_blacklist` tables.
-- Pydantic Settings-driven configuration that validates required environment variables and supports `.env` files.
-- Structured JSON logging middleware safe for PII.
-- Developer tooling via Poetry, Makefile, and pre-commit along with Black, isort, Flake8, MyPy, and pytest + coverage.
-- Comprehensive async API tests (`pytest-asyncio` + `httpx`) with >80% coverage of new modules.
-
-## Prompt 2 Enhancements
-
-- Production Brevo SMTP integration with templated HTML notifications and exponential retry logic.
-- Admin-only API surface for approving, disabling, and re-assigning users with enforced role/status checks.
-- Token versioning strategy that revokes existing access/refresh tokens when roles or status change.
-- Append-only audit logging of privileged actions with pagination for compliance review.
-
-## Project Structure
-
-```
-backend/
-  app/
-    api/
-      v1/
-    core/
-    models/
-    schemas/
-    services/
-    migrations/
-    tests/
-  pyproject.toml
-  Makefile
-  README.md
-  .env.example
-  .flake8
-  .editorconfig
-  .pre-commit-config.yaml
-```
-
-`ai_trader/` and other existing directories are untouched and continue to operate independently of the backend service.
-
-## Requirements
-
-- Python 3.11+
-- [Poetry](https://python-poetry.org/) 1.7+
-
-## Quick Start
-
-1. **Create and populate an environment file**
-
-   Copy `.env.example` to `.env` and update the values as needed:
-
+1. **Clone & enter the backend**
+   ```bash
+   git clone https://github.com/your-org/aidaytrading.git
+   cd aidaytrading/backend
+   ```
+2. **Copy the environment template**
    ```bash
    cp .env.example .env
    ```
-
-   - `DB_URL`: Async SQLAlchemy URL. Defaults to a local SQLite file (`sqlite+aiosqlite:///./backend.db`).
-   - `JWT_SECRET`: Replace with a strong random string (e.g. `openssl rand -hex 32`).
-   - `JWT_ALGORITHM`: Defaults to `HS256`.
-   - `ACCESS_TOKEN_EXPIRES_MIN`: Minutes before access tokens expire (default `15`).
-   - `REFRESH_TOKEN_EXPIRES_DAYS`: Days before refresh tokens expire (default `7`).
-   - `ENV`: `local`, `dev`, or `prod`. Non-local environments must not use `CHANGE_ME` secrets.
-   - `BREVO_API_KEY`: Brevo transactional email API key (used as the SMTP password).
-   - `BREVO_SMTP_SERVER`: Brevo SMTP hostname (e.g. `smtp-relay.brevo.com`).
-   - `BREVO_PORT`: Brevo SMTP port (typically `587`).
-   - `BREVO_SENDER_EMAIL`: Verified Gmail/Brevo sender address for outbound mail.
-   - `BREVO_SENDER_NAME`: Friendly display name shown in email headers.
-   - `ADMIN_NOTIFICATION_EMAIL`: Destination mailbox for new-signup alerts.
-
-2. **Install dependencies**
-
+   Update secrets (`JWT_SECRET`, Brevo SMTP credentials) before running in anything other than local mode.
+3. **Install dependencies with Poetry**
    ```bash
    make install
    ```
-
-3. **Run database migrations**
-
+4. **Apply migrations**
    ```bash
    make migrate
    ```
-
-4. **Start the development server**
-
+5. **Run the API**
    ```bash
    make run
    ```
+   Visit http://localhost:8000/health to confirm the service is healthy, then explore http://localhost:8000/docs.
 
-   The API is available at http://localhost:8000 and ships with interactive docs at `/docs`.
+## Configuration Matrix
 
-## Tooling Commands
+| Variable | Description | Default | Required |
+| --- | --- | --- | --- |
+| `DB_URL` | Async SQLAlchemy URL for the primary database. | `sqlite+aiosqlite:///./backend.db` | ✅ |
+| `JWT_SECRET` | Symmetric signing secret for JWTs (>=32 random bytes). | `CHANGE_ME` | ✅ |
+| `JWT_ALGORITHM` | JWT signing algorithm. | `HS256` | ✅ |
+| `ACCESS_TOKEN_EXPIRES_MIN` | Minutes before access tokens expire. | `15` | ✅ |
+| `REFRESH_TOKEN_EXPIRES_DAYS` | Days before refresh tokens expire. | `7` | ✅ |
+| `ENV` | Deployment environment (`local`, `dev`, `prod`). | `local` | ✅ |
+| `BREVO_API_KEY` | Brevo SMTP API key (used as password). | – | ✅ |
+| `BREVO_SMTP_SERVER` | Brevo SMTP host. | `smtp-relay.brevo.com` | ✅ |
+| `BREVO_PORT` | Brevo SMTP port. | `587` | ✅ |
+| `BREVO_SENDER_EMAIL` | From email address for notifications. | `alerts@example.com` | ✅ |
+| `BREVO_SENDER_NAME` | Friendly sender display name. | `Aidaytrading Alerts` | ✅ |
+| `ADMIN_NOTIFICATION_EMAIL` | Inbox for new-signup alerts. | `ops@example.com` | ✅ |
+| `LOGIN_RATE_LIMIT_ATTEMPTS` | Allowed login attempts per window. | `5` | ✅ |
+| `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | Sliding window length in seconds. | `60` | ✅ |
+| `LOGIN_RATE_LIMIT_BLOCK_SECONDS` | Cooldown applied after limit exceeded. | `300` | ✅ |
+| `GIT_SHA` | Git revision injected at build time. | – | Optional |
+| `CORS_ORIGINS` | JSON array of allowed origins (via `.env`). | `http://localhost`, `http://localhost:3000` | Optional |
 
-| Command | Description |
-| ------- | ----------- |
-| `make install` | Install project dependencies via Poetry. |
-| `make fmt` | Format code with isort and Black. |
-| `make lint` | Run Flake8 and MyPy. |
-| `make test` | Execute pytest with coverage (async tests included). |
-| `make run` | Start the FastAPI development server with Uvicorn. |
-| `make migrate` | Apply Alembic migrations (`alembic upgrade head`). |
-| `make revision` | Create a new auto-generated migration (`alembic revision --autogenerate`). |
+Secrets are read from the environment; never commit `.env` files or keys. Production deployments should inject configuration via your secrets manager (AWS SSM, Vault, etc.).
 
-## Database Migrations
+## Developer Tooling
 
-Alembic is configured for async SQLAlchemy. To create a new migration after modifying models:
-
-```bash
-make revision MESSAGE="add_new_table"
-```
-
-To run migrations in production environments, ensure `DB_URL` points to the correct database and run `make migrate`.
-
-## Testing
-
-All tests are asynchronous and use a temporary SQLite database with migrations applied automatically.
-
-```bash
-make test
-```
-
-Coverage reports are emitted to the terminal; CI should enforce ≥80% coverage for the modules introduced here.
-
-## API Overview
-
-All responses use a consistent error format: `{ "error": { "code": str, "message": str, "details": optional } }`.
-
-### POST `/api/v1/signup`
-
-Request:
-
-```json
-{
-  "username": "alice",
-  "email": "alice@example.com",
-  "password": "Str0ngPass!"
-}
-```
-
-Response (`201 Created`):
-
-```json
-{
-  "message": "Signup received. Await approval.",
-  "status": "pending"
-}
-```
-
-### POST `/api/v1/login`
-
-Request:
-
-```json
-{
-  "username": "alice",
-  "password": "Str0ngPass!"
-}
-```
-
-Response (`200 OK`):
-
-```json
-{
-  "access_token": "<JWT>",
-  "refresh_token": "<JWT>",
-  "token_type": "bearer"
-}
-```
-
-Inactive or disabled accounts return `401` with code `inactive_account` and the generic message “Invalid credentials or inactive account.”
-
-### POST `/api/v1/refresh`
-
-Request body or `Authorization: Bearer <refresh token>` header containing the refresh token.
-
-Response (`200 OK`):
-
-```json
-{
-  "access_token": "<JWT>",
-  "token_type": "bearer"
-}
-```
-
-### POST `/api/v1/logout`
-
-Requires the access token in the `Authorization` header. Optionally include the refresh token in the body.
-
-Response (`200 OK`):
-
-```json
-{
-  "message": "Logged out"
-}
-```
-
-The provided token JTIs are persisted to the blacklist table; subsequent requests with the same token fail with `401 token_revoked`.
-
-### GET `/api/v1/me`
-
-Requires a valid (non-blacklisted) access token. Returns the authenticated user's profile:
-
-```json
-{
-  "id": 1,
-  "username": "alice",
-  "email": "alice@example.com",
-  "role": "viewer",
-  "status": "active",
-  "created_at": "2024-04-01T12:34:56+00:00",
-  "updated_at": "2024-04-01T12:34:56+00:00"
-}
-```
-
-### Admin API (all routes require an active admin access token)
-
-| Method & Path | Description |
+| Command | Purpose |
 | --- | --- |
-| `GET /api/v1/admin/pending-users` | List users awaiting approval. |
-| `POST /api/v1/admin/approve/{id}` | Promote a pending user to `active`. |
-| `POST /api/v1/admin/disable/{id}` | Disable an account and immediately revoke existing tokens. |
-| `POST /api/v1/admin/role/{id}` | Change a user's role between `viewer` and `admin`. |
-| `GET /api/v1/admin/audit-logs?limit=&offset=` | Paginated view of admin actions (append-only). |
+| `make install` | Install dependencies with Poetry. |
+| `make fmt` | Run Black/Isort in check mode (used by CI). |
+| `make fmt-apply` | Auto-format the codebase. |
+| `make lint` | Run Flake8 and MyPy (strict mode). |
+| `make test` | Execute pytest with coverage (HTML + XML reports under `htmlcov/`). |
+| `make migrate` | Apply database migrations. |
+| `make revision MESSAGE="..."` | Generate a new Alembic migration. |
+| `poetry run docs/export_openapi.py` | Export `docs/openapi.json` for API consumers. |
 
-All admin mutations run inside a single transaction, write an `admin_actions` audit entry, and bump the target user's
-`token_version` so any existing tokens become invalid. Safeguards prevent self-disabling and ensure at least one active admin
-remains.
+## API Catalog
 
-## Email Notifications
+All API examples assume the backend is running on `http://localhost:8000`.
 
-- New user signups persist with `pending` status and trigger an HTML email to `ADMIN_NOTIFICATION_EMAIL`.
-- Templates are rendered with Jinja2 and include a branded header, body copy, and footer.
-- Delivery uses Brevo's SMTP relay (`username=apikey`) with TLS. Transient failures retry with exponential backoff and jitter;
-  persistent failures emit structured logs but do not fail the originating request.
+### Auth
 
-## Audit Logging
-
-- `admin_actions` captures `{admin_id, action, target_user_id, metadata, created_at}` with append-only semantics.
-- `metadata` stores contextual JSON (previous/new role or status) to simplify investigations.
-- Indexes on `admin_id`, `target_user_id`, and `created_at` enable efficient filtering for compliance reviews.
-
-## Security Decisions
-
-- Emails are normalised to lowercase (`email_canonical`) with a unique index for case-insensitive deduplication.
-- JWTs embed `token_version`; any role/status change increments the value so stale access/refresh tokens are rejected. Logout
-  still blacklists explicit JTIs for immediate revocation of the active session.
-- Usernames are trimmed and validated against `^[A-Za-z0-9_]+$` to eliminate unsafe characters.
-- `require_active_user` / `require_admin_active_user` dependencies centralise JWT decoding, blacklist checks, role validation,
-  and status enforcement.
-
-## Logging
-
-Requests are logged as single-line JSON with fields for timestamp, log level, message, request ID, method, path, status code, and latency. Sensitive information (passwords, full email addresses, tokens) is never written to logs. Use `tail -f` on your server logs to observe structured output in real time.
-
-## Pre-commit Hooks
-
-Install the hooks once dependencies are installed:
-
+#### `POST /api/v1/signup`
 ```bash
-poetry run pre-commit install
+curl -X POST http://localhost:8000/api/v1/signup \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","email":"alice@example.com","password":"Str0ngPass1"}'
+```
+Response `201 Created`:
+```json
+{"message": "Signup received. Await approval.", "status": "pending"}
 ```
 
-The hooks enforce formatting (Black, isort), linting (Flake8), and guard against large files or accidentally committed secrets.
+#### `POST /api/v1/login`
+```bash
+curl -X POST http://localhost:8000/api/v1/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"Str0ngPass1"}'
+```
+Response `200 OK` includes `access_token` and `refresh_token`. Rate limiting (default 5 attempts/minute) returns `429 rate_limited` with a `Retry-After` header.
 
-## Next Steps
+#### `POST /api/v1/refresh`
+```bash
+curl -X POST http://localhost:8000/api/v1/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"refresh_token":"<refresh-jwt>"}'
+```
+Response: `{"access_token": "<new-access-token>"}`.
 
-Future work can focus on richer admin tooling (e.g. frontend UI), granular token/session management, and automated escalation
-rules for high-risk signups.
+#### `POST /api/v1/logout`
+```bash
+curl -X POST http://localhost:8000/api/v1/logout \
+  -H "Authorization: Bearer <access-token>" \
+  -H 'Content-Type: application/json' \
+  -d '{"refresh_token":"<refresh-jwt>"}'
+```
+Tokens are added to the blacklist immediately.
+
+### Users
+
+#### `GET /api/v1/me`
+```bash
+curl http://localhost:8000/api/v1/me \
+  -H "Authorization: Bearer <access-token>"
+```
+Returns the authenticated user profile.
+
+### Admin
+All routes require an active admin bearer token.
+
+- `GET /api/v1/admin/pending-users`
+- `POST /api/v1/admin/approve/{user_id}`
+- `POST /api/v1/admin/disable/{user_id}`
+- `POST /api/v1/admin/role/{user_id}` with body `{ "role": "admin" | "viewer" }`
+- `GET /api/v1/admin/audit-logs?limit=20&offset=0`
+
+Each mutation bumps the target user’s `token_version`, writes an audit record, emits structured logs (`event=admin.action`), and increments observability counters.
+
+### Status
+
+`GET /status` reports business-facing counts:
+```bash
+curl http://localhost:8000/status
+```
+Response:
+```json
+{
+  "timestamp": "2024-05-01T12:00:00Z",
+  "environment": "local",
+  "version": "unknown",
+  "users": {"pending": 3, "active": 12, "disabled": 1},
+  "admins_active": 2
+}
+```
+
+### Health
+
+`GET /health` is tuned for load balancers/Kubernetes probes.
+
+```bash
+curl http://localhost:8000/health
+```
+Key fields:
+- `uptime_seconds`
+- `db_status.state` (`ok`, `degraded`, `down` + `reason`)
+- `scheduler_status` (`equity_heartbeat`, `daily_rollup`) with ISO timestamps + lag seconds
+- `version`
+
+### Metrics
+
+`GET /metrics` emits Prometheus text format. Exposed metrics include:
+- `http_requests_total{path,method,status}`
+- `http_request_duration_seconds_bucket|sum|count`
+- `auth_logins_total{outcome}`
+- `push_events_total{type,outcome}` (email dispatches, Firebase when added)
+- `ws_clients_gauge{channel}`
+
+Restrict this endpoint via the provided Nginx sample (`deploy/nginx.conf`).
+
+### Reporting & Trades
+
+Trading analytics live in the legacy runtime (`ai_trader/api_service.py`). When that service runs (e.g. `uvicorn ai_trader.api_service:app --port 9000`), it exposes:
+
+```bash
+curl http://localhost:9000/status
+curl http://localhost:9000/trades
+curl http://localhost:9000/profit?days=30
+```
+
+These endpoints provide equity curves, trade history, ML metrics, and risk-state snapshots used by dashboards.
+
+### WebSockets
+
+The backend does not yet publish public WebSocket channels, but middleware tracks connections for future channels via `ws_clients_gauge`. When enabling WebSockets, mount routes under `/ws/*`; the supplied Nginx config already forwards upgrade headers.
+
+### Device Registration
+
+Device/push registration is delegated to upcoming mobile services. Email notifications are currently handled through Brevo (`app/services/brevo_email.py`). Push delivery instrumentation is ready via `push_events_total` and structured logs (`event=push.notification`).
+
+## Operations & Observability
+
+- **Structured logs** – Loguru outputs single-line JSON with `req_id`, `ip`, `user_id`, path, method, status, latency, and sanitized error fields. In containers/systemd, forward stdout/stderr to your log collector (Loki, CloudWatch). For bare-metal installs, use journald or configure `logrotate` on `/var/log/nginx/aidaytrading*.log`.
+- **Tail logs** – `journalctl -u aidaytrading-backend -f` or `docker logs -f <container>`.
+- **Metrics** – Scrape `/metrics` with Prometheus (per-instance) or ship to Grafana Cloud via `remote_write`. Alert on `auth_logins_total{outcome="failure"}` spikes, `http_requests_total{status="500"}` growth, or stale scheduler ticks.
+- **Health checks** – Kubernetes/Load balancers should hit `/health`. For business dashboards, consume `/status`.
+- **Scheduler telemetry** – Background jobs call `record_scheduler_tick` (see `app/core/health.py`). Lag exceeding your SLO should trigger alarms.
+
+## Deployment Cookbook
+
+1. **Build & install** – Copy the repository to `/opt/aidaytrading/backend`, set ownership to `www-data`, and create a Python virtualenv via Poetry (`poetry install --no-dev`).
+2. **Systemd service** – Drop `deploy/aidaytrading-backend.service` into `/etc/systemd/system/`, adjust `WorkingDirectory` and `ExecStart` paths, then run:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now aidaytrading-backend
+   ```
+3. **TLS termination** – Install Nginx using `deploy/nginx.conf` (update `server_name` + upstream). Generate certificates with `deploy/generate_tls.sh api.example.com ops@example.com` and schedule `certbot renew`.
+4. **WebSockets** – Nginx stanza handles `Upgrade`/`Connection` headers automatically; expose WS endpoints under `/ws/` in FastAPI.
+5. **Rolling restarts** – `sudo systemctl restart aidaytrading-backend` (systemd) or `docker service update --force` (containers). Because the app is stateless, restarts are safe once the DB migration step has succeeded.
+6. **Log shipping** – Journald captures JSON logs; forward via `systemd-journal-remote` or agents (Vector/Fluent Bit). Avoid local file rotation for app logs by piping stdout directly to collectors.
+
+## Security Notes
+
+- **Password policy** – `validate_email_format` + `hash_password` enforce strong secrets (>=8 chars, complexity). Rejections are logged via `validation_error` without exposing PII.
+- **JWT safety** – Access & refresh tokens embed `token_version`; admin mutations bump it so stale tokens fail. Logout adds JTIs to `token_blacklist`.
+- **Rate limiting** – Login attempts use a sliding window limiter (`login_rate_limiter`). Rate-limited responses emit structured logs (`event=auth.login`, `outcome=rate_limited`).
+- **Secrets** – Only read from env vars; `.env` is gitignored. Inject secrets through your platform-specific store.
+- **CORS & CSP** – Configure `CORS_ORIGINS` for approved frontends. The provided Nginx config applies strict CSP/Referrer policies suitable for API + WebSocket usage.
+- **TLS** – Terminate TLS at the reverse proxy (Nginx/Caddy). Enforce HSTS and modern cipher suites as shown.
+
+## Troubleshooting
+
+| Symptom | Likely Cause | Resolution |
+| --- | --- | --- |
+| `OperationalError: no such table` | Migrations not applied. | Run `make migrate` with the correct `DB_URL`. |
+| `401 invalid_token` on every request | `JWT_SECRET` mismatch between issuers and API. | Ensure all API nodes share the same secret; rotate tokens if changed. |
+| `429 rate_limited` despite low traffic | Shared IP hitting limit (e.g., load tests). | Increase `LOGIN_RATE_LIMIT_*` env vars or provide unique `X-Forwarded-For`. |
+| Browser blocked by CORS | Missing origin in `CORS_ORIGINS`. | Update `.env` to include frontend origin(s). |
+| WebSocket upgrade fails | Proxy not forwarding `Upgrade`/`Connection`. | Use provided Nginx/Caddy config; verify upstream port (default 8000). |
+| `/health` shows `db_status.down` | Database unreachable. | Check DB credentials/network, run migrations after restore. |
+
+## Further Reading
+
+- `docs/export_openapi.py` – generate OpenAPI documentation for client teams.
+- `docs/openapi.json` – published schema (generate as part of release process).
+- `docs/adr/0001-architecture.md` – architecture decisions and rationale.
+- `SECURITY.md` – vulnerability disclosure process.
+- `CONTRIBUTING.md` – coding standards and workflow.
+
+## Legacy Trading Runtime
+
+The historical AI trading engine remains under `ai_trader/`. It exposes its own FastAPI service (`ai_trader/api_service.py`) plus a Streamlit dashboard. Refer to the root-level `README.md` for trader-specific documentation.
