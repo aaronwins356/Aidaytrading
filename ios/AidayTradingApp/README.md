@@ -60,6 +60,17 @@ ios/AidayTradingApp
 - `NotificationManager` bridges APNs/FCM push tokens to the backend, stores payloads in a Core Data SQLite store, and binds to realtime publishers to mirror important events as in-app alerts.
 - The Notifications tab displays historical alerts with Central Time annotations, emoji status icons (🚀, ✋, 📊), and a JSON detail view, giving operators a compliant audit trail without relying on Telegram.
 
+
+## Admin controls
+
+- **Admin tab** – Available only to administrator accounts. Surfaces bot controls, risk guardrails, user management, and an audit feed of the last ten configuration changes.
+- **Bot control** – Start/stop the trading loop, toggle between paper and live with destructive confirmation, and view the latest execution timestamp. Every action persists locally and mirrors into the Notifications tab.
+- **Risk guardrails** – Fintech-grade cards expose sliders and steppers for max drawdown, daily loss, per-trade risk, ATR multipliers, and open-position limits. Inputs clamp to backend-approved ranges before PATCHing `/admin/risk`.
+- **User management** – Approve pending signups, disable compromised accounts, adjust roles, and trigger Brevo password resets. Swipe actions mirror App Store moderation flows, while tapping a row opens a detailed control sheet.
+- **Operational audit** – Changes are stored through `AdminChangeLogRepository`, rendering the most recent ten actions inline and mirroring them to the Alerts tab for lightweight compliance.
+
+The admin workflow uses `AdminRepositoryImpl` for privileged API mutations and streams successes through `AdminViewModel` to both the change log store and `NotificationManager` banners.
+
 ## Accessibility & localization
 
 - All metrics and heatmap cells expose VoiceOver labels describing amounts and sentiment.
@@ -146,6 +157,8 @@ xcodebuild \
   -destination 'platform=iOS Simulator,name=iPhone 15' \
   test
 ```
+
+New admin test suites cover view-model clamping (`AdminViewModelsTests`), change-log pipelines (`AdminIntegrationTests`), and SwiftUI rendering (`AdminViewSnapshotTests`). Run the full suite with `xcodebuild test` to verify privileged workflows before shipping.
 
 Realtime streaming and push notification logic are exercised via Combine-driven tests in `NotificationManagerTests` and `TradesViewModelRealtimeTests`, which rely on mocked WebSocket publishers and an in-memory Core Data store.
 
