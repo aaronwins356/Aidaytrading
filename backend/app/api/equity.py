@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models.trade import BalanceSnapshot, BotState, DailyPnL, EquityPoint, Trade
-from ..schemas.trade import BalanceSnapshotOut, CalendarEntry, EquityPointOut, ProfitSummary, StatusResponse
+from ..schemas.trade import BalanceSnapshotOut, CalendarEntry, ProfitSummary, StatusResponse
 from ..security.auth import get_current_user
 
 router = APIRouter(tags=["investor"])
@@ -25,7 +25,10 @@ async def investor_status(
     mode = state.mode if state else "paper"
     uptime = None
     if state and state.running and state.uptime_started_at:
-        uptime = (datetime.now(timezone.utc) - state.uptime_started_at).total_seconds()
+        started = state.uptime_started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        uptime = (datetime.now(timezone.utc) - started).total_seconds()
     return StatusResponse(running=running, mode=mode, uptime_seconds=uptime)
 
 
@@ -49,20 +52,20 @@ async def profit_summary(
     pnl_absolute = equity - balance
     pnl_percent = (pnl_absolute / balance * 100) if balance else 0
     return ProfitSummary(
-        equity=equity,
-        pnl_absolute=pnl_absolute,
-        pnl_percent=pnl_percent,
+        current_balance=equity,
+        total_pl_amount=pnl_absolute,
+        total_pl_percent=pnl_percent,
         win_rate=win_rate,
     )
 
 
-@router.get("/equity-curve", response_model=list[EquityPointOut])
+@router.get("/equity-curve", response_model=list[tuple[str, str]])
 async def equity_curve(
     session: AsyncSession = Depends(get_db), user=Depends(get_current_user)
-) -> list[EquityPointOut]:
+) -> list[tuple[str, str]]:
     result = await session.execute(select(EquityPoint).order_by(EquityPoint.timestamp))
     points = result.scalars().all()
-    return [EquityPointOut.model_validate(point) for point in points]
+    return [(point.timestamp.isoformat(), str(point.value)) for point in points]
 
 
 @router.get("/calendar", response_model=list[CalendarEntry])
