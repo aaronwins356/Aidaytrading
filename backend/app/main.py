@@ -11,10 +11,12 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from app.api.v1 import api_router
+from app.api.ws import register_websocket_routes
 from app.core import jwt
 from app.core.config import get_settings
 from app.core.database import get_session_factory
 from app.core.logging import RequestLoggingMiddleware, configure_logging, record_validation_error
+from app.tasks.scheduler import shutdown_scheduler, start_scheduler
 
 configure_logging()
 settings = get_settings()
@@ -28,7 +30,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if deleted:
             logger.info("expired_tokens_cleaned", count=deleted)
         await session.commit()
-    yield
+    start_scheduler()
+    try:
+        yield
+    finally:
+        await shutdown_scheduler()
 
 
 app = FastAPI(title="Aidaytrading Backend", version="1.0.0", lifespan=lifespan)
@@ -78,6 +84,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 app.include_router(api_router)
+register_websocket_routes(app)
 
 
 @app.get("/health", tags=["health"])

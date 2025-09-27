@@ -26,15 +26,13 @@ def _extract_bearer_token(request: Request, token: str | None) -> str:
     return auth_header.split(" ", 1)[1]
 
 
-async def _resolve_user(
-    request: Request,
+async def resolve_user_from_token(
     session: AsyncSession,
+    raw_token: str,
     *,
-    token: str | None,
     require_active: bool,
     require_admin: bool,
 ) -> User:
-    raw_token = _extract_bearer_token(request, token)
     try:
         payload = jwt.decode_token(raw_token)
     except ValueError as exc:
@@ -90,8 +88,6 @@ async def _resolve_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"error": {"code": "forbidden", "message": "Admin privileges required."}},
         )
-
-    request.state.user = user
     return user
 
 
@@ -102,13 +98,15 @@ async def require_active_user(
 ) -> User:
     """Dependency that returns the authenticated active user."""
 
-    return await _resolve_user(
-        request,
+    raw_token = _extract_bearer_token(request, token)
+    user = await resolve_user_from_token(
         session,
-        token=token,
+        raw_token,
         require_active=True,
         require_admin=False,
     )
+    request.state.user = user
+    return user
 
 
 async def require_admin_active_user(
@@ -118,13 +116,15 @@ async def require_admin_active_user(
 ) -> User:
     """Dependency that enforces active admin access."""
 
-    return await _resolve_user(
-        request,
+    raw_token = _extract_bearer_token(request, token)
+    user = await resolve_user_from_token(
         session,
-        token=token,
+        raw_token,
         require_active=True,
         require_admin=True,
     )
+    request.state.user = user
+    return user
 
 
 async def get_current_user(

@@ -4,7 +4,7 @@ from __future__ import annotations
 import enum
 
 from sqlalchemy import Enum, Index, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
 
@@ -38,3 +38,4 @@ class User(TimestampMixin, Base):
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False, default=UserRole.VIEWER)
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), nullable=False, default=UserStatus.PENDING)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    device_tokens = relationship("DeviceToken", back_populates="user", cascade="all, delete-orphan")

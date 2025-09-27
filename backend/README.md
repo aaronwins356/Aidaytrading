@@ -19,6 +19,15 @@ This directory houses the production-ready FastAPI backend for the Aidaytrading 
 - Token versioning strategy that revokes existing access/refresh tokens when roles or status change.
 - Append-only audit logging of privileged actions with pagination for compliance review.
 
+## Prompt 3 Enhancements
+
+- Expanded data model with equity snapshots, per-day P/L rollups, trade history, device tokens, and singleton system status.
+- Reporting APIs for equity curves, profitability summaries, calendar heatmaps, trades, and device registration.
+- Secure WebSocket feeds for status, equity, trades, and balances with token authentication and in-memory pub/sub.
+- APScheduler-driven jobs for equity snapshots, midnight (America/Chicago) daily P&L rollups, and twice-daily heartbeats.
+- Firebase push notification integration with device token fan-out and structured logging.
+- IP-based login rate limiting (5 attempts per 15 minutes) to throttle brute-force attacks.
+
 ## Project Structure
 
 ```
@@ -228,6 +237,17 @@ All admin mutations run inside a single transaction, write an `admin_actions` au
 `token_version` so any existing tokens become invalid. Safeguards prevent self-disabling and ensure at least one active admin
 remains.
 
+### Reporting & Portfolio APIs
+
+- **GET `/api/v1/equity-curve`** – Returns ordered `[timestamp, equity]` pairs. Supports `start`, `end`, and `limit` query parameters; defaults to the most recent 30 UTC days when omitted.
+- **GET `/api/v1/profit`** – Provides the latest balance, total P/L amount and percentage (relative to `BASELINE_EQUITY` or the earliest snapshot), and the trade win-rate.
+- **GET `/api/v1/calendar`** – Produces a date-keyed dictionary of daily P/L and colour classification (`green|red|neutral`). Aggregation is always executed in `America/Chicago` to match trading hours.
+- **GET `/api/v1/status`** – Exposes `{ running, uptime_seconds }` reflecting the singleton system status row.
+- **GET `/api/v1/trades`** – Paginated trade ledger (`page`, `page_size`, `symbol`, `side`, `start`, `end`) sorted by timestamp descending.
+- **POST `/api/v1/register-device`** – Upserts a push-notification device token for the authenticated user (`platform` defaults to `ios`).
+
+> **Login rate limiting:** `POST /api/v1/login` is throttled to 5 attempts per IP per 15 minutes. Excess attempts receive `429 Too Many Requests` with a `retry_after` hint (seconds) for client backoff logic.
+
 ## Email Notifications
 
 - New user signups persist with `pending` status and trigger an HTML email to `ADMIN_NOTIFICATION_EMAIL`.
@@ -240,6 +260,36 @@ remains.
 - `admin_actions` captures `{admin_id, action, target_user_id, metadata, created_at}` with append-only semantics.
 - `metadata` stores contextual JSON (previous/new role or status) to simplify investigations.
 - Indexes on `admin_id`, `target_user_id`, and `created_at` enable efficient filtering for compliance reviews.
+
+## WebSocket Feeds
+
+- `/ws/status` – Broadcasts bot lifecycle updates. Clients must supply a valid access token via `?token=` or `Authorization: Bearer` header; unauthenticated connections are closed with `1008`.
+- `/ws/equity` – Streams the latest equity snapshot every scheduler tick plus on-connect priming. Payloads follow `{ "event": "equity", "data": { "timestamp": ISO8601, "equity": "<Decimal>" } }`.
+- `/ws/trades` – Designed for near-real-time trade ingest. Call `app.services.trade_feed.broadcast_trade` after inserting a trade to fan-out updates.
+- `/ws/balance` – Emits balance heartbeats in sync with the scheduled push notifications.
+
+All feeds share an in-memory pub/sub implementation that can be swapped for Redis in production. Connections are read-only and respect viewer-role access tokens.
+
+## Scheduler & Time Zones
+
+`APScheduler` starts when the FastAPI lifespan begins (disabled automatically in tests with `SCHEDULER_ENABLED=false`). Jobs:
+
+- Equity snapshots every `EQUITY_SNAPSHOT_INTERVAL_MINUTES` (default 10) via `services.metrics_source`.
+- Daily P/L rollup at midnight `America/Chicago` using trade timestamps and persisting into `daily_pnl`.
+- Heartbeat push notifications at `HEARTBEAT_CRON` (default `0 2,8,14,20 * * *`, i.e., 2am/8am/2pm/8pm Central).
+
+All scheduler timestamps are stored in UTC, while calendar aggregation explicitly converts to Central Time for day boundaries.
+
+## Push Notifications
+
+- Set `FIREBASE_CREDENTIALS` to either the path of the Google service-account JSON file or the JSON string itself. When omitted, push delivery is disabled gracefully.
+- Register devices through `POST /api/v1/register-device`; tokens are deduplicated via a unique index.
+- `services.push.send_push_to_user` fans out to every active token for a user and removes invalid tokens (e.g., unregistered APNs keys).
+- Heartbeat job payloads are formatted as `Balance: $X, P/L: Y%` and also broadcast over `/ws/balance`.
+
+## CORS Configuration
+
+Use `CORS_ALLOWED_ORIGINS` to provide a comma-separated list of permitted origins (e.g., iOS WebViews). Defaults allow `http://localhost` and `http://localhost:3000` for development. Tighten this list for production deployments.
 
 ## Security Decisions
 
