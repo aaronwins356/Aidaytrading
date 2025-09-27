@@ -1,7 +1,7 @@
 import Foundation
 
 enum APIEnvironment {
-    static let baseURL = URL(string: "https://api.aidaytrading.com")!
+    static var baseURL: URL { AppConfig.baseURL }
 }
 
 protocol APIRequestConvertible {

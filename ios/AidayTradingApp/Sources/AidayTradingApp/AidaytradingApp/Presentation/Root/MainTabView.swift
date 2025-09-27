@@ -2,7 +2,6 @@ import SwiftUI
 
 struct MainTabView: View {
     let context: UserSessionContext
-    private let reportingService: ReportingServiceProtocol
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var notificationController: NotificationController
 
@@ -15,22 +14,17 @@ struct MainTabView: View {
 
     @State private var selection: Tab = .home
 
-    init(context: UserSessionContext, reportingService: ReportingServiceProtocol = ReportingService()) {
-        self.context = context
-        self.reportingService = reportingService
-    }
-
     var body: some View {
         TabView(selection: $selection) {
-            HomeView(context: context, reportingService: reportingService)
+            HomeView()
                 .tabItem { Label("Home", systemImage: "chart.line.uptrend.xyaxis") }
                 .tag(Tab.home)
 
-            CalendarView(context: context, reportingService: reportingService)
+            CalendarView()
                 .tabItem { Label("Calendar", systemImage: "calendar") }
                 .tag(Tab.calendar)
 
-            TradesView(context: context, reportingService: reportingService)
+            TradesListView()
                 .tabItem { Label("Trades", systemImage: "list.bullet.rectangle") }
                 .tag(Tab.trades)
 
@@ -63,18 +57,4 @@ struct MainTabView: View {
             }
         }
     }
-}
-
-#Preview {
-    let profile = UserProfile(
-        id: UUID(),
-        username: "Admin",
-        email: "admin@example.com",
-        role: .admin,
-        approvalStatus: .approved
-    )
-    let tokens = AuthTokens(accessToken: "token", refreshToken: "refresh", accessTokenExpiry: .distantFuture)
-    return MainTabView(context: UserSessionContext(profile: profile, tokens: tokens))
-        .environmentObject(SessionStore(previewState: .authenticated(UserSessionContext(profile: profile, tokens: tokens))))
-        .environmentObject(NotificationController())
 }
