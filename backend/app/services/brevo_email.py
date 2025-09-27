@@ -16,6 +16,7 @@ from loguru import logger
 
 from app.core.config import get_settings
 from app.core.logging import mask_email
+from app.core.metrics import record_push_event
 
 
 class EmailSendError(RuntimeError):
@@ -152,14 +153,22 @@ class BrevoEmailService:
                 html_body,
             )
         except EmailSendError as exc:
-            log.bind(outcome="failure", reason=str(exc), recipient=mask_email(settings.admin_notification_email)).error(
-                "email_delivery_failed"
-            )
+            log.bind(
+                outcome="failure",
+                reason=str(exc),
+                recipient=mask_email(settings.admin_notification_email),
+            ).error("email_delivery_failed")
+            record_push_event("email", "failure")
         except Exception as exc:  # pragma: no cover - defensive logging
-            log.bind(outcome="failure", reason=str(exc), recipient=mask_email(settings.admin_notification_email)).exception(
-                "email_delivery_failed"
-            )
+            log.bind(
+                outcome="failure",
+                reason=str(exc),
+                recipient=mask_email(settings.admin_notification_email),
+            ).exception("email_delivery_failed")
+            record_push_event("email", "failure")
         else:
-            log.bind(outcome="success", recipient=mask_email(settings.admin_notification_email)).info(
-                "email_delivery_sent"
-            )
+            log.bind(
+                outcome="success",
+                recipient=mask_email(settings.admin_notification_email),
+            ).info("email_delivery_sent")
+            record_push_event("email", "success")

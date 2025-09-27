@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.admin import _ensure_additional_admin
+from app.core.security import hash_password
 from app.models.admin_action import AdminAction
 from app.models.user import User, UserRole, UserStatus
-from app.core.security import hash_password
 
 
 async def _create_user(
@@ -39,7 +43,10 @@ async def _login(client: AsyncClient, username: str, password: str) -> str:
         json={"username": username, "password": password},
     )
     assert response.status_code == 200
-    return response.json()["access_token"]
+    payload: Any = response.json()
+    assert isinstance(payload, dict)
+    token = cast(str, payload["access_token"])
+    return token
 
 
 @pytest.mark.asyncio
@@ -68,6 +75,21 @@ async def test_admin_endpoints_require_admin(client: AsyncClient, session: Async
     )
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "forbidden"
+
+
+@pytest.mark.asyncio
+async def test_last_admin_rule_blocks_removal(session: AsyncSession) -> None:
+    admin = await _create_user(
+        session,
+        username="solo_admin",
+        email="solo-admin@example.com",
+        password="StrongPass1",
+        role=UserRole.ADMIN,
+        status=UserStatus.ACTIVE,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await _ensure_additional_admin(session, admin.id)
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -243,8 +265,10 @@ async def test_change_role_promote_and_demote(client: AsyncClient, session: Asyn
     assert demote.json()["new_role"] == "viewer"
 
     await session.refresh(target)
-    assert target.role == UserRole.VIEWER
-    assert target.token_version == 2
+    refreshed_target = await session.get(User, target.id)
+    assert refreshed_target is not None
+    assert refreshed_target.role == UserRole.VIEWER
+    assert refreshed_target.token_version == 2
 
     audit_entries = (
         await session.execute(

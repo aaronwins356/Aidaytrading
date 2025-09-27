@@ -1,4 +1,5 @@
 """Authentication endpoints."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -6,11 +7,14 @@ import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from loguru import logger
 from sqlalchemy import or_, select
 
 from app.core import jwt
 from app.core.dependencies import DBSession
 from app.core.logging import mask_email, record_validation_error
+from app.core.metrics import record_auth_login
+from app.core.rate_limiter import login_rate_limiter
 from app.core.security import (
     PasswordValidationError,
     hash_password,
@@ -30,12 +34,14 @@ def get_email_service() -> BrevoEmailService:
     return _email_service
 
 
-@router.post("/signup", response_model=auth_schema.SignupResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/signup", response_model=auth_schema.SignupResponse, status_code=status.HTTP_201_CREATED
+)
 async def signup(
     payload: auth_schema.SignupRequest,
     request: Request,
     session: DBSession,
-    email_service: Annotated[BrevoEmailService, Depends(get_email_service)]
+    email_service: Annotated[BrevoEmailService, Depends(get_email_service)],
 ) -> auth_schema.SignupResponse:
     """Register a new user account with pending status."""
 
@@ -44,7 +50,12 @@ async def signup(
         record_validation_error(request, "invalid_username", {"username": payload.username})
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": {"code": "invalid_username", "message": "Username must contain only letters, numbers, or underscores."}},
+            detail={
+                "error": {
+                    "code": "invalid_username",
+                    "message": "Username must contain only letters, numbers, or underscores.",
+                }
+            },
         )
 
     try:
@@ -64,13 +75,17 @@ async def signup(
             detail={"error": {"code": "invalid_email", "message": "Email address is invalid."}},
         ) from exc
 
-    stmt = select(User).where(or_(User.username == username, User.email_canonical == email_normalized))
+    stmt = select(User).where(
+        or_(User.username == username, User.email_canonical == email_normalized)
+    )
     existing = await session.execute(stmt)
     if existing.scalar_one_or_none():
         record_validation_error(request, "duplicate_user", {"username": username})
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": {"code": "user_exists", "message": "Username or email already registered."}},
+            detail={
+                "error": {"code": "user_exists", "message": "Username or email already registered."}
+            },
         )
 
     user = User(
@@ -89,37 +104,99 @@ async def signup(
         user_id=user.id, username=user.username, email=user.email
     )
 
-    return auth_schema.SignupResponse(message="Signup received. Await approval.", status=user.status.value)
+    logger.bind(event="auth.signup", user_id=user.id, username=user.username).info(
+        "user_signup_pending"
+    )
+
+    return auth_schema.SignupResponse(
+        message="Signup received. Await approval.", status=user.status.value
+    )
 
 
 @router.post("/login", response_model=auth_schema.TokenPairResponse)
-async def login(payload: auth_schema.LoginRequest, session: DBSession) -> auth_schema.TokenPairResponse:
+async def login(
+    payload: auth_schema.LoginRequest,
+    request: Request,
+    session: DBSession,
+) -> auth_schema.TokenPairResponse:
     """Authenticate a user and return an access/refresh token pair."""
 
     username = payload.username.strip()
+    client_host = request.client.host if request.client else "unknown"
+    rate_key = f"{username.lower()}:{client_host}"
+    rate_check = await login_rate_limiter.consume(rate_key)
+    if not rate_check.allowed:
+        retry_after = int(rate_check.retry_after or 0)
+        record_auth_login("rate_limited")
+        logger.bind(
+            event="auth.login", username=username, ip=client_host, outcome="rate_limited"
+        ).warning("login_rate_limited")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": {
+                    "code": "rate_limited",
+                    "message": "Too many login attempts. Please retry later.",
+                }
+            },
+            headers={"Retry-After": str(max(retry_after, 1))},
+        )
+
     stmt = select(User).where(User.username == username)
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
     if not user or not verify_password(payload.password, user.password_hash):
+        record_auth_login("failure")
+        logger.bind(
+            event="auth.login", username=username, ip=client_host, outcome="failure"
+        ).warning("login_failed")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"code": "invalid_credentials", "message": "Invalid credentials or inactive account."}},
+            detail={
+                "error": {
+                    "code": "invalid_credentials",
+                    "message": "Invalid credentials or inactive account.",
+                }
+            },
         )
 
     if user.status != UserStatus.ACTIVE:
+        record_auth_login("failure")
+        logger.bind(
+            event="auth.login", username=username, user_id=user.id, outcome="inactive"
+        ).warning("login_inactive_user")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"code": "inactive_account", "message": "Invalid credentials or inactive account."}},
+            detail={
+                "error": {
+                    "code": "inactive_account",
+                    "message": "Invalid credentials or inactive account.",
+                }
+            },
         )
 
     access = jwt.create_access_token(
-        str(user.id), role=user.role.value, status=user.status.value, token_version=user.token_version
+        str(user.id),
+        role=user.role.value,
+        status=user.status.value,
+        token_version=user.token_version,
     )
     refresh = jwt.create_refresh_token(
-        str(user.id), role=user.role.value, status=user.status.value, token_version=user.token_version
+        str(user.id),
+        role=user.role.value,
+        status=user.status.value,
+        token_version=user.token_version,
     )
 
-    return auth_schema.TokenPairResponse(access_token=access["token"], refresh_token=refresh["token"])
+    record_auth_login("success")
+    request.state.user_id = user.id
+    logger.bind(event="auth.login", user_id=user.id, username=username, outcome="success").info(
+        "login_success"
+    )
+
+    return auth_schema.TokenPairResponse(
+        access_token=access["token"], refresh_token=refresh["token"]
+    )
 
 
 def _extract_refresh_token(request: Request, payload: auth_schema.RefreshRequest) -> str:
@@ -176,7 +253,12 @@ async def refresh_token(
     if not user or user.status != UserStatus.ACTIVE:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"code": "inactive_account", "message": "Invalid credentials or inactive account."}},
+            detail={
+                "error": {
+                    "code": "inactive_account",
+                    "message": "Invalid credentials or inactive account.",
+                }
+            },
         )
 
     token_version = decoded.get("token_version")

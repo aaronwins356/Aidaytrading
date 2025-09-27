@@ -92,6 +92,7 @@ async def _resolve_user(
         )
 
     request.state.user = user
+    request.state.user_id = user.id
     return user
 
 

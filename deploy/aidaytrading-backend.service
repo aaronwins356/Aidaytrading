@@ -1,0 +1,22 @@
+[Unit]
+Description=Aidaytrading FastAPI backend
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/aidaytrading/backend
+Environment="ENV=prod"
+EnvironmentFile=/opt/aidaytrading/backend/.env
+ExecStart=/opt/aidaytrading/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Journal logging keeps JSON structure intact; forward to Loki/CloudWatch if desired
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

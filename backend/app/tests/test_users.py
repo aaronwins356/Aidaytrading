@@ -8,7 +8,12 @@ from app.core.security import hash_password
 from app.models.user import User, UserRole, UserStatus
 
 
-async def _create_active_user(session: AsyncSession, username: str, email: str, password: str) -> User:
+async def _create_active_user(
+    session: AsyncSession,
+    username: str,
+    email: str,
+    password: str,
+) -> User:
     user = User(
         username=username,
         email=email,
