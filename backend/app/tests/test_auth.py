@@ -5,6 +5,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import jwt
 from app.core.security import hash_password
 from app.models.user import User, UserRole, UserStatus
 
@@ -48,7 +49,7 @@ async def test_signup_duplicate_email(client: AsyncClient) -> None:
     )
     response = await client.post(
         "/api/v1/signup",
-        json={"username": "emailuser2", "email": "dupemail@example.com", "password": "StrongPass1"},
+        json={"username": "emailuser2", "email": "DUPEMAIL@example.com", "password": "StrongPass1"},
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "user_exists"
@@ -84,6 +85,7 @@ async def _create_user(
     user = User(
         username=username,
         email=email,
+        email_canonical=email.lower(),
         password_hash=hash_password(password),
         role=UserRole.VIEWER,
         status=status,
@@ -198,3 +200,51 @@ async def test_logout_blacklists_tokens(client: AsyncClient, session: AsyncSessi
     )
     assert protected.status_code == 401
     assert protected.json()["error"]["code"] == "token_revoked"
+
+
+@pytest.mark.asyncio
+async def test_refresh_revoked_after_token_version_bump(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    user = await _create_user(
+        session,
+        username="versioned",
+        email="versioned@example.com",
+        password="StrongPass1",
+        status=UserStatus.ACTIVE,
+    )
+    login = await client.post(
+        "/api/v1/login",
+        json={"username": "versioned", "password": "StrongPass1"},
+    )
+    refresh_token = login.json()["refresh_token"]
+
+    user.token_version += 1
+    await session.commit()
+
+    response = await client.post("/api/v1/refresh", json={"refresh_token": refresh_token})
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "token_revoked"
+
+
+@pytest.mark.asyncio
+async def test_pending_user_access_denied(client: AsyncClient, session: AsyncSession) -> None:
+    user = await _create_user(
+        session,
+        username="pendingtoken",
+        email="pendingtoken@example.com",
+        password="StrongPass1",
+        status=UserStatus.PENDING,
+    )
+    token_details = jwt.create_access_token(
+        str(user.id),
+        role=user.role.value,
+        status=user.status.value,
+        token_version=user.token_version,
+    )
+    response = await client.get(
+        "/api/v1/me",
+        headers={"Authorization": f"Bearer {token_details['token']}"},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "inactive_user"

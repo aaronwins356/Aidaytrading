@@ -18,6 +18,12 @@ os.environ.setdefault("JWT_ALGORITHM", "HS256")
 os.environ.setdefault("ACCESS_TOKEN_EXPIRES_MIN", "15")
 os.environ.setdefault("REFRESH_TOKEN_EXPIRES_DAYS", "7")
 os.environ.setdefault("ENV", "local")
+os.environ.setdefault("BREVO_API_KEY", "test-brevo-key")
+os.environ.setdefault("BREVO_SMTP_SERVER", "smtp.test.local")
+os.environ.setdefault("BREVO_PORT", "587")
+os.environ.setdefault("BREVO_SENDER_EMAIL", "alerts@example.com")
+os.environ.setdefault("BREVO_SENDER_NAME", "Aidaytrading Alerts")
+os.environ.setdefault("ADMIN_NOTIFICATION_EMAIL", "admin@example.com")
 
 from app.core.database import get_session_factory  # noqa: E402
 from app.main import app  # noqa: E402
@@ -53,3 +59,15 @@ async def session() -> AsyncIterator[AsyncSession]:
     session_factory = get_session_factory()
     async with session_factory() as session:
         yield session
+
+
+@pytest.fixture(autouse=True)
+def stub_email_notifications(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop(*_: object, **__: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.api.v1.auth._email_service.notify_admin_of_signup",
+        _noop,
+        raising=False,
+    )

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ subject }}</title>
+    <style>
+      body {
+        background-color: #f5f7fb;
+        font-family: "Inter", "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        margin: 0;
+        padding: 32px 0;
+        color: #1a1f36;
+      }
+      .container {
+        max-width: 520px;
+        margin: 0 auto;
+        background: #ffffff;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 4px 16px rgba(23, 43, 77, 0.08);
+      }
+      .header {
+        background: linear-gradient(135deg, #0b5fff, #1f8efa);
+        color: #ffffff;
+        padding: 24px 32px;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+      .content {
+        padding: 24px 32px;
+        line-height: 1.6;
+      }
+      .footer {
+        padding: 16px 32px 24px;
+        font-size: 12px;
+        color: #6f7a94;
+        background: #f8fafc;
+        text-align: center;
+      }
+      .badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 999px;
+        background-color: #e0ecff;
+        color: #1f4fe0;
+        font-size: 12px;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        font-weight: 600;
+      }
+      .button {
+        display: inline-block;
+        padding: 10px 18px;
+        border-radius: 8px;
+        background: #1f4fe0;
+        color: #ffffff !important;
+        text-decoration: none;
+        font-weight: 600;
+        margin-top: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">{{ brand }}</div>
+      <div class="content">
+        {% block content %}{% endblock %}
+      </div>
+      <div class="footer">
+        This notification was generated automatically by {{ brand }}.<br />
+        Need help? Reply to this email or contact support.
+      </div>
+    </div>
+  </body>
+</html>

@@ -27,11 +27,14 @@ class User(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_users_username", "username", unique=True),
         Index("ix_users_email", "email", unique=True),
+        Index("ix_users_email_canonical", "email_canonical", unique=True),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=False)
     username: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
+    email_canonical: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False, default=UserRole.VIEWER)
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), nullable=False, default=UserStatus.PENDING)
+    token_version: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
