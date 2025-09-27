@@ -11,8 +11,8 @@ enum RoleManager {
 
     static func accessibleTabs(for profile: UserProfile) -> [MainTabView.Tab] {
         if isAdmin(profile) {
-            return [.home, .calendar, .trades, .admin]
+            return [.home, .calendar, .trades, .notifications, .admin]
         }
-        return [.home, .calendar, .trades]
+        return [.home, .calendar, .trades, .notifications]
     }
 }

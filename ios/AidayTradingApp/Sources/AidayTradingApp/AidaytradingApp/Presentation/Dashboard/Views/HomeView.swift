@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HomeView: View {
     @StateObject private var viewModel: HomeViewModel
+    @EnvironmentObject private var realtimeClient: TradingWebSocketClient
 
     init(viewModel: HomeViewModel = HomeViewModel()) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -27,10 +28,7 @@ struct HomeView: View {
                 await viewModel.loadInitial()
             }
             .onAppear {
-                viewModel.startPolling()
-            }
-            .onDisappear {
-                viewModel.stopPolling()
+                viewModel.attachRealtime(realtimeClient)
             }
             .overlay(alignment: .top) {
                 if viewModel.isStale {

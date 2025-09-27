@@ -31,5 +31,6 @@ struct RootView: View {
 #Preview {
     RootView()
         .environmentObject(SessionStore(previewState: .loggedOut))
-        .environmentObject(NotificationController())
+        .environmentObject(NotificationManager())
+        .environmentObject(TradingWebSocketClient())
 }

@@ -1,4 +1,6 @@
+import Combine
 import Foundation
+import SwiftUI
 
 @MainActor
 final class HomeViewModel: ObservableObject {
@@ -11,15 +13,12 @@ final class HomeViewModel: ObservableObject {
     @Published var isStale = false
 
     private let repository: DashboardRepository
-    private var pollingTask: Task<Void, Never>?
+    private var cancellables = Set<AnyCancellable>()
+    private weak var realtimeClient: TradingWebSocketClientProtocol?
 
     init(repository: DashboardRepository = DashboardRepositoryImpl()) {
         self.repository = repository
         bootstrapFromCache()
-    }
-
-    deinit {
-        pollingTask?.cancel()
     }
 
     func loadInitial() async {
@@ -42,20 +41,32 @@ final class HomeViewModel: ObservableObject {
         isLoading = false
     }
 
-    func startPolling() {
-        guard pollingTask == nil else { return }
-        pollingTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(AppConfig.pollingInterval * 1_000_000_000))
-                await self.refreshSilently()
-            }
-        }
-    }
+    func attachRealtime(_ client: TradingWebSocketClientProtocol) {
+        guard realtimeClient === nil else { return }
+        realtimeClient = client
 
-    func stopPolling() {
-        pollingTask?.cancel()
-        pollingTask = nil
+        client.equityPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] point in
+                guard let self else { return }
+                if let last = self.equity.last, last.timestamp >= point.timestamp { return }
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    self.equity.append(point)
+                }
+                self.lastUpdated = point.timestamp
+                self.isStale = false
+            }
+            .store(in: &cancellables)
+
+        client.statusPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] status in
+                guard let self else { return }
+                self.status = status
+                self.lastUpdated = Date()
+                self.isStale = false
+            }
+            .store(in: &cancellables)
     }
 
     func equityDelta() -> (amount: Decimal, percent: Decimal)? {
